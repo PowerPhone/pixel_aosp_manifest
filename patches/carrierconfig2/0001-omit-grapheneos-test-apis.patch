@@ -1,0 +1,40 @@
+Subject: [PATCH] omit test components which require GrapheneOS APIs
+
+License: MIT (GrapheneOS/CarrierConfig2; see
+LICENSES/carrierconfig2-MIT.txt)
+
+The CarrierConfig2 core app builds against AOSP. Its two developer-only test
+classes import GrapheneOS android.ext/GmsCompat APIs and are not needed for
+carrier configuration at runtime.
+
+diff --git a/Android.bp b/Android.bp
+--- a/Android.bp
++++ b/Android.bp
+@@ -6,6 +6,11 @@ android_app {
+         "src/**/*.proto",
+     ],
+ 
++    exclude_srcs: [
++        "src/app/grapheneos/carrierconfig2/TestActivity.java",
++        "src/app/grapheneos/carrierconfig2/loader/CmpTest.java",
++    ],
++
+     privileged: true,
+     platform_apis: true,
+     system_ext_specific: true,
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -33,12 +33,5 @@
+             android:authorities="com.google.android.carrier.vendorprovider"
+             android:exported="true" />
+ 
+-        <!-- started only through adb, which holds the privileged BIND_CARRIER_SERVICES perm-->
+-        <activity
+-            android:name=".TestActivity"
+-            android:permission="android.permission.BIND_CARRIER_SERVICES"
+-            android:theme="@style/Theme.NoEdgeToEdge"
+-            android:exported="true" />
+-
+     </application>
+ </manifest>

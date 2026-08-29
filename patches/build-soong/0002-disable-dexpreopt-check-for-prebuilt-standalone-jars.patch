@@ -1,0 +1,29 @@
+From 1f8a2eb90fd78ddefc98d57a968ea009096406b3 Mon Sep 17 00:00:00 2001
+From: Dmitry Muhomor <muhomor.dmitry@gmail.com>
+Date: Mon, 15 Jun 2026 12:40:22 +0000
+Subject: [PATCH] disable dexpreopt_check
+
+dexpreopt_check doesn't support prebuilt standalone system_server JARs which are used on 10th gen
+Pixels.
+
+Change-Id: I1de13e9af6618b80844cea1603db15e7c31379fb
+---
+ java/dexpreopt_check.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/java/dexpreopt_check.go b/java/dexpreopt_check.go
+index 8f93b033a2..8e3c93a8c2 100644
+--- a/java/dexpreopt_check.go
++++ b/java/dexpreopt_check.go
+@@ -84,7 +84,7 @@ func (m *dexpreoptSystemserverCheck) DepsMutator(ctx android.BottomUpMutatorCont
+ 
+ 	// The check should be skipped on unbundled builds because system server jars are not preopted on
+ 	// unbundled builds since the artifacts are installed into the system image, not the APEXes.
+-	if global.DisablePreopt || global.OnlyPreoptArtBootImage || len(targets) == 0 || ctx.Config().UnbundledBuild() {
++	if true || global.DisablePreopt || global.OnlyPreoptArtBootImage || len(targets) == 0 || ctx.Config().UnbundledBuild() {
+ 		return
+ 	}
+ 
+-- 
+2.53.0
+

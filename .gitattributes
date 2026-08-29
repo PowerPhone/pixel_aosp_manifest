@@ -1,0 +1,41 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.xml text eol=lf
+
+# Unified/email patches require a one-space context line and `-- ` signature.
+# Preserve their checksum-locked bytes without reporting patch-format syntax as
+# whitespace damage. Repo's resolved manifest similarly emits indentation-only
+# blank lines and is compared byte-for-byte by the source-lock verifier.
+*.patch text eol=lf -whitespace
+manifests/resolved.xml text eol=lf -whitespace
+
+*.7z binary
+*.aar binary
+*.apex binary
+*.apk binary
+*.bin binary
+*.cpio binary
+*.dex binary
+*.dtb binary
+*.dtbo binary
+*.elf binary
+*.fw binary
+*.img binary
+*.jar binary
+*.jks binary
+*.keystore binary
+*.ko binary
+*.mbn binary
+*.oat binary
+*.odex binary
+*.p12 binary
+*.pfx binary
+*.so binary
+*.tar binary
+*.tgz binary
+*.ucode binary
+*.vdex binary
+*.xz binary
+*.zip binary
+*.zst binary

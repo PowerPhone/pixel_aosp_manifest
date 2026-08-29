@@ -1,0 +1,54 @@
+From 45b02a3cdef4b7d48654e563a69d3fcc9f12c06a Mon Sep 17 00:00:00 2001
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Fri, 28 Aug 2026 16:20:00 -0400
+Subject: [PATCH] Merge vendor ramdisk roots before archiving
+
+mkbootfs sorts each input directory independently. Supplying the vendor
+ramdisk and recovery root as separate operands therefore places the entire
+vendor subtree before the recovery-root entries. Target-files packaging
+merges both roots first, so releasetools emits one globally sorted archive
+and reconstructs a different vendor_boot image.
+
+Copy both roots into a clean staging directory in their existing overlay
+order, with recovery entries taking precedence, then pass that single tree
+to mkbootfs. Track acp as an order-only tool prerequisite. The clean staging
+directory also prevents removed inputs from surviving incremental rebuilds.
+
+Test: staged cubs ramdisk cpio matches target-files reconstruction byte-for-byte
+License: Apache-2.0 (platform/build)
+---
+ core/Makefile | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/core/Makefile b/core/Makefile
+index 2395e49a93..e6fe62dbe2 100644
+--- a/core/Makefile
++++ b/core/Makefile
+@@ -1634,6 +1634,7 @@ INTERNAL_VENDOR_RAMDISK_FILES := $(filter $(TARGET_VENDOR_RAMDISK_OUT)/%, \
+     $(ALL_DEFAULT_INSTALLED_MODULES))
+ 
+ INTERNAL_VENDOR_RAMDISK_TARGET := $(call intermediates-dir-for,PACKAGING,vendor_boot)/vendor_ramdisk.cpio$(RAMDISK_EXT)
++INTERNAL_VENDOR_RAMDISK_STAGING_DIR := $(call intermediates-dir-for,PACKAGING,vendor_boot)/vendor_ramdisk_staging
+ vendor_ramdisk_intermediates :=$= $(call intermediates-dir-for,PACKAGING,vendor_ramdisk)
+ $(eval $(call write-partition-file-list,$(vendor_ramdisk_intermediates)/file_list.txt,$(TARGET_VENDOR_RAMDISK_OUT),$(INTERNAL_VENDOR_RAMDISK_FILES)))
+ 
+@@ -1646,8 +1647,15 @@ $(INTERNAL_VENDOR_RAMDISK_TARGET): PRIVATE_ADDITIONAL_DIR := $(TARGET_RECOVERY_R
+ endif
+ endif
+ 
+-$(INTERNAL_VENDOR_RAMDISK_TARGET): $(MKBOOTFS) $(INTERNAL_VENDOR_RAMDISK_FILES) | $(COMPRESSION_COMMAND_DEPS)
+-	$(MKBOOTFS) -d $(TARGET_OUT) $(TARGET_VENDOR_RAMDISK_OUT) $(PRIVATE_ADDITIONAL_DIR) | $(COMPRESSION_COMMAND) > $@
++$(INTERNAL_VENDOR_RAMDISK_TARGET): PRIVATE_STAGING_DIR := $(INTERNAL_VENDOR_RAMDISK_STAGING_DIR)
++$(INTERNAL_VENDOR_RAMDISK_TARGET): $(MKBOOTFS) $(INTERNAL_VENDOR_RAMDISK_FILES) | $(COMPRESSION_COMMAND_DEPS) $(ACP)
++	$(hide) rm -rf $(PRIVATE_STAGING_DIR)
++	$(hide) mkdir -p $(PRIVATE_STAGING_DIR)
++	$(hide) $(ACP) -rd $(TARGET_VENDOR_RAMDISK_OUT)/. $(PRIVATE_STAGING_DIR)/
++	$(hide) if [ -n "$(PRIVATE_ADDITIONAL_DIR)" ]; then \
++	    $(ACP) -rd $(PRIVATE_ADDITIONAL_DIR)/. $(PRIVATE_STAGING_DIR)/; \
++	fi
++	$(MKBOOTFS) -d $(TARGET_OUT) $(PRIVATE_STAGING_DIR) | $(COMPRESSION_COMMAND) > $@
+ 
+ INSTALLED_VENDOR_RAMDISK_TARGET := $(PRODUCT_OUT)/vendor_ramdisk.img
+ $(INSTALLED_VENDOR_RAMDISK_TARGET): $(INTERNAL_VENDOR_RAMDISK_TARGET)
+-- 
+2.53.0

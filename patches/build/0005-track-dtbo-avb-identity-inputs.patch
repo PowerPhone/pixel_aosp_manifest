@@ -1,0 +1,64 @@
+From 209abf37c6c75588e44b668d7bf9170be6b6681e Mon Sep 17 00:00:00 2001
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Fri, 28 Aug 2026 12:05:00 -0400
+Subject: [PATCH] Track DTBO AVB identity inputs
+
+The DTBO signing recipes and releasetools metadata read the product
+fingerprint and, when deterministic salt is enabled, the build-number and
+build-date files. Their Make targets do not declare those files, so an
+incremental build can retain a stale DTBO footer or misc_info entry after an
+identity input changes.
+
+Add the exact files as normal prerequisites of both AVB DTBO image variants
+and the DTBO metadata producer. Keep the salt inputs conditional on the release
+flag, and leave products without an AVB prebuilt DTBO unaffected.
+
+This is a project-authored incremental-correctness fix for android-17.0.0_r1.
+License: Apache-2.0 (platform/build)
+---
+ core/Makefile | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/core/Makefile b/core/Makefile
+index 1d841fd910..2395e49a93 100644
+--- a/core/Makefile
++++ b/core/Makefile
+@@ -1051,7 +1051,9 @@ ifdef BOARD_PREBUILT_DTBOIMAGE
+ INSTALLED_DTBOIMAGE_TARGET := $(PRODUCT_OUT)/dtbo.img
+ 
+ ifeq ($(BOARD_AVB_ENABLE),true)
+-$(INSTALLED_DTBOIMAGE_TARGET): $(BOARD_PREBUILT_DTBOIMAGE) $(AVBTOOL) $(BOARD_AVB_DTBO_KEY_PATH)
++$(INSTALLED_DTBOIMAGE_TARGET): $(BOARD_PREBUILT_DTBOIMAGE) $(AVBTOOL) $(BOARD_AVB_DTBO_KEY_PATH) \
++    $(BUILD_FINGERPRINT_FILE) \
++    $(if $(RELEASE_DTBO_DETERMINISTIC_AVB_SALT),$(BUILD_NUMBER_FILE) $(BUILD_DATETIME_FILE))
+ 	cp $(BOARD_PREBUILT_DTBOIMAGE) $@
+ 	chmod +w $@
+ 	$(AVBTOOL) add_hash_footer \
+@@ -1177,7 +1179,9 @@ ifdef BOARD_PREBUILT_DTBOIMAGE_16KB
+ INSTALLED_DTBOIMAGE_16KB_TARGET := $(PRODUCT_OUT)/dtbo_16k.img
+ 
+ ifeq ($(BOARD_AVB_ENABLE),true)
+-$(INSTALLED_DTBOIMAGE_16KB_TARGET): $(BOARD_PREBUILT_DTBOIMAGE_16KB) $(AVBTOOL) $(BOARD_AVB_DTBO_KEY_PATH)
++$(INSTALLED_DTBOIMAGE_16KB_TARGET): $(BOARD_PREBUILT_DTBOIMAGE_16KB) $(AVBTOOL) $(BOARD_AVB_DTBO_KEY_PATH) \
++    $(BUILD_FINGERPRINT_FILE) \
++    $(if $(RELEASE_DTBO_DETERMINISTIC_AVB_SALT),$(BUILD_NUMBER_FILE) $(BUILD_DATETIME_FILE))
+ 	cp $(BOARD_PREBUILT_DTBOIMAGE_16KB) $@
+ 	chmod +w $@
+ 	$(AVBTOOL) add_hash_footer \
+@@ -6068,6 +6072,13 @@ endif
+ 
+ INSTALLED_MISC_INFO_TARGET := $(PRODUCT_OUT)/misc_info.txt
+ 
++ifdef BOARD_PREBUILT_DTBOIMAGE
++ifeq ($(BOARD_AVB_ENABLE),true)
++$(INSTALLED_MISC_INFO_TARGET): $(BUILD_FINGERPRINT_FILE) \
++    $(if $(RELEASE_DTBO_DETERMINISTIC_AVB_SALT),$(BUILD_NUMBER_FILE) $(BUILD_DATETIME_FILE))
++endif
++endif
++
+ ifeq ($(TARGET_RELEASETOOLS_EXTENSIONS),)
+ # default to common dir for device vendor
+ tool_extensions := $(TARGET_DEVICE_DIR)/../common
+-- 
+2.53.0
+

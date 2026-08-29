@@ -1,0 +1,238 @@
+From ba4d984e1a360d427307d669d2f789212130e9e8 Mon Sep 17 00:00:00 2001
+From: Dmitry Muhomor <muhomor.dmitry@gmail.com>
+Date: Thu, 13 Nov 2025 02:16:23 +0200
+Subject: [PATCH] add print-certs apksigner command for adevtool
+
+Note that it doesn't verify the APK, it's intended to be used with factory image APKs.
+
+Change-Id: I9e594c3babd3cb93d5ab36abc4b1faf32095d40d
+---
+ Android.bp                                    |  2 +-
+ .../com/android/apksigner/ApkSignerTool.java  | 58 +++++++++++++++++++
+ .../java/com/android/apksig/ApkVerifier.java  |  1 +
+ .../android/apksig/internal/apk/Flags.java    |  5 ++
+ .../internal/apk/v2/V2SchemeVerifier.java     |  7 ++-
+ .../internal/apk/v3/V3SchemeVerifier.java     | 13 ++++-
+ 6 files changed, 81 insertions(+), 5 deletions(-)
+ create mode 100644 src/main/java/com/android/apksig/internal/apk/Flags.java
+
+diff --git a/Android.bp b/Android.bp
+index df10768..b7e5bb1 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -97,7 +97,7 @@ java_defaults {
+     java_resource_dirs: ["src/apksigner/java"],
+     manifest: "src/apksigner/apksigner.mf",
+     static_libs: ["conscrypt-unbundled"],
+-    java_version: "1.8",
++    java_version: "21",
+     target: {
+         not_windows: {
+             jni_libs: ["libconscrypt_openjdk_jni"],
+diff --git a/src/apksigner/java/com/android/apksigner/ApkSignerTool.java b/src/apksigner/java/com/android/apksigner/ApkSignerTool.java
+index 9c71841..a776aca 100644
+--- a/src/apksigner/java/com/android/apksigner/ApkSignerTool.java
++++ b/src/apksigner/java/com/android/apksigner/ApkSignerTool.java
+@@ -24,6 +24,7 @@ import com.android.apksig.SigningCertificateLineage;
+ import com.android.apksig.SigningCertificateLineage.SignerCapabilities;
+ import com.android.apksig.apk.ApkFormatException;
+ import com.android.apksig.apk.MinSdkVersionException;
++import com.android.apksig.internal.apk.Flags;
+ import com.android.apksig.internal.apk.v3.V3SchemeConstants;
+ import com.android.apksig.util.DataSource;
+ import com.android.apksig.util.DataSources;
+@@ -53,6 +54,9 @@ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Base64;
+ import java.util.List;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
+ 
+ /**
+  * Command-line tool for signing APKs and for checking whether an APK's signature are expected to
+@@ -102,6 +106,9 @@ public class ApkSignerTool {
+             } else if ("lineage".equals(cmd)) {
+                 lineage(Arrays.copyOfRange(params, 1, params.length));
+                 return;
++            } else if ("print-certs".equals(cmd)) {
++                printCerts(Arrays.copyOfRange(params, 1, params.length));
++                return;
+             } else if ("help".equals(cmd)) {
+                 printUsage(HELP_PAGE_GENERAL);
+                 return;
+@@ -572,6 +579,57 @@ public class ApkSignerTool {
+         return signerConfig;
+     }
+ 
++    private static void printCerts(String[] params) throws Exception {
++        OptionsParser optionsParser = new OptionsParser(params);
++        String optionName;
++        Integer minSdkVersion_ = null;
++        Integer maxSdkVersion_ = null;
++        while ((optionName = optionsParser.nextOption()) != null) {
++            if ("min-sdk-version".equals(optionName)) {
++                minSdkVersion_ = optionsParser.getRequiredIntValue("Mininimum API Level");
++            } else if ("max-sdk-version".equals(optionName)) {
++                maxSdkVersion_ = optionsParser.getRequiredIntValue("Maximum API Level");
++            }
++        }
++        Integer minSdkVersion = minSdkVersion_;
++        Integer maxSdkVersion = maxSdkVersion_;
++        String[] apkPaths = new String(System.in.readAllBytes()).split("\n");
++        Flags.isPrintCertsMode = true;
++        final String[] certDigests;
++        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
++            Future<String>[] futures = new Future[apkPaths.length];
++            for (int i = 0; i < futures.length; ++i) {
++                String apkPath = apkPaths[i];
++                futures[i] = executor.submit(() -> {
++                    File inputApk = new File(apkPath);
++                    ApkVerifier.Builder apkVerifierBuilder = new ApkVerifier.Builder(inputApk);
++                    if (minSdkVersion != null) {
++                        apkVerifierBuilder.setMinCheckedPlatformVersion(minSdkVersion.intValue());
++                    }
++                    if (maxSdkVersion != null) {
++                        apkVerifierBuilder.setMaxCheckedPlatformVersion(maxSdkVersion.intValue());
++                    }
++                    ApkVerifier apkVerifier = apkVerifierBuilder.build();
++                    ApkVerifier.Result result = apkVerifier.verify();
++                    MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
++                    List<X509Certificate> certs = result.getSignerCertificates();
++                    if (certs.isEmpty()) {
++                        throw new IllegalArgumentException("no signer certs in " + apkPath);
++                    }
++                    if (certs.size() != 1) {
++                        throw new IllegalArgumentException("multiple signer certs in " + apkPath);
++                    }
++                    return HexEncoding.encode(sha256.digest(certs.get(0).getEncoded()));
++                });
++            }
++            certDigests = new String[futures.length];
++            for (int i = 0; i < futures.length; ++i) {
++                certDigests[i] = futures[i].get();
++            }
++        }
++        System.out.print(String.join("\n", certDigests));
++    }
++
+     private static void verify(String[] params) throws Exception {
+         if (params.length == 0) {
+             printUsage(HELP_PAGE_VERIFY);
+diff --git a/src/main/java/com/android/apksig/ApkVerifier.java b/src/main/java/com/android/apksig/ApkVerifier.java
+index 1df2cb4..df77a31 100644
+--- a/src/main/java/com/android/apksig/ApkVerifier.java
++++ b/src/main/java/com/android/apksig/ApkVerifier.java
+@@ -93,6 +93,7 @@ import java.util.Set;
+  * @see <a href="https://source.android.com/security/apksigning/index.html">Application Signing</a>
+  */
+ public class ApkVerifier {
++    public boolean noVerify;
+ 
+     private static final Set<Issue> LINEAGE_RELATED_ISSUES = new HashSet<>(Arrays.asList(
+         Issue.V3_SIG_MALFORMED_LINEAGE, Issue.V3_INCONSISTENT_LINEAGES,
+diff --git a/src/main/java/com/android/apksig/internal/apk/Flags.java b/src/main/java/com/android/apksig/internal/apk/Flags.java
+new file mode 100644
+index 0000000..ed1a8ff
+--- /dev/null
++++ b/src/main/java/com/android/apksig/internal/apk/Flags.java
+@@ -0,0 +1,5 @@
++package com.android.apksig.internal.apk;
++
++public class Flags {
++    public static boolean isPrintCertsMode;
++}
+diff --git a/src/main/java/com/android/apksig/internal/apk/v2/V2SchemeVerifier.java b/src/main/java/com/android/apksig/internal/apk/v2/V2SchemeVerifier.java
+index 4d6e3e1..b472d23 100644
+--- a/src/main/java/com/android/apksig/internal/apk/v2/V2SchemeVerifier.java
++++ b/src/main/java/com/android/apksig/internal/apk/v2/V2SchemeVerifier.java
+@@ -23,6 +23,7 @@ import com.android.apksig.apk.ApkFormatException;
+ import com.android.apksig.apk.ApkUtils;
+ import com.android.apksig.internal.apk.ApkSigningBlockUtils;
+ import com.android.apksig.internal.apk.ContentDigestAlgorithm;
++import com.android.apksig.internal.apk.Flags;
+ import com.android.apksig.internal.apk.SignatureAlgorithm;
+ import com.android.apksig.internal.apk.SignatureInfo;
+ import com.android.apksig.internal.util.ByteBufferUtils;
+@@ -48,6 +49,7 @@ import java.security.spec.AlgorithmParameterSpec;
+ import java.security.spec.X509EncodedKeySpec;
+ import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.Collections;
+ import java.util.HashSet;
+ import java.util.List;
+ import java.util.Map;
+@@ -291,7 +293,7 @@ public abstract class V2SchemeVerifier {
+         // Verify signatures over signed-data block using the public key
+         List<ApkSigningBlockUtils.SupportedSignature> signaturesToVerify = null;
+         try {
+-            signaturesToVerify =
++            signaturesToVerify = Flags.isPrintCertsMode ? Collections.emptyList() :
+                     ApkSigningBlockUtils.getSignaturesToVerify(
+                             supportedSignatures, minSdkVersion, maxSdkVersion);
+         } catch (ApkSigningBlockUtils.NoSupportedSignaturesException e) {
+@@ -370,6 +372,9 @@ public abstract class V2SchemeVerifier {
+             result.addError(Issue.V2_SIG_NO_CERTIFICATES);
+             return;
+         }
++        if (Flags.isPrintCertsMode) {
++            return;
++        }
+         X509Certificate mainCertificate = result.certs.get(0);
+         byte[] certificatePublicKeyBytes;
+         try {
+diff --git a/src/main/java/com/android/apksig/internal/apk/v3/V3SchemeVerifier.java b/src/main/java/com/android/apksig/internal/apk/v3/V3SchemeVerifier.java
+index 9191b0a..72d6f6b 100644
+--- a/src/main/java/com/android/apksig/internal/apk/v3/V3SchemeVerifier.java
++++ b/src/main/java/com/android/apksig/internal/apk/v3/V3SchemeVerifier.java
+@@ -26,6 +26,7 @@ import com.android.apksig.apk.ApkUtils;
+ import com.android.apksig.internal.apk.ApkSigningBlockUtils;
+ import com.android.apksig.internal.apk.ApkSigningBlockUtils.SignatureNotFoundException;
+ import com.android.apksig.internal.apk.ContentDigestAlgorithm;
++import com.android.apksig.internal.apk.Flags;
+ import com.android.apksig.internal.apk.SignatureAlgorithm;
+ import com.android.apksig.internal.apk.SignatureInfo;
+ import com.android.apksig.internal.util.ByteBufferUtils;
+@@ -52,6 +53,7 @@ import java.security.spec.AlgorithmParameterSpec;
+ import java.security.spec.X509EncodedKeySpec;
+ import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.Collections;
+ import java.util.HashSet;
+ import java.util.List;
+ import java.util.OptionalInt;
+@@ -188,8 +190,10 @@ public class V3SchemeVerifier {
+         if (mResult.containsErrors()) {
+             return mResult;
+         }
+-        ApkSigningBlockUtils.verifyIntegrity(mExecutor, beforeApkSigningBlock, centralDir, eocd,
+-                mContentDigestsToVerify, mResult);
++        if (!Flags.isPrintCertsMode) {
++            ApkSigningBlockUtils.verifyIntegrity(mExecutor, beforeApkSigningBlock, centralDir, eocd,
++                    mContentDigestsToVerify, mResult);
++        }
+ 
+         // make sure that the v3 signers cover the entire targeted sdk version ranges and that the
+         // longest SigningCertificateHistory, if present, corresponds to the newest platform
+@@ -418,7 +422,7 @@ public class V3SchemeVerifier {
+             if (signedDataTargetsDevRelease(signedData)) {
+                 effectiveMinSdkVersion++;
+             }
+-            signaturesToVerify =
++            signaturesToVerify = Flags.isPrintCertsMode ? Collections.emptyList() :
+                     ApkSigningBlockUtils.getSignaturesToVerify(
+                             supportedSignatures, effectiveMinSdkVersion, result.maxSdkVersion);
+         } catch (ApkSigningBlockUtils.NoSupportedSignaturesException e) {
+@@ -512,6 +516,9 @@ public class V3SchemeVerifier {
+             result.addError(Issue.V3_SIG_NO_CERTIFICATES);
+             return;
+         }
++        if (Flags.isPrintCertsMode) {
++            return;
++        }
+         X509Certificate mainCertificate = result.certs.get(0);
+         byte[] certificatePublicKeyBytes;
+         try {
+-- 
+2.53.0
+

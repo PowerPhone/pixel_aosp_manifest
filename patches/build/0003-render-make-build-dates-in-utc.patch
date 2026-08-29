@@ -1,0 +1,31 @@
+From 04da19e8aa94179acced1496293e1c35360cbe6e Mon Sep 17 00:00:00 2001
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Fri, 28 Aug 2026 12:30:00 -0400
+Subject: [PATCH] Render Make build dates in UTC
+
+Ninja intentionally filters TZ from its action environment. Prefix the legacy
+Make sysprop date command with the release's pinned UTC timezone so partition
+build properties do not depend on /etc/localtime.
+
+This is a project-authored reproducibility fix for android-17.0.0_r1.
+License: Apache-2.0 (platform/build)
+---
+ core/main.mk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/core/main.mk b/core/main.mk
+index 81bc8ce739..e43749cb49 100644
+--- a/core/main.mk
++++ b/core/main.mk
+@@ -48,7 +48,7 @@ $(KATI_obsolete_var FILE_NAME_TAG,https://android.googlesource.com/platform/buil
+ .KATI_RESTAT: $(BUILD_NUMBER_FILE)
+ .KATI_RESTAT: $(BUILD_HOSTNAME_FILE)
+ 
+-DATE_FROM_FILE := date -d @$(BUILD_DATETIME_FROM_FILE)
++DATE_FROM_FILE := TZ=UTC date -d @$(BUILD_DATETIME_FROM_FILE)
+ .KATI_READONLY := DATE_FROM_FILE
+ 
+ 
+-- 
+2.53.0
+

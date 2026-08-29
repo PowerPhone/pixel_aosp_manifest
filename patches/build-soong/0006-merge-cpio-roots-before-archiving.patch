@@ -1,0 +1,120 @@
+From e9f60cf18b018e49163226516bd9e4f8cc53056d Mon Sep 17 00:00:00 2001
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Fri, 28 Aug 2026 17:05:00 -0400
+Subject: [PATCH] filesystem: merge cpio roots before archiving
+
+mkbootfs sorts each input directory independently. Passing a filesystem root
+and include_files_of roots as separate operands therefore produces a
+different archive order than target-files packaging, which overlays the same
+roots into one directory before releasetools reconstructs the image.
+
+When included roots exist, copy the primary root and each included root into
+a clean staging directory in declaration order, then give mkbootfs that one
+merged tree. Keep the included partition images as normal implicit inputs so
+changes to every source staging tree rebuild the archive. Later roots retain
+the same overlay precedence used by target-files packaging.
+
+Add a focused two-root test that pins cleanup, built acp invocations, overlay
+order, the single merged-root mkbootfs invocation, and all implicit inputs.
+
+Test: go test ./filesystem -run TestCpioMergesIncludedFilesystemRoots
+License: Apache-2.0 (platform/build/soong)
+---
+ filesystem/filesystem.go      | 14 ++++++++----
+ filesystem/filesystem_test.go | 50 +++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 60 insertions(+), 4 deletions(-)
+
+diff --git a/filesystem/filesystem.go b/filesystem/filesystem.go
+index 757344fd82..a20347f93d 100644
+--- a/filesystem/filesystem.go
++++ b/filesystem/filesystem.go
+@@ -1745,16 +1745,22 @@ func (f *filesystem) buildCpioImage(
+ 	}
+ 
+ 	rootDirs, partitions := includeFilesRootDir(ctx)
++	if len(rootDirs) > 0 {
++		mergedRootDir := android.PathForModuleOut(ctx, "cpio_root").OutputPath
++		builder.Command().Textf("rm -rf %s && mkdir -p %s", mergedRootDir, mergedRootDir)
++		for _, sourceRootDir := range append(android.Paths{rootDir}, rootDirs...) {
++			builder.Command().
++				BuiltTool("acp").
++				Textf("-rd %s/. %s/", sourceRootDir, mergedRootDir)
++		}
++		rootDir = mergedRootDir
++	}
+ 
+ 	output := android.PathForModuleOut(ctx, f.installFileName())
+ 	cmd := builder.Command().
+ 		BuiltTool("mkbootfs").
+ 		Implicit(f.fileystemStagingDirTimestamp(ctx)).
+ 		Text(rootDir.String()) // input directory
+-
+-	for i := range len(rootDirs) {
+-		cmd.Text(rootDirs[i].String())
+-	}
+ 	cmd.Implicits(partitions)
+ 
+ 	if nodeList := f.properties.Dev_nodes_description_file; nodeList != nil {
+diff --git a/filesystem/filesystem_test.go b/filesystem/filesystem_test.go
+index b6196cd2cf..1291ee6777 100644
+--- a/filesystem/filesystem_test.go
++++ b/filesystem/filesystem_test.go
+@@ -1017,6 +1017,56 @@ func TestRamdiskPartitionSetsDevNodes(t *testing.T) {
+ 	)
+ }
+ 
++func TestCpioMergesIncludedFilesystemRoots(t *testing.T) {
++	t.Parallel()
++	result := fixture.RunTestWithBp(t, `
++		android_filesystem {
++			name: "cpio",
++			type: "cpio",
++			include_files_of: ["extra_one", "extra_two"],
++		}
++		android_filesystem {
++			name: "extra_one",
++		}
++		android_filesystem {
++			name: "extra_two",
++		}
++	`)
++
++	rule := result.ModuleForTests(t, "cpio", "android_common").Rule("build_cpio_image")
++	command := rule.RuleParams.Command
++	mergedRoot := "out/soong/.intermediates/cpio/android_common/cpio_root"
++	orderedFragments := []string{
++		"rm -rf " + mergedRoot + " && mkdir -p " + mergedRoot,
++		"out/host/linux-x86/bin/acp -rd out/soong/.intermediates/cpio/android_common/cpio/. " + mergedRoot + "/",
++		"out/host/linux-x86/bin/acp -rd out/soong/.intermediates/extra_one/android_common/extra_one/. " + mergedRoot + "/",
++		"out/host/linux-x86/bin/acp -rd out/soong/.intermediates/extra_two/android_common/extra_two/. " + mergedRoot + "/",
++		"out/host/linux-x86/bin/mkbootfs " + mergedRoot + " > out/soong/.intermediates/cpio/android_common/cpio.img",
++	}
++	previousIndex := -1
++	for _, fragment := range orderedFragments {
++		index := strings.Index(command, fragment)
++		if index == -1 {
++			t.Fatalf("missing %q in cpio command: %s", fragment, command)
++		}
++		if index <= previousIndex {
++			t.Fatalf("cpio roots are not merged in declaration order: %s", command)
++		}
++		previousIndex = index
++	}
++	if count := strings.Count(command, "out/host/linux-x86/bin/mkbootfs "); count != 1 {
++		t.Fatalf("expected exactly one mkbootfs invocation, found %d: %s", count, command)
++	}
++
++	for _, implicit := range []string{
++		"out/soong/.intermediates/cpio/android_common/staging_dir.timestamp",
++		"out/soong/.intermediates/extra_one/android_common/extra_one.img",
++		"out/soong/.intermediates/extra_two/android_common/extra_two.img",
++	} {
++		android.AssertStringListContains(t, "missing cpio input", rule.Implicits.Strings(), implicit)
++	}
++}
++
+ func TestFileSystemWithNativeBridgeDeps(t *testing.T) {
+ 	t.Parallel()
+ 	result := android.GroupFixturePreparers(
+-- 
+2.53.0

@@ -1,0 +1,36 @@
+From 255257eb3a8ccaef7787e462ee27da6cf9b37538 Mon Sep 17 00:00:00 2001
+From: inthewaves <inthewaves@pm.me>
+Date: Fri, 24 Apr 2026 21:49:33 -0700
+Subject: [PATCH] aapt2: add library element to brief-package-info
+
+---
+ tools/aapt2/BriefPackageInfo.proto | 1 +
+ tools/aapt2/cmd/Dump.cpp           | 4 ++++
+ 2 files changed, 5 insertions(+)
+
+diff --git a/tools/aapt2/BriefPackageInfo.proto b/tools/aapt2/BriefPackageInfo.proto
+index e12ce872c67f1..84c00820de530 100644
+--- a/tools/aapt2/BriefPackageInfo.proto
++++ b/tools/aapt2/BriefPackageInfo.proto
+@@ -15,4 +15,5 @@ message BriefPackageInfo {
+   repeated string content_provider_authority = 7;
+   repeated string uses_library = 8;
+   repeated string optional_uses_library = 9;
++  repeated string library = 10;
+ }
+diff --git a/tools/aapt2/cmd/Dump.cpp b/tools/aapt2/cmd/Dump.cpp
+index a8d23c0e39f1f..2f2d661e8b7b9 100644
+--- a/tools/aapt2/cmd/Dump.cpp
++++ b/tools/aapt2/cmd/Dump.cpp
+@@ -490,6 +490,10 @@ int DumpBriefPackageInfo::Action(const std::vector<std::string>& args) {
+           } else {
+             bpi.add_optional_uses_library(name->value);
+           }
++        } else if (app_child->name == "library") {
++          xml::Attribute* name = app_child->FindAttribute(xml::kSchemaAndroid, "name");
++          CHECK(!name->value.empty());
++          bpi.add_library(name->value);
+         }
+       }
+     }
+

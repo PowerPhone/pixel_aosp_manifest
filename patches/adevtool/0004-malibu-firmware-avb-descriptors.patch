@@ -1,0 +1,461 @@
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Fri, 28 Aug 2026 13:30:00 -0400
+Subject: [PATCH] malibu: restore stock firmware AVB descriptors
+
+Google's private Pixel support normally unpacks the bootloader FBPK and feeds
+24 A/B firmware hash descriptors into root vbmeta. Restore that topology for
+the extracted cubs module with copied-raw AVB carriers, the same deterministic
+build-number/date salt derivation in Make and Soong, and a strict,
+dependency-free FBPK v2 parser. The parser validates the format and extracts
+only one explicitly requested, unique, A/B-slotted partition.
+
+License: Apache-2.0 (new adapter files); MIT-derived adevtool context unchanged
+---
+ .../platform/malibu/BoardConfig-common.mk          |  31 ++++
+ .../google_devices/platform/malibu/fbpacktool.py   | 182 ++++++++++++++++++++
+ .../platform/malibu/tests/test_fbpacktool.py       | 138 +++++++++++++++
+ .../malibu/update_bootloader_radio_image.mk        |  62 +++++++
+ 4 files changed, 413 insertions(+)
+
+diff --git a/config/mk/google_devices/platform/malibu/BoardConfig-common.mk b/config/mk/google_devices/platform/malibu/BoardConfig-common.mk
+index f0c1f752f64b150da353af03b6889738f2aa8425..721d0804efacfeac34f1f62bf5e402b65e718d3a 100644
+--- a/config/mk/google_devices/platform/malibu/BoardConfig-common.mk
++++ b/config/mk/google_devices/platform/malibu/BoardConfig-common.mk
+@@ -4,6 +4,37 @@ BOARD_USES_SYSTEM_OTHER_ODEX :=
+ 
+ include build/make/target/board/BoardConfigPixelCommon.mk
+ 
++# The public AOSP tree no longer carries Google's Pixel bootloader packaging
++# rules. Keep the aggregate FBPK image as the Soong prebuilt source and expose
++# its A/B firmware members to both the Soong and legacy Make AVB graphs.
++BOOTLOADER_FILE_PATH := vendor/google_devices/$(TARGET_DEVICE)/firmware/bootloader.img
++AB_OTA_BOOTLOADER_PARTITIONS := \
++    abl \
++    bl31 \
++    cap \
++    cpm \
++    dbc \
++    dbl \
++    dram_init_0 \
++    dram_init_1 \
++    dram_init_10 \
++    dram_init_11 \
++    dram_init_2 \
++    dram_init_3 \
++    dram_init_4 \
++    dram_init_5 \
++    dram_init_6 \
++    dram_init_7 \
++    dram_init_8 \
++    dram_init_9 \
++    dram_phy \
++    gc \
++    gdmc \
++    gsa_bl1 \
++    gsa_fw \
++    tzsw
++UPDATE_BOOTLOADER_RADIO_IMAGE_MAKEFILE := vendor/adevtool/config/mk/google_devices/platform/malibu/update_bootloader_radio_image.mk
++
+ # Match the stock Pixel 11 AVB chain partition topology while using AOSP's
+ # public userdebug test key. Rollback locations are bootloader ABI.
+ BOARD_AVB_KEY_PATH := external/avb/test/data/testkey_rsa4096.pem
+diff --git a/config/mk/google_devices/platform/malibu/fbpacktool.py b/config/mk/google_devices/platform/malibu/fbpacktool.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..28f0be17b35c8c0487e3a090521876f9ea66868c
+--- /dev/null
++++ b/config/mk/google_devices/platform/malibu/fbpacktool.py
+@@ -0,0 +1,182 @@
++#!/usr/bin/env python3
++# Copyright 2026 The Android Open Source Project
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Strict, dependency-free extractor for Pixel FBPK v2 bootloader images."""
++
++import argparse
++import dataclasses
++import os
++from pathlib import Path
++import re
++import struct
++import zlib
++
++
++_HEADER = struct.Struct("<4sIII16s64sIIII")
++_ENTRY = struct.Struct("<I36s40sQQII")
++_MAGIC = b"FBPK"
++_VERSION = 2
++_PARTITION_DATA = 1
++_VALID_ENTRY_TYPES = frozenset((0, 1, 2))
++_PARTITION_NAME = re.compile(r"[a-z0-9][a-z0-9_]{0,35}\Z")
++
++
++class FbpackError(ValueError):
++  """Raised when an FBPK image does not satisfy the v2 contract."""
++
++
++@dataclasses.dataclass(frozen=True)
++class _PackEntry:
++  type: int
++  name: str
++  product: str
++  offset: int
++  size: int
++  slotted: int
++  crc32: int
++
++
++def _read_exact(stream, size, description):
++  data = stream.read(size)
++  if len(data) != size:
++    raise FbpackError(f"truncated {description}")
++  return data
++
++
++def _decode_c_string(raw, description):
++  nul = raw.find(b"\0")
++  if nul >= 0:
++    if any(raw[nul + 1:]):
++      raise FbpackError(f"non-zero padding in {description}")
++    raw = raw[:nul]
++  try:
++    return raw.decode("ascii")
++  except UnicodeDecodeError as error:
++    raise FbpackError(f"non-ASCII {description}") from error
++
++
++def _parse(stream):
++  file_size = os.fstat(stream.fileno()).st_size
++  header = _HEADER.unpack(_read_exact(stream, _HEADER.size, "FBPK header"))
++  (magic, version, header_size, entry_size, platform, pack_version,
++   _slot_type, data_align, total_entries, total_size) = header
++
++  if magic != _MAGIC:
++    raise FbpackError("invalid FBPK magic")
++  if version != _VERSION:
++    raise FbpackError(f"unsupported FBPK version {version}")
++  if header_size != _HEADER.size:
++    raise FbpackError(f"invalid FBPK header size {header_size}")
++  if entry_size != _ENTRY.size:
++    raise FbpackError(f"invalid FBPK entry size {entry_size}")
++  if total_size != file_size:
++    raise FbpackError(
++        f"FBPK total size {total_size} does not match file size {file_size}")
++  if data_align == 0 or data_align & (data_align - 1):
++    raise FbpackError(f"invalid FBPK data alignment {data_align}")
++  if total_entries == 0:
++    raise FbpackError("FBPK contains no entries")
++
++  _decode_c_string(platform, "platform")
++  _decode_c_string(pack_version, "pack version")
++  table_end = header_size + total_entries * entry_size
++  if table_end > total_size:
++    raise FbpackError("FBPK entry table exceeds file bounds")
++  data_start = (table_end + data_align - 1) & ~(data_align - 1)
++
++  entries = []
++  for index in range(total_entries):
++    fields = _ENTRY.unpack(_read_exact(stream, entry_size, f"entry {index}"))
++    entry_type, raw_name, raw_product, offset, size, slotted, crc32 = fields
++    if entry_type not in _VALID_ENTRY_TYPES:
++      raise FbpackError(f"entry {index} has invalid type {entry_type}")
++    name = _decode_c_string(raw_name, f"entry {index} name")
++    product = _decode_c_string(raw_product, f"entry {index} product")
++    if not name:
++      raise FbpackError(f"entry {index} has an empty name")
++    if slotted not in (0, 1):
++      raise FbpackError(f"entry {index} has invalid slotted value {slotted}")
++    if size == 0:
++      raise FbpackError(f"entry {index} is empty")
++    if offset < data_start or offset % data_align:
++      raise FbpackError(f"entry {index} has an invalid data offset")
++    if offset > total_size or size > total_size - offset:
++      raise FbpackError(f"entry {index} exceeds file bounds")
++    entries.append(
++        _PackEntry(entry_type, name, product, offset, size, slotted, crc32))
++
++  previous_end = data_start
++  for entry in sorted(entries, key=lambda value: (value.offset, value.size)):
++    if entry.offset < previous_end:
++      raise FbpackError(f"overlapping FBPK entry data at {entry.name}")
++    previous_end = entry.offset + entry.size
++  return entries
++
++
++def unpack(pack_path, out_dir, partition):
++  """Extract exactly one A/B partition from a validated FBPK v2 image."""
++  if not _PARTITION_NAME.fullmatch(partition):
++    raise FbpackError(f"invalid partition name {partition!r}")
++
++  with Path(pack_path).open("rb") as stream:
++    entries = _parse(stream)
++    matches = [entry for entry in entries if entry.name == partition]
++    if not matches:
++      raise FbpackError(f"partition {partition!r} is absent from FBPK")
++    if len(matches) != 1:
++      raise FbpackError(f"partition {partition!r} is duplicated in FBPK")
++    entry = matches[0]
++    if entry.type != _PARTITION_DATA:
++      raise FbpackError(f"entry {partition!r} is not partition data")
++    if entry.slotted != 1:
++      raise FbpackError(f"partition {partition!r} is not marked A/B slotted")
++
++    destination_dir = Path(out_dir)
++    destination_dir.mkdir(parents=True, exist_ok=True)
++    destination = destination_dir / f"{partition}.img"
++    stream.seek(entry.offset)
++    remaining = entry.size
++    checksum = 0
++    with destination.open("wb") as output:
++      while remaining:
++        chunk = _read_exact(stream, min(128 * 1024, remaining), partition)
++        output.write(chunk)
++        checksum = zlib.crc32(chunk, checksum)
++        remaining -= len(chunk)
++    if entry.crc32 and checksum & 0xFFFFFFFF != entry.crc32:
++      destination.unlink()
++      raise FbpackError(f"partition {partition!r} failed its FBPK CRC32")
++
++
++def _parse_args():
++  parser = argparse.ArgumentParser(
++      description="extract one partition from a Pixel FBPK v2 image")
++  subparsers = parser.add_subparsers(dest="command", required=True)
++  unpack_parser = subparsers.add_parser("unpack")
++  unpack_parser.add_argument("-o", "--out-dir", required=True)
++  unpack_parser.add_argument("pack")
++  unpack_parser.add_argument("partition")
++  return parser, parser.parse_args()
++
++
++def main():
++  parser, args = _parse_args()
++  try:
++    unpack(args.pack, args.out_dir, args.partition)
++  except (FbpackError, OSError) as error:
++    parser.error(str(error))
++
++
++if __name__ == "__main__":
++  main()
+diff --git a/config/mk/google_devices/platform/malibu/tests/test_fbpacktool.py b/config/mk/google_devices/platform/malibu/tests/test_fbpacktool.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..81af6dddd5b7388979f6c1ae2e6d693671048e31
+--- /dev/null
++++ b/config/mk/google_devices/platform/malibu/tests/test_fbpacktool.py
+@@ -0,0 +1,138 @@
++#!/usr/bin/env python3
++# Copyright 2026 The Android Open Source Project
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import importlib.util
++from pathlib import Path
++import struct
++import tempfile
++import unittest
++
++
++_TOOL_PATH = Path(__file__).resolve().parents[1] / "fbpacktool.py"
++_SPEC = importlib.util.spec_from_file_location("fbpacktool", _TOOL_PATH)
++fbpacktool = importlib.util.module_from_spec(_SPEC)
++_SPEC.loader.exec_module(fbpacktool)
++
++_HEADER = struct.Struct("<4sIII16s64sIIII")
++_ENTRY = struct.Struct("<I36s40sQQII")
++
++
++def _c_string(value, size):
++  encoded = value.encode("ascii")
++  return encoded + b"\0" * (size - len(encoded))
++
++
++def _make_pack(entries):
++  alignment = 512
++  table_end = _HEADER.size + len(entries) * _ENTRY.size
++  offset = (table_end + alignment - 1) & ~(alignment - 1)
++  packed_entries = []
++  data = bytearray(offset)
++  for entry in entries:
++    name, payload = entry[0], entry[1]
++    entry_type = entry[2] if len(entry) > 2 else 1
++    slotted = entry[3] if len(entry) > 3 else 1
++    packed_entries.append(
++        _ENTRY.pack(entry_type, _c_string(name, 36), _c_string("", 40),
++                    offset, len(payload), slotted, 0))
++    data.extend(payload)
++    offset += len(payload)
++    padding = (-offset) % alignment
++    if padding:
++      data.extend(b"\0" * padding)
++      offset += padding
++  if entries:
++    final_padding = (-len(entries[-1][1])) % alignment
++    if final_padding:
++      del data[-final_padding:]
++  total_size = len(data)
++  header = _HEADER.pack(b"FBPK", 2, _HEADER.size, _ENTRY.size,
++                        _c_string("mbu", 16), _c_string("test", 64), 0,
++                        alignment, len(entries), total_size)
++  data[:_HEADER.size] = header
++  for index, entry in enumerate(packed_entries):
++    start = _HEADER.size + index * _ENTRY.size
++    data[start:start + _ENTRY.size] = entry
++  return data
++
++
++class FbpacktoolTest(unittest.TestCase):
++
++  def _write(self, directory, data):
++    path = Path(directory) / "bootloader.img"
++    path.write_bytes(data)
++    return path
++
++  def _assert_rejected(self, data, message):
++    with tempfile.TemporaryDirectory() as directory:
++      path = self._write(directory, data)
++      with self.assertRaisesRegex(fbpacktool.FbpackError, message):
++        fbpacktool.unpack(path, Path(directory) / "out", "abl")
++
++  def test_extracts_exact_partition(self):
++    pack = _make_pack((("abl", b"abl payload"), ("bl31", b"bl31 payload")))
++    with tempfile.TemporaryDirectory() as directory:
++      path = self._write(directory, pack)
++      output = Path(directory) / "out"
++      fbpacktool.unpack(path, output, "abl")
++      self.assertEqual(b"abl payload", (output / "abl.img").read_bytes())
++      self.assertFalse((output / "bl31.img").exists())
++
++  def test_rejects_invalid_magic(self):
++    pack = _make_pack((("abl", b"payload"),))
++    pack[0:4] = b"NOPE"
++    self._assert_rejected(pack, "magic")
++
++  def test_rejects_invalid_version(self):
++    pack = _make_pack((("abl", b"payload"),))
++    struct.pack_into("<I", pack, 4, 3)
++    self._assert_rejected(pack, "version")
++
++  def test_rejects_header_and_entry_size_changes(self):
++    for field_offset, message in ((8, "header size"), (12, "entry size")):
++      with self.subTest(message=message):
++        pack = _make_pack((("abl", b"payload"),))
++        struct.pack_into("<I", pack, field_offset, 1)
++        self._assert_rejected(pack, message)
++
++  def test_rejects_out_of_bounds_entry(self):
++    pack = _make_pack((("abl", b"payload"),))
++    struct.pack_into("<Q", pack, _HEADER.size + 88, len(pack) + 1)
++    self._assert_rejected(pack, "bounds")
++
++  def test_rejects_unknown_entry_type(self):
++    pack = _make_pack((("abl", b"payload", 7),))
++    self._assert_rejected(pack, "invalid type")
++
++  def test_rejects_duplicate_requested_partition(self):
++    pack = _make_pack((("abl", b"first"), ("abl", b"second")))
++    self._assert_rejected(pack, "duplicated")
++
++  def test_rejects_non_partition_and_non_slotted_target(self):
++    for entry, message in ((("abl", b"payload", 2), "partition data"),
++                           (("abl", b"payload", 1, 0), "A/B slotted")):
++      with self.subTest(message=message):
++        self._assert_rejected(_make_pack((entry,)), message)
++
++  def test_rejects_unsafe_partition_name(self):
++    pack = _make_pack((("abl", b"payload"),))
++    with tempfile.TemporaryDirectory() as directory:
++      path = self._write(directory, pack)
++      with self.assertRaisesRegex(fbpacktool.FbpackError, "partition name"):
++        fbpacktool.unpack(path, directory, "../abl")
++
++
++if __name__ == "__main__":
++  unittest.main()
+diff --git a/config/mk/google_devices/platform/malibu/update_bootloader_radio_image.mk b/config/mk/google_devices/platform/malibu/update_bootloader_radio_image.mk
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d09fb3e4c08a4ea8fcbd430b4c24dc315ef96ec
+--- /dev/null
++++ b/config/mk/google_devices/platform/malibu/update_bootloader_radio_image.mk
+@@ -0,0 +1,62 @@
++# Copyright 2026 The Android Open Source Project
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++malibu_avb_firmware_partitions := \
++    abl \
++    bl31 \
++    cap \
++    cpm \
++    dbc \
++    dbl \
++    dram_init_0 \
++    dram_init_1 \
++    dram_init_10 \
++    dram_init_11 \
++    dram_init_2 \
++    dram_init_3 \
++    dram_init_4 \
++    dram_init_5 \
++    dram_init_6 \
++    dram_init_7 \
++    dram_init_8 \
++    dram_init_9 \
++    dram_phy \
++    gc \
++    gdmc \
++    gsa_bl1 \
++    gsa_fw \
++    tzsw
++
++ifneq ($(AB_OTA_BOOTLOADER_PARTITIONS),$(malibu_avb_firmware_partitions))
++$(error Malibu AB_OTA_BOOTLOADER_PARTITIONS must match its reviewed AVB firmware list)
++endif
++
++malibu_bootloader_firmware_dir := $(patsubst %/,%,$(dir $(BOOTLOADER_FILE_PATH)))
++malibu_avb_firmware_carriers := $(addprefix $(PRODUCT_OUT)/,$(addsuffix _vbfooted.img,$(malibu_avb_firmware_partitions)))
++
++# Match filesystem/prebuilt_bootloader: preserve each raw blob, then append a
++# deterministic AVB hash footer to a carrier copy. The 68 KiB allowance is the
++# upstream 64 KiB maximum-vbmeta reservation plus one 4 KiB footer block.
++$(malibu_avb_firmware_carriers): $(PRODUCT_OUT)/%_vbfooted.img: $(malibu_bootloader_firmware_dir)/%.img $(AVBTOOL) $(BUILD_NUMBER_FILE) $(BUILD_DATETIME_FILE)
++	$(hide) mkdir -p $(dir $@)
++	$(hide) cp $< $@
++	$(hide) $(AVBTOOL) add_hash_footer \
++	    --image $@ \
++	    --partition_name $* \
++	    --salt $$(sha256sum "$(BUILD_NUMBER_FILE)" "$(BUILD_DATETIME_FILE)" | cut -d " " -f 1 | tr -d '\n') \
++	    --partition_size $$(( 69632 + ( ($$(stat -c %s "$<") + 4095) / 4096) * 4096 ))
++
++INSTALLED_RADIOIMAGE_TARGET += $(malibu_avb_firmware_carriers)
++BOARD_AVB_MAKE_VBMETA_IMAGE_ARGS += $(foreach image,$(malibu_avb_firmware_carriers),--include_descriptors_from_image $(image))
++$(PRODUCT_OUT)/vbmeta.img: $(malibu_avb_firmware_carriers)

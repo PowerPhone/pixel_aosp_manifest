@@ -1,0 +1,36 @@
+From 60c06d5678d347265e33b07d0e8a27d03f509ab7 Mon Sep 17 00:00:00 2001
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Fri, 28 Aug 2026 12:31:00 -0400
+Subject: [PATCH] Render build properties in UTC
+
+Ninja intentionally filters TZ from action environments because ambient
+variables are not tracked as incremental-build inputs. gen_build_prop therefore
+uses the host's /etc/localtime even when the build wrapper exports a pinned TZ.
+Pass date's UTC option explicitly so the rendered build date is reproducible.
+
+This is a project-authored reproducibility fix for android-17.0.0_r1.
+License: Apache-2.0 (platform/build/soong)
+---
+ scripts/gen_build_prop.py | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/scripts/gen_build_prop.py b/scripts/gen_build_prop.py
+index a661a61670..124c3a5604 100644
+--- a/scripts/gen_build_prop.py
++++ b/scripts/gen_build_prop.py
+@@ -96,8 +96,10 @@ def parse_args():
+   config["BuildVersionTags"] = build_version_tags
+ 
+   raw_date = args.date_file.read().strip()
+-  config["Date"] = subprocess.check_output(["date", "-d", f"@{raw_date}"], text=True).strip()
+-  config["DateUtc"] = subprocess.check_output(["date", "-d", f"@{raw_date}", "+%s"], text=True).strip()
++  config["Date"] = subprocess.check_output(
++      ["date", "-u", "-d", f"@{raw_date}"], text=True).strip()
++  config["DateUtc"] = subprocess.check_output(
++      ["date", "-u", "-d", f"@{raw_date}", "+%s"], text=True).strip()
+ 
+   # build_desc is human readable strings that describe this build. This has the same info as the
+   # build fingerprint.
+-- 
+2.53.0
+

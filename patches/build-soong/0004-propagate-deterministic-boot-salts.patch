@@ -1,0 +1,264 @@
+From 6be46339ee211300081b2cf3b67cf194f9869225 Mon Sep 17 00:00:00 2001
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Fri, 28 Aug 2026 12:11:32 -0400
+Subject: [PATCH] Propagate deterministic boot salts to target files
+
+Soong's make_legacy boot-image signer derives deterministic AVB salts from the
+kernel for boot or from the build-number and date files for non-kernel boot
+partitions. Its misc_info fragment omits those salts, so releasetools rebuilds
+init_boot, vendor_boot, and vendor_kernel_boot with a different default salt.
+
+Generate each legacy salt once and consume the same file for direct signing
+and target-files metadata. Preserve the kernel-derived boot salt and the
+concatenated build-number/date digest used by the other boot image types. Add
+a fixture test covering all four boot partitions and both derivations.
+
+This is a project-authored reproducibility fix for android-17.0.0_r1.
+License: Apache-2.0 (platform/build/soong)
+---
+ filesystem/bootimg.go         | 50 ++++++++++++++++++------------
+ filesystem/filesystem_test.go | 89 +++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 119 insertions(+), 20 deletions(-)
+
+diff --git a/filesystem/bootimg.go b/filesystem/bootimg.go
+index f16390e5cd..cab3a0070a 100644
+--- a/filesystem/bootimg.go
++++ b/filesystem/bootimg.go
+@@ -225,19 +225,21 @@ func (b *bootimg) GenerateAndroidBuildActions(ctx android.ModuleContext) {
+ 
+ 	kernelPath := b.getKernelPath(ctx)
+ 	unsignedOutput := b.buildBootImage(ctx, kernelPath)
+ 
+ 	output := unsignedOutput
++	var avbSalt android.Path
+ 	if proptools.Bool(b.commonProperties.Use_avb) {
+ 		// This bootimg module supports 2 modes of avb signing. It is not clear to this author
+ 		// why there are differences, but one of them is to match the behavior of make-built boot
+ 		// images.
+ 		switch proptools.StringDefault(b.commonProperties.Avb_mode, "default") {
+ 		case "default":
+ 			output = b.signImage(ctx, unsignedOutput)
+ 		case "make_legacy":
+-			output = b.addAvbFooter(ctx, unsignedOutput, kernelPath)
++			avbSalt = b.buildAvbSalt(ctx, kernelPath)
++			output = b.addAvbFooter(ctx, unsignedOutput, avbSalt)
+ 		default:
+ 			ctx.PropertyErrorf("avb_mode", `Unknown value for avb_mode, expected "default" or "make_legacy", got: %q`, *b.commonProperties.Avb_mode)
+ 		}
+ 	}
+ 
+@@ -267,11 +269,11 @@ func (b *bootimg) GenerateAndroidBuildActions(ctx android.ModuleContext) {
+ 		Kernel:              kernelPath,
+ 		Dtb:                 dtbPath,
+ 		Bootconfig:          b.getBootconfigPath(ctx),
+ 		Output:              output,
+ 		SignedOutput:        b.SignedOutputPath(),
+-		PropFileForMiscInfo: b.buildPropFileForMiscInfo(ctx),
++		PropFileForMiscInfo: b.buildPropFileForMiscInfo(ctx, avbSalt),
+ 		HeaderVersion:       proptools.String(b.commonProperties.Header_version),
+ 	})
+ 
+ 	extractedPublicKey := android.PathForModuleOut(ctx, b.partitionName()+".avbpubkey")
+ 	if b.commonProperties.Avb_private_key != nil {
+@@ -476,11 +478,26 @@ func (b *bootimg) buildBootImage(ctx android.ModuleContext, kernel android.Path)
+ 
+ 	builder.Build("build_bootimg", fmt.Sprintf("Creating %s", b.BaseModuleName()))
+ 	return output
+ }
+ 
+-func (b *bootimg) addAvbFooter(ctx android.ModuleContext, unsignedImage android.Path, kernel android.Path) android.Path {
++func (b *bootimg) buildAvbSalt(ctx android.ModuleContext, kernel android.Path) android.Path {
++	saltFile := android.PathForModuleOut(ctx, "avb_salt")
++	builder := android.NewRuleBuilder(pctx, ctx).SandboxDisabled()
++	cmd := builder.Command().Text("sha256sum")
++	if kernel != nil {
++		cmd.Input(kernel)
++	} else {
++		cmd.Input(ctx.Config().BuildNumberFile(ctx))
++		cmd.Input(ctx.Config().BuildDateFile(ctx))
++	}
++	cmd.Text(`| cut -d " " -f 1 | tr -d '\n'`).FlagWithOutput("> ", saltFile)
++	builder.Build("avb_salt", fmt.Sprintf("Generating AVB salt for %s", b.BaseModuleName()))
++	return saltFile
++}
++
++func (b *bootimg) addAvbFooter(ctx android.ModuleContext, unsignedImage android.Path, saltFile android.Path) android.Path {
+ 	output := android.PathForModuleOut(ctx, b.installFileName())
+ 	builder := android.NewRuleBuilder(pctx, ctx).SandboxDisabled()
+ 	builder.Command().Text("cp").Input(unsignedImage).Output(output)
+ 	cmd := builder.Command().BuiltTool("avbtool").
+ 		Text("add_hash_footer").
+@@ -490,23 +507,12 @@ func (b *bootimg) addAvbFooter(ctx android.ModuleContext, unsignedImage android.
+ 		cmd.FlagWithArg("--partition_size ", strconv.FormatInt(s.Get(), 10))
+ 	} else {
+ 		cmd.Flag("--dynamic_partition_size")
+ 	}
+ 
+-	// If you don't provide a salt, avbtool will use random bytes for the salt.
+-	// This is bad for determinism (cached builds and diff tests are affected), so instead,
+-	// we try to provide a salt. The requirements for a salt are not very clear, one aspect of it
+-	// is that if it's unpredictable, attackers trying to change the contents of a partition need
+-	// to find a new hash collision every release, because the salt changed.
+-	if kernel != nil {
+-		cmd.Textf(`--salt $(sha256sum "%s" | cut -d " " -f 1)`, kernel.String())
+-		cmd.Implicit(kernel)
+-	} else {
+-		cmd.Textf(`--salt $(sha256sum "%s" "%s" | cut -d " " -f 1 | tr -d '\n')`, ctx.Config().BuildNumberFile(ctx), ctx.Config().BuildDateFile(ctx))
+-		cmd.OrderOnly(ctx.Config().BuildNumberFile(ctx))
+-		cmd.OrderOnly(ctx.Config().BuildDateFile(ctx))
+-	}
++	cmd.Textf(`--salt $(cat "%s")`, saltFile.String())
++	cmd.Implicit(saltFile)
+ 
+ 	cmd.FlagWithArg("--partition_name ", b.bootImageType.String())
+ 
+ 	if b.commonProperties.Avb_algorithm != nil {
+ 		cmd.FlagWithArg("--algorithm ", proptools.NinjaAndShellEscape(*b.commonProperties.Avb_algorithm))
+@@ -578,15 +584,19 @@ func (b *bootimg) buildPropFile(ctx android.ModuleContext) (android.Path, androi
+ 	propFile := android.PathForModuleOut(ctx, "prop")
+ 	android.WriteFileRule(ctx, propFile, sb.String())
+ 	return propFile, deps
+ }
+ 
+-func (b *bootimg) getAvbHashFooterArgs(ctx android.ModuleContext) (string, android.Paths) {
++func (b *bootimg) getAvbHashFooterArgs(ctx android.ModuleContext, saltFile android.Path) (string, android.Paths) {
+ 	var deps android.Paths
+ 	ret := ""
++	if saltFile != nil {
++		ret += fmt.Sprintf("--salt {CONTENTS_OF:%s}", saltFile.String())
++		deps = append(deps, saltFile)
++	}
+ 	if !b.bootImageType.isVendorBoot() && !b.bootImageType.isVendorKernelBoot() {
+-		ret += "--prop " + fmt.Sprintf("com.android.build.%s.os_version:%s", b.bootImageType.String(), ctx.Config().PlatformVersionLastStable())
++		ret += " --prop " + fmt.Sprintf("com.android.build.%s.os_version:%s", b.bootImageType.String(), ctx.Config().PlatformVersionLastStable())
+ 	}
+ 
+ 	fingerprintFile := ctx.Config().BuildFingerprintFile(ctx)
+ 	ret += " --prop " + fmt.Sprintf("com.android.build.%s.fingerprint:{CONTENTS_OF:%s}", b.bootImageType.String(), fingerprintFile.String())
+ 	deps = append(deps, fingerprintFile)
+@@ -599,17 +609,17 @@ func (b *bootimg) getAvbHashFooterArgs(ctx android.ModuleContext) (string, andro
+ 		ret += " --rollback_index " + strconv.FormatInt(*b.commonProperties.Avb_rollback_index, 10)
+ 	}
+ 	return strings.TrimSpace(ret), deps
+ }
+ 
+-func (b *bootimg) buildPropFileForMiscInfo(ctx android.ModuleContext) android.Path {
++func (b *bootimg) buildPropFileForMiscInfo(ctx android.ModuleContext, saltFile android.Path) android.Path {
+ 	var sb strings.Builder
+ 	addStr := func(name string, value string) {
+ 		fmt.Fprintf(&sb, "%s=%s\n", name, value)
+ 	}
+ 
+-	footerArgs, footerArgsDeps := b.getAvbHashFooterArgs(ctx)
++	footerArgs, footerArgsDeps := b.getAvbHashFooterArgs(ctx, saltFile)
+ 
+ 	bootImgType := proptools.String(b.commonProperties.Boot_image_type)
+ 	addStr("avb_"+bootImgType+"_add_hash_footer_args", footerArgs)
+ 	if ramdisk := proptools.String(b.properties.Ramdisk_module); ramdisk != "" {
+ 		ramdiskModule := ctx.GetDirectDepProxyWithTag(ramdisk, bootimgRamdiskDep)
+diff --git a/filesystem/filesystem_test.go b/filesystem/filesystem_test.go
+index 844721e4d0..12d7b931a7 100644
+--- a/filesystem/filesystem_test.go
++++ b/filesystem/filesystem_test.go
+@@ -345,6 +345,95 @@ func TestPrebuiltDtboDeterministicSaltInImageAndMiscInfo(t *testing.T) {
+ 	miscInfoImplicits := module.Output("prop_file_for_misc_info").Implicits.Strings()
+ 	android.AssertStringListContains(t, "generated salt must be a misc-info dependency",
+ 		miscInfoImplicits, saltOutput)
+ }
+ 
++func TestBootimgMakeLegacySaltInImageAndMiscInfo(t *testing.T) {
++	t.Parallel()
++	result := android.GroupFixturePreparers(
++		fixture,
++		android.FixtureModifyProductVariables(func(variables android.FixtureProductVariables) {
++			variables.BuildNumberFile = proptools.StringPtr("build_number.txt")
++			variables.BuildFingerprintFile = proptools.StringPtr("build_fingerprint.txt")
++		}),
++		android.FixtureMergeMockFs(android.MockFS{
++			"kernel": nil,
++		}),
++	).RunTestWithBp(t, `
++		bootimg {
++			name: "myboot",
++			boot_image_type: "boot",
++			header_version: "4",
++			kernel_prebuilt: "kernel",
++			partition_size: 67108864,
++			use_avb: true,
++			avb_mode: "make_legacy",
++		}
++		bootimg {
++			name: "myinit_boot",
++			boot_image_type: "init_boot",
++			header_version: "4",
++			partition_size: 67108864,
++			use_avb: true,
++			avb_mode: "make_legacy",
++		}
++		bootimg {
++			name: "myvendor_boot",
++			boot_image_type: "vendor_boot",
++			header_version: "4",
++			partition_size: 67108864,
++			use_avb: true,
++			avb_mode: "make_legacy",
++		}
++		bootimg {
++			name: "myvendor_kernel_boot",
++			boot_image_type: "vendor_kernel_boot",
++			header_version: "4",
++			partition_size: 67108864,
++			use_avb: true,
++			avb_mode: "make_legacy",
++		}
++	`)
++
++	for _, tc := range []struct {
++		module     string
++		usesKernel bool
++	}{
++		{module: "myboot", usesKernel: true},
++		{module: "myinit_boot"},
++		{module: "myvendor_boot"},
++		{module: "myvendor_kernel_boot"},
++	} {
++		module := result.ModuleForTests(t, tc.module, "android_arm64_armv8-a")
++		saltRule := module.Rule("avb_salt")
++		saltOutput := saltRule.Output.String()
++		if tc.usesKernel {
++			android.AssertStringDoesContain(t, tc.module+" salt must use the kernel",
++				saltRule.RuleParams.Command, "sha256sum kernel")
++			android.AssertStringDoesNotContain(t, tc.module+" salt must not use build identity",
++				saltRule.RuleParams.Command, "build_number.txt")
++		} else {
++			android.AssertStringDoesContain(t, tc.module+" salt must use the build number",
++				saltRule.RuleParams.Command, "build_number.txt")
++			android.AssertStringDoesContain(t, tc.module+" salt must use the build date",
++				saltRule.RuleParams.Command, "build_date.txt")
++		}
++		android.AssertStringDoesContain(t, tc.module+" salt pipeline changed",
++			saltRule.RuleParams.Command, `| cut -d " " -f 1 | tr -d '\n'`)
++
++		imageCommand := module.Rule("add_avb_footer").RuleParams.Command
++		android.AssertStringDoesContain(t, tc.module+" direct signing must consume the generated salt",
++			imageCommand, `--salt $$(cat "`+saltOutput+`")`)
++
++		miscInfoSource := android.ContentFromFileRuleForTests(t, result.TestContext,
++			module.Output("prop_for_misc_info_pre_processing"))
++		android.AssertStringDoesContain(t, tc.module+" target-files metadata must consume the generated salt",
++			miscInfoSource, "--salt {CONTENTS_OF:")
++		android.AssertStringDoesContain(t, tc.module+" target-files metadata must use its generated salt file",
++			miscInfoSource, "/"+tc.module+"/android_arm64_armv8-a/avb_salt}")
++		miscInfoImplicits := module.Output("prop_file_for_misc_info").Implicits.Strings()
++		android.AssertStringListContains(t, tc.module+" generated salt must be a misc-info dependency",
++			miscInfoImplicits, saltOutput)
++	}
++}
++
+ func TestFileSystemWithCoverageVariants(t *testing.T) {
+ 	t.Parallel()
+ 	context := android.GroupFixturePreparers(
+ 		fixture,
+ 		android.FixtureModifyProductVariables(func(variables android.FixtureProductVariables) {
+-- 
+2.51.0

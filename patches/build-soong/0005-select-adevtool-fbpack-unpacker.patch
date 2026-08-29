@@ -1,0 +1,215 @@
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Fri, 28 Aug 2026 13:31:00 -0400
+Subject: [PATCH] fsgen: support the public Malibu FBPK adapter
+
+Prefer the checked-in adevtool FBPK extractor when Google's private platform
+tool is absent, retain the private path as a compatible fallback, and fail
+analysis when neither path exists. Make the bootloader-carrier build identity
+files normal inputs so incremental builds cannot retain stale AVB descriptors.
+Pin both path selection and the carrier salt/size command in focused tests.
+
+This is a project-authored android-17.0.0_r1 compatibility fix.
+License: Apache-2.0 (platform/build/soong)
+---
+ filesystem/bootloader.go         |  2 +-
+ filesystem/filesystem_test.go    | 53 ++++++++++++++++++++++++++++++++++++++++
+ fsgen/filesystem_creator.go      | 36 +++++++++++++++++++++++++--
+ fsgen/filesystem_creator_test.go | 42 +++++++++++++++++++++++++++++++
+ 4 files changed, 130 insertions(+), 3 deletions(-)
+
+diff --git a/filesystem/bootloader.go b/filesystem/bootloader.go
+index 6fce8a0697a232980e392a6925f145547f07c5db..b32a8cdfe7253ce8b1fa546a93a60b93c9f47c47 100644
+--- a/filesystem/bootloader.go
++++ b/filesystem/bootloader.go
+@@ -130,7 +130,7 @@ func (p *prebuiltBootloader) avbAddHash(ctx android.ModuleContext, builder *andr
+ 		FlagWithOutput("--image ", output).
+ 		FlagWithArg("--partition_name ", partitionName).
+ 		Textf(`--salt $(sha256sum "%s" "%s" | cut -d " " -f 1 | tr -d '\n')`, cmd.PathForInput(ctx.Config().BuildNumberFile(ctx)), cmd.PathForInput(ctx.Config().BuildDateFile(ctx))).
+-		OrderOnly(ctx.Config().BuildNumberFile(ctx)).OrderOnly(ctx.Config().BuildDateFile(ctx))
++		Implicit(ctx.Config().BuildNumberFile(ctx)).Implicit(ctx.Config().BuildDateFile(ctx))
+ 
+ 	vbmetaPaddingSize := 64*1024 + 4096
+ 	cmd.Textf("--partition_size $(( %d + (( $(stat -c %%s %s) - 1) / 4096 + 1) * 4096 ))", vbmetaPaddingSize, cmd.PathForOutput(unpackedPartition))
+diff --git a/filesystem/filesystem_test.go b/filesystem/filesystem_test.go
+index 12d7b931a7c164364c0627808dce7534231447d8..b6196cd2cfad4e72281b6ccc9c93bc967928fc23 100644
+--- a/filesystem/filesystem_test.go
++++ b/filesystem/filesystem_test.go
+@@ -16,6 +16,7 @@ package filesystem
+ 
+ import (
+ 	"os"
++	"strings"
+ 	"testing"
+ 
+ 	"android/soong/android"
+@@ -297,6 +298,58 @@ func TestAvbAddHashFooter(t *testing.T) {
+ 		cmd, "--include_descriptors_from_image ")
+ }
+ 
++func TestPrebuiltBootloaderDeterministicCarrier(t *testing.T) {
++	t.Parallel()
++	result := android.GroupFixturePreparers(
++		fixture,
++		android.PrepareForTestWithHostTools("avbtool", "avb_openssl"),
++		android.FixtureModifyProductVariables(func(variables android.FixtureProductVariables) {
++			variables.BuildNumberFile = proptools.StringPtr("build_number.txt")
++		}),
++		android.FixtureRegisterWithContext(func(ctx android.RegistrationContext) {
++			ctx.RegisterModuleType("prebuilt_bootloader", PrebuiltBootloaderFactory)
++		}),
++		android.FixtureMergeMockFs(android.MockFS{
++			"bootloader.img": nil,
++			"fbpacktool.py":  nil,
++		}),
++	).RunTestWithBp(t, `
++		prebuilt_bootloader {
++			name: "mybootloader",
++			src: "bootloader.img",
++			ab_ota_partitions: ["abl"],
++			unpack_tool: "fbpacktool.py",
++		}
++	`)
++
++	module := result.ModuleForTests(t, "mybootloader", "android_arm64_armv8-a")
++	rule := module.Rule("unpack_bootloader")
++	for _, suffix := range []string{"build_number.txt", "build_date.txt"} {
++		foundImplicit := false
++		for _, input := range rule.Implicits.Strings() {
++			foundImplicit = foundImplicit || strings.HasSuffix(input, suffix)
++		}
++		android.AssertBoolEquals(t, suffix+" must be a normal carrier dependency", true, foundImplicit)
++		for _, input := range rule.OrderOnly.Strings() {
++			if strings.HasSuffix(input, suffix) {
++				t.Errorf("%s must not remain order-only: %v", suffix, rule.OrderOnly.Strings())
++			}
++		}
++	}
++
++	manifest := android.RuleBuilderSboxProtoForTests(t, result.TestContext,
++		module.Output("unpack_bootloader.textproto"))
++	var commands []string
++	for _, command := range manifest.Commands {
++		commands = append(commands, command.GetCommand())
++	}
++	command := strings.Join(commands, "\n")
++	android.AssertStringDoesContain(t, "carrier salt derivation changed", command,
++		`--salt $(sha256sum "__SBOX_SANDBOX_DIR__/out/soong/build_number.txt" "__SBOX_SANDBOX_DIR__/out/build_date.txt" | cut -d " " -f 1 | tr -d '\n')`)
++	android.AssertStringDoesContain(t, "carrier partition-size expression changed", command,
++		`--partition_size $(( 69632 + (( $(stat -c %s __SBOX_SANDBOX_DIR__/out/abl.img) - 1) / 4096 + 1) * 4096 ))`)
++}
++
+ func TestPrebuiltDtboDeterministicSaltInImageAndMiscInfo(t *testing.T) {
+ 	t.Parallel()
+ 	result := android.GroupFixturePreparers(
+diff --git a/fsgen/filesystem_creator.go b/fsgen/filesystem_creator.go
+index 01d2c3f6156b8083123293b4025b089fa4e287b0..68585eea42fc800f755e08a0e3957f057f7a0874 100644
+--- a/fsgen/filesystem_creator.go
++++ b/fsgen/filesystem_creator.go
+@@ -447,6 +447,31 @@ func buildingSystemOtherImage(partitionVars android.PartitionVariables) bool {
+ 	return partitionVars.BuildingSystemOtherImage
+ }
+ 
++type bootloaderUnpackTool struct {
++	tool string
++	deps []string
++}
++
++func selectBootloaderUnpackTool(boardPlatform string, exists func(string) bool) (bootloaderUnpackTool, bool) {
++	if boardPlatform == "" {
++		return bootloaderUnpackTool{}, false
++	}
++
++	toolCandidates := []string{
++		filepath.Join("vendor/adevtool/config/mk/google_devices/platform", boardPlatform, "fbpacktool.py"),
++		filepath.Join("vendor/google_devices", boardPlatform, "prebuilts/misc_bins/fbimg/fbpacktool.py"),
++	}
++	for _, tool := range toolCandidates {
++		if exists(tool) {
++			return bootloaderUnpackTool{
++				tool: tool,
++				deps: []string{filepath.Join(filepath.Dir(tool), "*.py")},
++			}, true
++		}
++	}
++	return bootloaderUnpackTool{}, false
++}
++
+ func (f *filesystemCreator) createBootloader(ctx android.LoadHookContext) (string, bool) {
+ 	partitionVars := ctx.Config().ProductVariables().PartitionVarsForSoongMigrationOnlyDoNotUse
+ 	var bootloaderSrc string
+@@ -462,13 +487,20 @@ func (f *filesystemCreator) createBootloader(ctx android.LoadHookContext) (strin
+ 	}
+ 
+ 	boardPlatform := proptools.String(ctx.Config().ProductVariables().BoardPlatform)
++	unpackTool, ok := selectBootloaderUnpackTool(boardPlatform, func(path string) bool {
++		return android.ExistentPathForSource(ctx, path).Valid()
++	})
++	if !ok {
++		ctx.ModuleErrorf("no FBPK unpack tool exists for BOARD_PLATFORM %q", boardPlatform)
++		return "", false
++	}
+ 
+ 	bootloaderModuleName := generatedModuleName(ctx.Config(), "bootloader")
+ 	bootloaderProps := filesystem.PrebuiltBootloaderProperties{
+ 		Src:               &bootloaderSrc,
+ 		Ab_ota_partitions: partitionVars.AbOtaBootloaderPartitions,
+-		Unpack_tool:       proptools.StringPtr(fmt.Sprintf("vendor/google_devices/%s/prebuilts/misc_bins/fbimg/fbpacktool.py", boardPlatform)),
+-		Unpack_tool_deps:  []string{fmt.Sprintf("vendor/google_devices/%s/prebuilts/misc_bins/fbimg/*.py", boardPlatform)},
++		Unpack_tool:       proptools.StringPtr(unpackTool.tool),
++		Unpack_tool_deps:  unpackTool.deps,
+ 	}
+ 
+ 	ctx.CreateModuleInDirectory(
+diff --git a/fsgen/filesystem_creator_test.go b/fsgen/filesystem_creator_test.go
+index 9e87f0f6daa6fea80461a244054b85c88e50f955..c29816486eeb9ad29340ba08e22b398be990bb45 100644
+--- a/fsgen/filesystem_creator_test.go
++++ b/fsgen/filesystem_creator_test.go
+@@ -85,6 +85,48 @@ var prepareForTestWithDefaultSystemDeps = android.GroupFixturePreparers(
+ 	),
+ )
+ 
++func TestSelectBootloaderUnpackTool(t *testing.T) {
++	adevtoolTool := "vendor/adevtool/config/mk/google_devices/platform/malibu/fbpacktool.py"
++	googleTool := "vendor/google_devices/malibu/prebuilts/misc_bins/fbimg/fbpacktool.py"
++	tests := []struct {
++		name       string
++		existing   map[string]bool
++		wantTool   string
++		wantDeps   []string
++		wantExists bool
++	}{
++		{
++			name:       "prefer adevtool adapter",
++			existing:   map[string]bool{adevtoolTool: true, googleTool: true},
++			wantTool:   adevtoolTool,
++			wantDeps:   []string{"vendor/adevtool/config/mk/google_devices/platform/malibu/*.py"},
++			wantExists: true,
++		},
++		{
++			name:       "fall back to Google prebuilts",
++			existing:   map[string]bool{googleTool: true},
++			wantTool:   googleTool,
++			wantDeps:   []string{"vendor/google_devices/malibu/prebuilts/misc_bins/fbimg/*.py"},
++			wantExists: true,
++		},
++		{
++			name:       "reject missing tools",
++			existing:   map[string]bool{},
++			wantExists: false,
++		},
++	}
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			got, exists := selectBootloaderUnpackTool("malibu", func(path string) bool {
++				return test.existing[path]
++			})
++			android.AssertBoolEquals(t, "tool existence", test.wantExists, exists)
++			android.AssertStringEquals(t, "selected tool", test.wantTool, got.tool)
++			android.AssertArrayString(t, "selected tool dependencies", test.wantDeps, got.deps)
++		})
++	}
++}
++
+ func TestFileSystemCreatorSystemImageProps(t *testing.T) {
+ 	result := android.GroupFixturePreparers(
+ 		android.PrepareForIntegrationTestWithAndroid,

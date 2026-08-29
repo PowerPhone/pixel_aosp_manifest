@@ -1,0 +1,204 @@
+From 10a34205eb7678cfb4fb6682dfab63eb4ca04a29 Mon Sep 17 00:00:00 2001
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Fri, 28 Aug 2026 16:10:00 -0400
+Subject: [PATCH] mkbootfs: preserve device-node description metadata
+
+Entries supplied with -n carry explicit modes and device numbers. Passing
+them through fs_config makes those modes depend on option order and lets a
+canned filesystem config replace the declared permissions. In particular,
+the same init ramdisk is emitted differently by the product build and by
+releasetools.
+
+Make the device-node description authoritative by skipping fs_config only
+for its synthetic entries. Zero-initialize their stat structures so fields
+not present in the description, including the directory rdev, remain
+deterministic. Normal filesystem entries and the trailer retain the existing
+fs_config behavior.
+
+Add a host regression test covering archive equality with and without a
+conflicting canned config, as well as the encoded mode and device numbers.
+
+Test: mkbootfs_node_list_test
+License: Apache-2.0 (system/core)
+---
+ mkbootfs/Android.bp      |  9 ++++++
+ mkbootfs/mkbootfs.cpp    | 25 +++++++++--------
+ mkbootfs/mkbootfs_test.sh | 59 ++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 82 insertions(+), 11 deletions(-)
+
+diff --git a/mkbootfs/Android.bp b/mkbootfs/Android.bp
+index 681de8ce63..6fc557d14c 100644
+--- a/mkbootfs/Android.bp
++++ b/mkbootfs/Android.bp
+@@ -18,3 +18,12 @@ cc_binary_host {
+         targets: ["dist_files"],
+     },
+ }
++
++sh_test_host {
++    name: "mkbootfs_node_list_test",
++    src: "mkbootfs_test.sh",
++    data_bins: ["mkbootfs"],
++    test_options: {
++        unit_test: true,
++    },
++}
+diff --git a/mkbootfs/mkbootfs.cpp b/mkbootfs/mkbootfs.cpp
+index a45c6a20a0..bdc00751b3 100644
+--- a/mkbootfs/mkbootfs.cpp
++++ b/mkbootfs/mkbootfs.cpp
+@@ -78,7 +78,8 @@ static void fix_stat(const char *path, struct stat *s)
+     }
+ }
+ 
+-static void _eject(struct stat *s, const char *out, int olen, char *data, unsigned datasize)
++static void _eject(struct stat *s, const char *out, int olen, char *data, unsigned datasize,
++                   bool apply_fs_config)
+ {
+     // Nothing is special about this value, just picked something in the
+     // approximate range that was being used already, and avoiding small
+@@ -90,7 +91,9 @@ static void _eject(struct stat *s, const char *out, int olen, char *data, unsign
+         putchar(0);
+     }
+ 
+-    fix_stat(out, s);
++    if (apply_fs_config) {
++        fix_stat(out, s);
++    }
+ //    fprintf(stderr, "_eject %s: mode=0%o\n", out, s->st_mode);
+ 
+     printf("%06x%08x%08x%08x%08x%08x%08x"
+@@ -132,7 +135,7 @@ static void _eject_trailer()
+ {
+     struct stat s;
+     memset(&s, 0, sizeof(s));
+-    _eject(&s, TRAILER, 10, 0, 0);
++    _eject(&s, TRAILER, 10, 0, 0, true);
+ 
+     while(total_size & 0xff) {
+         total_size++;
+@@ -220,19 +223,19 @@ static void _archive(char *in, char *out, int ilen, int olen)
+             err(1, "cannot read '%s'", in);
+         }
+ 
+-        _eject(&s, out, olen, content.data(), content.size());
++        _eject(&s, out, olen, content.data(), content.size(), true);
+     } else if(S_ISDIR(s.st_mode)) {
+-        _eject(&s, out, olen, 0, 0);
++        _eject(&s, out, olen, 0, 0, true);
+         _archive_dir(in, out, ilen, olen);
+     } else if(S_ISLNK(s.st_mode)) {
+         char buf[1024];
+         int size;
+         size = readlink(in, buf, 1024);
+         if(size < 0) err(1, "cannot read symlink '%s'", in);
+-        _eject(&s, out, olen, buf, size);
++        _eject(&s, out, olen, buf, size, true);
+     } else if(S_ISBLK(s.st_mode) || S_ISCHR(s.st_mode) ||
+               S_ISFIFO(s.st_mode) || S_ISSOCK(s.st_mode)) {
+-        _eject(&s, out, olen, NULL, 0);
++        _eject(&s, out, olen, NULL, 0, true);
+     } else {
+         errx(1, "Unknown '%s' (mode %d)?", in, s.st_mode);
+     }
+@@ -303,13 +306,13 @@ static void devnodes_desc_error(const char* filename, unsigned long line_num,
+ 
+ static int append_devnodes_desc_dir(char* path, char* args)
+ {
+-    struct stat s;
++    struct stat s = {};
+ 
+     if (sscanf(args, "%o %d %d", &s.st_mode, &s.st_uid, &s.st_gid) != 3) return -1;
+ 
+     s.st_mode |= S_IFDIR;
+ 
+-    _eject(&s, path, strlen(path), NULL, 0);
++    _eject(&s, path, strlen(path), NULL, 0, false);
+ 
+     return 0;
+ }
+@@ -317,7 +320,7 @@ static int append_devnodes_desc_dir(char* path, char* args)
+ static int append_devnodes_desc_nod(char* path, char* args)
+ {
+     int minor, major;
+-    struct stat s;
++    struct stat s = {};
+     char dev;
+ 
+     if (sscanf(args, "%o %d %d %c %d %d", &s.st_mode, &s.st_uid, &s.st_gid,
+@@ -335,7 +338,7 @@ static int append_devnodes_desc_nod(char* path, char* args)
+         return -1;
+     }
+ 
+-    _eject(&s, path, strlen(path), NULL, 0);
++    _eject(&s, path, strlen(path), NULL, 0, false);
+ 
+     return 0;
+ }
+diff --git a/mkbootfs/mkbootfs_test.sh b/mkbootfs/mkbootfs_test.sh
+new file mode 100644
+index 0000000000..ace8ff446b
+--- /dev/null
++++ b/mkbootfs/mkbootfs_test.sh
+@@ -0,0 +1,59 @@
++#!/bin/bash
++
++# Copyright 2026 The Android Open Source Project
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++set -euo pipefail
++
++test_dir="$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)"
++mkbootfs_bin="${test_dir}/mkbootfs"
++if [[ ! -x "${mkbootfs_bin}" ]]; then
++  mkbootfs_bin="$(command -v mkbootfs)"
++fi
++
++tmp_dir="$(mktemp -d)"
++trap 'rm -rf "${tmp_dir}"' EXIT
++mkdir "${tmp_dir}/root"
++
++cat >"${tmp_dir}/nodes" <<'EOF'
++dir dev 0755 0 0
++nod dev/null 0600 0 0 c 1 3
++EOF
++
++cat >"${tmp_dir}/filesystem_config" <<'EOF'
++ 0 0 755
++dev 0 0 755
++dev/null 0 0 755
++EOF
++
++"${mkbootfs_bin}" -n "${tmp_dir}/nodes" "${tmp_dir}/root" \
++  >"${tmp_dir}/without_config.cpio"
++"${mkbootfs_bin}" -f "${tmp_dir}/filesystem_config" \
++  -n "${tmp_dir}/nodes" "${tmp_dir}/root" >"${tmp_dir}/with_config.cpio"
++
++# A canned filesystem config must not override metadata declared by -n.
++cmp "${tmp_dir}/without_config.cpio" "${tmp_dir}/with_config.cpio"
++
++read_field() {
++  local file="$1"
++  local offset="$2"
++  dd if="${file}" bs=1 skip="${offset}" count=8 status=none
++}
++
++# Each newc header is 110 bytes. The first entry ("dev") occupies 116 bytes
++# after name padding, so the second header starts at byte 116.
++[[ "$(read_field "${tmp_dir}/with_config.cpio" 14)" == "000041ed" ]]
++[[ "$(read_field "${tmp_dir}/with_config.cpio" 130)" == "00002180" ]]
++[[ "$(read_field "${tmp_dir}/with_config.cpio" 194)" == "00000001" ]]
++[[ "$(read_field "${tmp_dir}/with_config.cpio" 202)" == "00000003" ]]
+-- 
+2.53.0

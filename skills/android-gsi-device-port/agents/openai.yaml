@@ -1,0 +1,4 @@
+interface:
+  display_name: "Android GSI Device Port"
+  short_description: "Bring up AOSP on unsupported Android hardware"
+  default_prompt: "Use $android-gsi-device-port to plan a recoverable AOSP userdebug port for this unsupported phone."

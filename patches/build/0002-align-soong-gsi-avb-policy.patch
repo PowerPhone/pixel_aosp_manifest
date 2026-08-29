@@ -1,0 +1,54 @@
+From 7d7792e914072362a2999525d586884aa3edebd8 Mon Sep 17 00:00:00 2001
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Fri, 28 Aug 2026 12:00:00 -0400
+Subject: [PATCH] Align Soong GSI system image with GSI AVB policy
+
+BoardConfigGsiCommon.mk chains the GSI system partition with the AVB RSA-2048
+test key and uses the platform security-patch timestamp as its rollback index.
+The Soong-built android_gsi instead inherits generic_system_sign_key
+(RSA-4096) and no rollback index from system_image_defaults. This produces a
+system image that cannot satisfy the root vbmeta chain descriptor.
+
+Override only the GSI filesystem defaults, preserving the established GSI AVB
+contract while leaving other generic system-image modules unchanged.
+Filesystem rollback_index is not a configurable Soong property, so pin the
+UTC epoch corresponding to this tag's 2026-06-05 platform security patch.
+
+This is a project-authored compatibility fix for android-17.0.0_r1.
+License: Apache-2.0 (platform/build)
+---
+ target/product/gsi/Android.bp | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/target/product/gsi/Android.bp b/target/product/gsi/Android.bp
+index 4fdb3ab866..b316660af2 100644
+--- a/target/product/gsi/Android.bp
++++ b/target/product/gsi/Android.bp
+@@ -24,6 +24,15 @@ filegroup {
+     ],
+ }
+ 
++// Keep the Soong-built GSI system image aligned with the AVB chain policy in
++// BoardConfigGsiCommon.mk. The generic system defaults use a different key.
++filegroup {
++    name: "gsi_system_sign_key",
++    srcs: [":avb_testkey_rsa2048"],
++}
++
++GSI_SYSTEM_ROLLBACK_INDEX = 1780617600 // 2026-06-05 UTC
++
+ prebuilt_etc {
+     name: "gsi_skip_mount.cfg",
+     filename: "skip_mount.cfg",
+@@ -88,6 +97,9 @@ android_filesystem_defaults {
+         "system_ext_image_defaults",
+         "product_image_defaults",
+     ],
++    avb_private_key: ":gsi_system_sign_key",
++    avb_algorithm: "SHA256_RSA2048",
++    rollback_index: GSI_SYSTEM_ROLLBACK_INDEX,
+     symlinks: gsi_symlinks,
+     dirs: ["cache"],
+     deps: [
+-- 
+2.53.0

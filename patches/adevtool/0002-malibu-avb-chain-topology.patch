@@ -1,0 +1,58 @@
+From e5f6102294800bb857ca3a02bbb6f9bd6f8ef7f4 Mon Sep 17 00:00:00 2001
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Fri, 28 Aug 2026 13:00:00 -0400
+Subject: [PATCH] malibu: reconstruct Pixel 11 AVB chain topology
+
+The extracted module builds all payload images, but pristine AOSP does not
+provide the Pixel-specific vbmeta_system/vbmeta_vendor group definitions that
+normally live in Google's private device support. Mirror the stock chain
+partition grouping and rollback locations while using AOSP's public RSA-4096
+userdebug test key and platform security-patch rollback index.
+
+This also makes the two child vbmeta images explicit A/B OTA partitions.
+
+License: MIT (GrapheneOS/adevtool; see LICENSES/adevtool-MIT.txt)
+---
+ .../platform/malibu/BoardConfig-common.mk     | 28 +++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/config/mk/google_devices/platform/malibu/BoardConfig-common.mk b/config/mk/google_devices/platform/malibu/BoardConfig-common.mk
+--- a/config/mk/google_devices/platform/malibu/BoardConfig-common.mk
++++ b/config/mk/google_devices/platform/malibu/BoardConfig-common.mk
+@@ -3,6 +3,34 @@ BOARD_USES_SYSTEM_OTHER_ODEX :=
+ 
+ include build/make/target/board/BoardConfigPixelCommon.mk
+ 
++# Match the stock Pixel 11 AVB chain partition topology while using AOSP's
++# public userdebug test key. Rollback locations are bootloader ABI.
++BOARD_AVB_KEY_PATH := external/avb/test/data/testkey_rsa4096.pem
++BOARD_AVB_ALGORITHM := SHA256_RSA4096
++BOARD_AVB_VBMETA_SYSTEM := pvmfw product system system_dlkm system_ext
++BOARD_AVB_VBMETA_SYSTEM_KEY_PATH := external/avb/test/data/testkey_rsa4096.pem
++BOARD_AVB_VBMETA_SYSTEM_ALGORITHM := SHA256_RSA4096
++BOARD_AVB_VBMETA_SYSTEM_ROLLBACK_INDEX := $(PLATFORM_SECURITY_PATCH_TIMESTAMP)
++BOARD_AVB_VBMETA_SYSTEM_ROLLBACK_INDEX_LOCATION := 1
++
++BOARD_AVB_BOOT_KEY_PATH := external/avb/test/data/testkey_rsa4096.pem
++BOARD_AVB_BOOT_ALGORITHM := SHA256_RSA4096
++BOARD_AVB_BOOT_ROLLBACK_INDEX := $(PLATFORM_SECURITY_PATCH_TIMESTAMP)
++BOARD_AVB_BOOT_ROLLBACK_INDEX_LOCATION := 2
++
++BOARD_AVB_VBMETA_VENDOR := vendor
++BOARD_AVB_VBMETA_VENDOR_KEY_PATH := external/avb/test/data/testkey_rsa4096.pem
++BOARD_AVB_VBMETA_VENDOR_ALGORITHM := SHA256_RSA4096
++BOARD_AVB_VBMETA_VENDOR_ROLLBACK_INDEX := $(PLATFORM_SECURITY_PATCH_TIMESTAMP)
++BOARD_AVB_VBMETA_VENDOR_ROLLBACK_INDEX_LOCATION := 3
++
++BOARD_AVB_INIT_BOOT_KEY_PATH := external/avb/test/data/testkey_rsa4096.pem
++BOARD_AVB_INIT_BOOT_ALGORITHM := SHA256_RSA4096
++BOARD_AVB_INIT_BOOT_ROLLBACK_INDEX := $(PLATFORM_SECURITY_PATCH_TIMESTAMP)
++BOARD_AVB_INIT_BOOT_ROLLBACK_INDEX_LOCATION := 4
++
++AB_OTA_PARTITIONS += vbmeta_system vbmeta_vendor
++
+ include vendor/adevtool/config/mk/google_devices/common/BoardConfig-armv9.mk
+ 
+ include vendor/adevtool/config/mk/google_devices/common/BoardConfig-common-gs201-plus.mk
+-- 
+2.53.0

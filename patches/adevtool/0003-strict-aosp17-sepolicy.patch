@@ -1,0 +1,27 @@
+From: pixel_aosp_manifest maintainers
+Subject: [PATCH] adevtool: keep strict AOSP 17 property ownership
+
+The GrapheneOS-only gos-dhdutil debugging interface lets the core shell domain
+set a vendor-owned property. Generated GrapheneOS device support carries a
+broad neverallow escape, but this pristine-AOSP workflow deliberately removes
+that escape. AOSP 17 correctly rejects the cross-partition property writer.
+
+Retain the confined debug helper and its ability to publish its result, but do
+not grant shell the forbidden vendor property write. Do not add shell to the
+system_writes_vendor_properties_violators compatibility attribute.
+---
+ .../common/sepolicy/vendor/gos_dhdutil.te                      | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/config/mk/google_devices/common/sepolicy/vendor/gos_dhdutil.te b/config/mk/google_devices/common/sepolicy/vendor/gos_dhdutil.te
+index 021afcf2..82e5940c 100644
+--- a/config/mk/google_devices/common/sepolicy/vendor/gos_dhdutil.te
++++ b/config/mk/google_devices/common/sepolicy/vendor/gos_dhdutil.te
+@@ -9,5 +9,4 @@ net_domain(gos_dhdutil)
+ allow gos_dhdutil self:global_capability_class_set net_admin;
+ allowxperm gos_dhdutil self:udp_socket ioctl SIOCDEVPRIVATE;
+ set_prop(gos_dhdutil, vendor_gos_dhdutil_prop)
+-set_prop(shell, vendor_gos_dhdutil_prop)
+ ')
+-- 
+2.53.0

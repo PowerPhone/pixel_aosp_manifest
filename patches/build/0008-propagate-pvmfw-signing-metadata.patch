@@ -1,0 +1,237 @@
+From a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8 Mon Sep 17 00:00:00 2001
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Fri, 28 Aug 2026 16:10:00 -0400
+Subject: [PATCH] Propagate signing-only pvmfw metadata to target files
+
+Soong signs pvmfw_img with the inherited RSA-4096 AVB test key. Make's
+misc_info omits a key and algorithm when BOARD_AVB_PVMFW_KEY_PATH is
+intentionally unset, so releasetools strips the direct image footer and
+reconstructs it with Algorithm: NONE and a fingerprint-derived salt.
+
+Do not use the standard avb_pvmfw_key_path metadata for this case: both Make
+and releasetools interpret it as a request to chain pvmfw independently,
+whereas pvmfw is already a leaf descriptor inside vbmeta_system. Introduce a
+signing-only metadata pair consumed only while rebuilding the pvmfw footer,
+and preserve that distinction when sign_target_files_apks replaces keys.
+Reject incomplete or mixed signing modes.
+
+Pin the same empty-payload-derived salt used by Soong, suppress the redundant
+global salt when that explicit salt is present, and track every misc_info
+input as a normal build prerequisite. Add focused releasetools tests for the
+signing-only command and key-replacement paths.
+
+This is a project-authored AOSP 17 target-files correctness fix.
+License: Apache-2.0 (platform/build)
+---
+ core/Makefile                                      | 11 +++++++++
+ tools/releasetools/add_img_to_target_files.py      | 25 ++++++++++++++++---
+ tools/releasetools/sign_target_files_apks.py       | 18 ++++++++++++--
+ tools/releasetools/test_add_img_to_target_files.py | 28 +++++++++++++++++++++-
+ tools/releasetools/test_sign_target_files_apks.py  | 28 ++++++++++++++++++++--
+ 5 files changed, 102 insertions(+), 8 deletions(-)
+
+diff --git a/core/Makefile b/core/Makefile
+index dd7544f20b..e2a693d5d6 100644
+--- a/core/Makefile
++++ b/core/Makefile
+@@ -4944,6 +4944,7 @@ BOARD_AVB_DTBO_ADD_HASH_FOOTER_ARGS += \
+     --prop com.android.build.dtbo.fingerprint:$(BUILD_FINGERPRINT_FROM_FILE)
+ 
+ BOARD_AVB_PVMFW_ADD_HASH_FOOTER_ARGS += \
++    --salt e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 \
+     --prop com.android.build.pvmfw.fingerprint:$(BUILD_FINGERPRINT_FROM_FILE)
+ 
+ # The following vendor- and odm-specific images needs explicit SPL set per board.
+@@ -6098,6 +6099,13 @@ $(INSTALLED_MISC_INFO_TARGET): $(BUILD_FINGERPRINT_FILE) \
+ endif
+ endif
+ 
++ifeq ($(BOARD_USES_PVMFWIMAGE),true)
++ifeq ($(BOARD_AVB_ENABLE),true)
++$(INSTALLED_MISC_INFO_TARGET): $(BUILD_FINGERPRINT_FILE) \
++    $(if $(BOARD_AVB_PVMFW_KEY_PATH),$(BOARD_AVB_PVMFW_KEY_PATH),$(BOARD_AVB_KEY_PATH))
++endif
++endif
++
+ ifeq ($(TARGET_RELEASETOOLS_EXTENSIONS),)
+ # default to common dir for device vendor
+ tool_extensions := $(TARGET_DEVICE_DIR)/../common
+@@ -6302,6 +6310,9 @@ ifdef BOARD_AVB_PVMFW_KEY_PATH
+ 	$(hide) echo "avb_pvmfw_key_path=$(BOARD_AVB_PVMFW_KEY_PATH)" >> $@
+ 	$(hide) echo "avb_pvmfw_algorithm=$(BOARD_AVB_PVMFW_ALGORITHM)" >> $@
+ 	$(hide) echo "avb_pvmfw_rollback_index_location=$(BOARD_AVB_PVMFW_ROLLBACK_INDEX_LOCATION)" >> $@
++else
++	$(hide) echo "avb_pvmfw_signing_key_path=$(BOARD_AVB_KEY_PATH)" >> $@
++	$(hide) echo "avb_pvmfw_signing_algorithm=$(BOARD_AVB_ALGORITHM)" >> $@
+ endif # BOARD_AVB_PVMFW_KEY_PATH
+ endif # BOARD_AVB_ENABLE
+ endif # BOARD_USES_PVMFWIMAGE
+diff --git a/tools/releasetools/add_img_to_target_files.py b/tools/releasetools/add_img_to_target_files.py
+index f5f26b74e3..50e41437b9 100644
+--- a/tools/releasetools/add_img_to_target_files.py
++++ b/tools/releasetools/add_img_to_target_files.py
+@@ -537,10 +537,29 @@ def AddPvmfw(output_zip):
+     # The AVB hash footer will be replaced if already present.
+     cmd = [avbtool, "add_hash_footer", "--image", img.name,
+            "--partition_size", str(part_size), "--partition_name", "pvmfw"]
+-    common.AppendAVBSigningArgs(cmd, "pvmfw")
+     args = OPTIONS.info_dict.get("avb_pvmfw_add_hash_footer_args")
+-    if args and args.strip():
+-      cmd.extend(shlex.split(args))
++    extra_args = shlex.split(args) if args and args.strip() else []
++    signing_key = OPTIONS.info_dict.get("avb_pvmfw_signing_key_path")
++    signing_algorithm = OPTIONS.info_dict.get("avb_pvmfw_signing_algorithm")
++    if bool(signing_key) != bool(signing_algorithm):
++      raise common.ExternalError(
++          "pvmfw signing key and algorithm must both be specified")
++    if signing_key and any(
++        key in OPTIONS.info_dict for key in (
++            "avb_pvmfw_key_path", "avb_pvmfw_algorithm",
++            "avb_pvmfw_rollback_index_location")):
++      raise common.ExternalError(
++          "pvmfw cannot use both chained and signing-only AVB keys")
++
++    # A salt supplied in the partition footer arguments is authoritative. Do
++    # not also inject LoadInfoDict's fingerprint-derived global salt.
++    common.AppendAVBSigningArgs(
++        cmd, "pvmfw", avb_salt="" if "--salt" in extra_args else None)
++    if signing_key:
++      cmd.extend([
++          "--key", common.ResolveAVBSigningPathArgs(signing_key),
++          "--algorithm", signing_algorithm])
++    cmd.extend(extra_args)
+     common.RunAndCheckOutput(cmd)
+ 
+   img.Write()
+diff --git a/tools/releasetools/sign_target_files_apks.py b/tools/releasetools/sign_target_files_apks.py
+index 24290216d6..e62bc955cb 100755
+--- a/tools/releasetools/sign_target_files_apks.py
++++ b/tools/releasetools/sign_target_files_apks.py
+@@ -1442,8 +1442,22 @@ def ReplaceAvbSigningKeys(misc_info):
+ 
+     print('Replacing AVB signing key for %s with "%s" (%s)' % (
+         partition, key, algorithm))
+-    misc_info['avb_' + partition + '_algorithm'] = algorithm
+-    misc_info['avb_' + partition + '_key_path'] = key
++    if (partition == 'pvmfw' and
++        ('avb_pvmfw_signing_key_path' in misc_info or
++         'avb_pvmfw_signing_algorithm' in misc_info)):
++      assert ('avb_pvmfw_signing_key_path' in misc_info and
++              'avb_pvmfw_signing_algorithm' in misc_info), (
++                  'Incomplete signing-only AVB metadata for pvmfw')
++      assert not any(
++          key in misc_info for key in (
++              'avb_pvmfw_key_path', 'avb_pvmfw_algorithm',
++              'avb_pvmfw_rollback_index_location')), (
++                  'Mixed chained and signing-only AVB metadata for pvmfw')
++      misc_info['avb_pvmfw_signing_key_path'] = key
++      misc_info['avb_pvmfw_signing_algorithm'] = algorithm
++    else:
++      misc_info['avb_' + partition + '_algorithm'] = algorithm
++      misc_info['avb_' + partition + '_key_path'] = key
+ 
+     extra_args = OPTIONS.avb_extra_args.get(partition)
+     if extra_args:
+diff --git a/tools/releasetools/test_add_img_to_target_files.py b/tools/releasetools/test_add_img_to_target_files.py
+index 7b5476db3e..910f59ec01 100644
+--- a/tools/releasetools/test_add_img_to_target_files.py
++++ b/tools/releasetools/test_add_img_to_target_files.py
+@@ -17,12 +17,13 @@
+ import os
+ import os.path
+ import tempfile
++from unittest import mock
+ import zipfile
+ 
+ import common
+ import test_utils
+ from add_img_to_target_files import (
+-    AddPackRadioImages,
++    AddPackRadioImages, AddPvmfw,
+     AddCareMapForAbOta, GetCareMap,
+     CheckAbOtaImages)
+ from rangelib import RangeSet
+@@ -121,6 +122,31 @@ class AddImagesToTargetFilesTest(test_utils.ReleaseToolsTestCase):
+     self.assertRaises(AssertionError, AddPackRadioImages, None,
+                       images + ['baz'])
+ 
++  @mock.patch('common.RunAndCheckOutput')
++  def test_AddPvmfw_signingOnlyMetadata(self, run_and_check_output):
++    self._create_images(['pvmfw'], 'PREBUILT_IMAGES')
++    signing_key = common.MakeTempFile(prefix='pvmfw-', suffix='.pem')
++    with open(signing_key, 'w') as signing_key_file:
++      signing_key_file.write('test key')
++    expected_salt = '00' * 32
++    OPTIONS.info_dict = {
++        'avb_enable': 'true',
++        'avb_avbtool': 'avbtool',
++        'avb_salt': '11' * 32,
++        'pvmfw_size': '1048576',
++        'avb_pvmfw_signing_key_path': signing_key,
++        'avb_pvmfw_signing_algorithm': 'SHA256_RSA4096',
++        'avb_pvmfw_add_hash_footer_args': '--salt ' + expected_salt,
++    }
++
++    AddPvmfw(None)
++
++    cmd = run_and_check_output.call_args.args[0]
++    self.assertEqual(signing_key, cmd[cmd.index('--key') + 1])
++    self.assertEqual('SHA256_RSA4096', cmd[cmd.index('--algorithm') + 1])
++    self.assertEqual(1, cmd.count('--salt'))
++    self.assertEqual(expected_salt, cmd[cmd.index('--salt') + 1])
++
+   @staticmethod
+   def _test_AddCareMapForAbOta():
+     """Helper function to set up the test for test_AddCareMapForAbOta()."""
+diff --git a/tools/releasetools/test_sign_target_files_apks.py b/tools/releasetools/test_sign_target_files_apks.py
+index c8dfcf7ebb..e1f973761c 100644
+--- a/tools/releasetools/test_sign_target_files_apks.py
++++ b/tools/releasetools/test_sign_target_files_apks.py
+@@ -23,7 +23,8 @@ import common
+ import test_utils
+ from sign_target_files_apks import (
+     CheckApkAndApexKeysAvailable, EditTags, GetApkFileInfo, ParseAvbInfo,
+-    ReadApexKeysInfo, ReplaceCerts, RewriteAvbProps, RewriteProps,
++    ReadApexKeysInfo, ReplaceAvbSigningKeys, ReplaceCerts, RewriteAvbProps,
++    RewriteProps,
+     WriteOtacerts)
+ 
+ 
+@@ -57,6 +58,30 @@ name="apex.apexd_test_different_app.apex" public_key="system/apex/apexd/apexd_te
+     # Tags are sorted.
+     self.assertEqual(EditTags('xyz,abc,dev-keys,xyz'), ('abc,release-keys,xyz'))
+ 
++  def test_ReplaceAvbSigningKeys_pvmfwSigningOnlyMetadata(self):
++    misc_info = {
++        'avb_pvmfw_signing_key_path': 'old-key.pem',
++        'avb_pvmfw_signing_algorithm': 'SHA256_RSA4096',
++    }
++    old_keys = common.OPTIONS.avb_keys
++    old_algorithms = common.OPTIONS.avb_algorithms
++    old_extra_args = common.OPTIONS.avb_extra_args
++    try:
++      common.OPTIONS.avb_keys = {'pvmfw': 'new-key.pem'}
++      common.OPTIONS.avb_algorithms = {'pvmfw': 'SHA512_RSA4096'}
++      common.OPTIONS.avb_extra_args = {}
++      ReplaceAvbSigningKeys(misc_info)
++    finally:
++      common.OPTIONS.avb_keys = old_keys
++      common.OPTIONS.avb_algorithms = old_algorithms
++      common.OPTIONS.avb_extra_args = old_extra_args
++
++    self.assertEqual('new-key.pem', misc_info['avb_pvmfw_signing_key_path'])
++    self.assertEqual(
++        'SHA512_RSA4096', misc_info['avb_pvmfw_signing_algorithm'])
++    self.assertNotIn('avb_pvmfw_key_path', misc_info)
++    self.assertNotIn('avb_pvmfw_algorithm', misc_info)
++
+   def test_RewriteAvbProps(self):
+     misc_info = {
+       'avb_boot_add_hash_footer_args':
+@@ -536,4 +561,3 @@ name="apex.apexd_test_different_app.apex" public_key="system/apex/apexd/apexd_te
+             'system/apex/apexd/apexd_testdata/com.android.apex.test_package_2.pem',
+             'build/make/target/product/security/testkey', None),
+         }, keys_info)
+-
+-- 
+2.53.0

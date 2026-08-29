@@ -1,0 +1,9 @@
+# Exact Repo project HEAD required by each reviewed patch stack.
+build/make 5ce6f787337d0223710bf7d4a16dbe6d2a35f777
+build/soong 6722dd8833db7482df1a2543ca3fcf67ddf0f7b1
+frameworks/base 94b4c163b7dfe5ce3607f7bb8456f9573f7de57d
+packages/apps/CarrierConfig2 9d56beab5824252e6fcdd09c04726d276343b247
+system/core 545d2487e38192a2ce25040897ced877cf6b4f53
+system/sepolicy e066568e98d86db31a9346d30977f3632fa7073c
+tools/apksig 179f60df00d242f6bb22acf828b0884eac2d5f72
+vendor/adevtool b01ccecab3468f3bcfa0d23adc361ad074989674
