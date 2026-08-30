@@ -72,26 +72,30 @@ if grep -Eq '(^|[[:space:]])evaluate($|[[:space:]])' \
   exit 1
 fi
 
-# Exercise both production entry points in an isolated project copy. Patch
-# only the copy's ADB digest to the host mock, so neither action can select the
-# real USB transport. Both must stop at the shared guard before publishing
-# recovery evidence or reaching any reboot command.
+# Exercise the current stock-Android restore finalizer in an isolated project
+# copy. Patch only the copy's ADB digest to the host mock, so the action cannot
+# select the real USB transport. It must stop at the shared guard before
+# publishing recovery evidence or reaching any reboot command. The retired
+# Android/two-slot-lpdump stock-A attestation action is deliberately not used.
 fixture="$scratch_dir/project"
-mkdir -p "$fixture/config" "$fixture/scripts/lib" "$fixture/.cache"
+mkdir -p "$fixture/config/targets/cubs" "$fixture/scripts/lib" \
+  "$fixture/.cache"
 cp -- "$project_root/config/release.env" "$fixture/config/release.env"
+cp -- "$project_root/config/targets/cubs/release.env" \
+  "$fixture/config/targets/cubs/release.env"
 cp -- "$project_root/config/recovery.env" "$fixture/config/recovery.env"
-cp -- "$project_root/scripts/attest-stock-a-for-physical-b.sh" \
-  "$fixture/scripts/attest-stock-a-for-physical-b.sh"
 cp -- "$project_root/scripts/restore-stock.sh" \
   "$fixture/scripts/restore-stock.sh"
 cp -- "$project_root/scripts/lib/common.sh" "$fixture/scripts/lib/common.sh"
+cp -- "$project_root/scripts/lib/target-profile.sh" \
+  "$fixture/scripts/lib/target-profile.sh"
 cp -- "$project_root/scripts/lib/recovery-handoff.sh" \
   "$fixture/scripts/lib/recovery-handoff.sh"
 cp -- "$helper" "$fixture/scripts/lib/stock-adb-shell.sh"
 mock_sha=$(sha256sum "$mock_adb" | awk '{print $1}')
 sed -i \
   "s/^PLATFORM_TOOLS_ADB_SHA256=.*/PLATFORM_TOOLS_ADB_SHA256=$mock_sha/" \
-  "$fixture/config/recovery.env"
+  "$fixture/config/release.env"
 
 run_production_gate() {
   local script=$1 command_log=$2 recovery_dir=$3
@@ -103,29 +107,9 @@ run_production_gate() {
   MOCK_ADB_STOCK_SHELL_MODE=tradein \
   ADB="$mock_adb" \
   CUBS_RECOVERY_STATE_DIR="$recovery_dir" \
+  PIXEL_TARGET=cubs \
     "$script" "$@"
 }
-
-attest_log="$scratch_dir/attest.commands"
-: >"$attest_log"
-mkdir -p "$fixture/.cache/attest"
-printf 'active-preflight-sentinel\n' \
-  >"$fixture/.cache/attest/stock-a-physical-b-preflight"
-chmod 0600 "$fixture/.cache/attest/stock-a-physical-b-preflight"
-attest_receipt_sha=$(sha256sum \
-  "$fixture/.cache/attest/stock-a-physical-b-preflight" | awk '{print $1}')
-if run_production_gate \
-    "$fixture/scripts/attest-stock-a-for-physical-b.sh" \
-    "$attest_log" "$fixture/.cache/attest" attest-android \
-    >"$scratch_dir/attest.out" 2>"$scratch_dir/attest.err"; then
-  printf 'error: stock-A attestation accepted Trade-In Mode\n' >&2
-  exit 1
-fi
-grep -Fq 'restricted Trade-In Mode foyer' "$scratch_dir/attest.err"
-[[ $(<"$attest_log") == $'shell -T -x true\nshell tradeinmode getstatus' ]]
-[[ $(sha256sum "$fixture/.cache/attest/stock-a-physical-b-preflight" | \
-      awk '{print $1}') == "$attest_receipt_sha" && \
-   ! -e "$fixture/.cache/attest/stock-a-complete-lpdump" ]]
 
 restore_log="$scratch_dir/restore.commands"
 : >"$restore_log"
@@ -156,7 +140,7 @@ grep -Fq 'restricted Trade-In Mode foyer' "$scratch_dir/restore.err"
   exit 1
 }
 if grep -Eq '(^|[[:space:]])evaluate($|[[:space:]])' \
-    "$attest_log" "$restore_log"; then
+    "$restore_log"; then
   printf 'error: a production preflight invoked the destructive Trade-In action\n' >&2
   exit 1
 fi

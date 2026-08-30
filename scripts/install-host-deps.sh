@@ -11,8 +11,6 @@ unset installer_source installer_directory
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 # shellcheck source=../config/release.env
 source "$project_root/config/release.env"
-# shellcheck source=../config/recovery.env
-source "$project_root/config/recovery.env"
 # shellcheck source=lib/host-toolchain.sh
 source "$project_root/scripts/lib/host-toolchain.sh"
 
@@ -49,6 +47,7 @@ packages=(
   openssl
   pkgconf
   protobuf-compiler
+  python3
   python3-protobuf
   repo
   rsync

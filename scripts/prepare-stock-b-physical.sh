@@ -8,6 +8,8 @@ source "$script_dir/lib/common.sh"
 # shellcheck source=lib/recovery-handoff.sh disable=SC1091
 source "$script_dir/lib/recovery-handoff.sh"
 
+require_pixel_target cubs "the physical stock-B preparation workflow"
+
 require_command awk chmod cmp date flock grep mkdir mktemp mv od openssl \
   realpath rm sed sha256sum sort stat tail tr unzip
 

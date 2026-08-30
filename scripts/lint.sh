@@ -5,10 +5,17 @@ export LC_ALL=C
 project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$project_root"
 
-bash -n config/cubs-dexpreopt.env scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh
+bash -n config/cubs-dexpreopt.env config/targets/*/release.env \
+  scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh
 shellcheck -x scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh
 scripts/tests/simulate-cubs-fstab-avb-mapping.sh
 scripts/tests/simulate-usbipd-win-provenance.sh
+scripts/tests/simulate-stock-adb-shell-gate.sh
+bash scripts/tests/simulate-frankel-bundle-integrity.sh
+for profile_target in cubs frankel; do
+  PIXEL_TARGET=$profile_target bash -c \
+    'source "$1/scripts/lib/common.sh"' _ "$project_root"
+done
 while IFS= read -r script; do
   if head -n 1 "$script" | grep -q '^#!' && [[ ! -x "$script" ]]; then
     printf 'error: directly executable script lacks executable mode: %s\n' \
@@ -74,6 +81,8 @@ git diff --check
 # literals locked to the project configuration that creates private handoffs.
 # shellcheck source=../config/release.env disable=SC1091
 source config/release.env
+# shellcheck source=../config/targets/cubs/release.env disable=SC1091
+source config/targets/cubs/release.env
 # shellcheck source=../config/recovery.env disable=SC1091
 source config/recovery.env
 
@@ -212,6 +221,36 @@ done
   exit 1
 }
 
+# The Frankel runner is also standalone. Bind its literal compatibility gates
+# to the selected target profile and shared Platform-Tools pin.
+frankel_profile=config/targets/frankel/release.env
+frankel_bootloader=$(sed -n 's/^EXPECTED_BOOTLOADER_VERSION=//p' \
+  "$frankel_profile")
+frankel_baseband=$(sed -n 's/^EXPECTED_BASEBAND_VERSION=//p' \
+  "$frankel_profile")
+frankel_runner_bootloader=$(sed -n \
+  's/^expected_bootloader_version=//p' scripts/flash-frankel.sh)
+frankel_runner_baseband=$(sed -n \
+  's/^expected_baseband_version=//p' scripts/flash-frankel.sh)
+frankel_runner_fastboot=$(sed -n \
+  's/^expected_fastboot_version=//p' scripts/flash-frankel.sh)
+frankel_runner_fastboot_sha256=$(sed -n \
+  's/^expected_fastboot_sha256=//p' scripts/flash-frankel.sh)
+[[ $(grep -c '^EXPECTED_BOOTLOADER_VERSION=' "$frankel_profile") -eq 1 && \
+   $(grep -c '^EXPECTED_BASEBAND_VERSION=' "$frankel_profile") -eq 1 && \
+   $(grep -c '^expected_bootloader_version=' scripts/flash-frankel.sh) -eq 1 && \
+   $(grep -c '^expected_baseband_version=' scripts/flash-frankel.sh) -eq 1 && \
+   $(grep -c '^expected_fastboot_version=' scripts/flash-frankel.sh) -eq 1 && \
+   $(grep -c '^expected_fastboot_sha256=' scripts/flash-frankel.sh) -eq 1 && \
+   "$frankel_runner_bootloader" == "$frankel_bootloader" && \
+   "$frankel_runner_baseband" == "$frankel_baseband" && \
+   "$frankel_runner_fastboot" == "$PLATFORM_TOOLS_VERSION" && \
+   "$frankel_runner_fastboot_sha256" == \
+     "$PLATFORM_TOOLS_FASTBOOT_SHA256" ]] || {
+  printf 'error: standalone Frankel runner pins differ from target configuration\n' >&2
+  exit 1
+}
+
 # Audit every file Git could currently stage, not only files already tracked.
 # This catches a misplaced proprietary image or private key even in a fresh
 # repository before the first commit.
@@ -237,7 +276,7 @@ while IFS= read -r -d '' candidate; do
     work/*|out/*|downloads/*|proprietary/*|artifacts/*|logs/*|.cache/*|\
     .ccache/*|.repo/*|scripts/.*-test.*|*/proprietary/*|\
     __pycache__/*|*/__pycache__/*|*.pyc|*.pyo|*.pyd|\
-    vendor/google_devices/cubs/*|\
+    vendor/google_devices/*|\
     *.7z|*.aar|*.apex|*.apk|*.bin|*.cpio|*.cpio.*|*.dex|*.dtb|*.dtbo|\
     *.elf|*.[eE][xX][eE]|*.fw|*.img|*.jar|*.ko|*.mbn|\
     *.[mM][sS][iI]|*.oat|*.odex|*.so|*.tar|\

@@ -9,6 +9,8 @@ source "$script_dir/lib/cubs-dexpreopt.sh"
 # shellcheck source=lib/cubs-wifi-vintf.sh disable=SC1091
 source "$script_dir/lib/cubs-wifi-vintf.sh"
 
+require_pixel_target cubs "the legacy GSI/Cubs build attester"
+
 usage() {
   printf 'usage: %s invalidate|create|verify gsi|cubs\n' "$0" >&2
   exit 2
@@ -47,6 +49,9 @@ case "$out_dir" in
   "$source_dir"/*) ;;
   *) die "build output directory must be inside the AOSP source tree" ;;
 esac
+if [[ "$kind" == cubs ]]; then
+  require_target_scoped_output "$source_dir" "$out_dir"
+fi
 
 marker="$out_dir/build-completion-$kind.attestation"
 if [[ "$action" == verify ]]; then
@@ -83,10 +88,12 @@ resolved_manifest="$project_root/manifests/resolved.xml"
 patch_lock="$project_root/patches/SHA256SUMS"
 base_revisions="$project_root/patches/BASE_REVISIONS"
 release_env="$project_root/config/release.env"
+target_release_env="$project_root/config/targets/$DEVICE_CODENAME/release.env"
 require_file "$resolved_manifest"
 require_file "$patch_lock"
 require_file "$base_revisions"
 require_file "$release_env"
+require_file "$target_release_env"
 (
   cd "$project_root/patches"
   sha256sum --check --strict --status SHA256SUMS
@@ -111,6 +118,8 @@ patch_lock_sha256=$(hash_regular_output "$patch_lock" "patch lock")
 base_revisions_sha256=$(hash_regular_output \
   "$base_revisions" "patch-base revision lock")
 release_env_sha256=$(hash_regular_output "$release_env" "release configuration")
+target_release_env_sha256=$(hash_regular_output \
+  "$target_release_env" "target release configuration")
 soong_variables="$out_dir/soong/soong.$soong_product.variables"
 soong_variables_sha256=$(hash_regular_output \
   "$soong_variables" "Soong product variables")
@@ -203,6 +212,7 @@ source_lock_sha256=$(
     printf 'patch_lock_sha256=%s\n' "$patch_lock_sha256"
     printf 'base_revisions_sha256=%s\n' "$base_revisions_sha256"
     printf 'release_env_sha256=%s\n' "$release_env_sha256"
+    printf 'target_release_env_sha256=%s\n' "$target_release_env_sha256"
   } | sha256sum
 )
 source_lock_sha256=${source_lock_sha256%% *}
@@ -361,6 +371,7 @@ trap cleanup EXIT
   printf 'patch_lock_sha256=%s\n' "$patch_lock_sha256"
   printf 'base_revisions_sha256=%s\n' "$base_revisions_sha256"
   printf 'release_env_sha256=%s\n' "$release_env_sha256"
+  printf 'target_release_env_sha256=%s\n' "$target_release_env_sha256"
   printf 'soong_variables_sha256=%s\n' "$soong_variables_sha256"
   printf 'soong_environment_used_sha256=%s\n' \
     "$soong_environment_used_sha256"
@@ -459,6 +470,8 @@ case "$kind" in
       die "target-files output directory is missing or unsafe: $target_files_root"
     target_files_root=$(realpath -e -- "$target_files_root")
     if [[ -n "${CUBS_TARGET_FILES:-}" ]]; then
+      [[ -f "$CUBS_TARGET_FILES" && ! -L "$CUBS_TARGET_FILES" ]] || \
+        die "CUBS_TARGET_FILES is not a safe regular file"
       target_files=$(realpath -e -- "$CUBS_TARGET_FILES")
       case "$target_files" in
         "$target_files_root"/*) ;;

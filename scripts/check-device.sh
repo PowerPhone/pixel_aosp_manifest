@@ -38,6 +38,10 @@ slot_b_unbootable=$(fastboot_value slot-unbootable:b)
 [[ "$product" == "$DEVICE_CODENAME" ]] || \
   die "expected product $DEVICE_CODENAME; found ${product:-unknown}"
 [[ "$unlocked" == yes ]] || die "device bootloader is not unlocked"
+[[ "$bootloader" == "$EXPECTED_BOOTLOADER_VERSION" ]] || \
+  die "bootloader mismatch: expected $EXPECTED_BOOTLOADER_VERSION, found ${bootloader:-unknown}"
+[[ "$baseband" == "$EXPECTED_BASEBAND_VERSION" ]] || \
+  die "baseband mismatch: expected $EXPECTED_BASEBAND_VERSION, found ${baseband:-unknown}"
 [[ "$slot_count" == 2 ]] || die "expected two boot slots; found ${slot_count:-unknown}"
 [[ "$snapshot_status" == none ]] || \
   die "snapshot update status must be none; found ${snapshot_status:-unknown}"
@@ -53,12 +57,14 @@ if [[ -f "$stock_images" ]]; then
   android_info=$(unzip -p "$stock_images" android-info.txt)
   expected_bootloader=$(sed -n 's/^require version-bootloader=//p' <<<"$android_info")
   expected_baseband=$(sed -n 's/^require version-baseband=//p' <<<"$android_info")
-  [[ "$bootloader" == "$expected_bootloader" ]] || \
-    die "bootloader mismatch: expected $expected_bootloader, found $bootloader"
-  [[ "$baseband" == "$expected_baseband" ]] || \
-    die "baseband mismatch: expected $expected_baseband, found $baseband"
+  [[ $(grep -c '^require version-bootloader=' <<<"$android_info") -eq 1 && \
+     "$expected_bootloader" == "$EXPECTED_BOOTLOADER_VERSION" ]] || \
+    die "stock archive bootloader requirement differs from the target profile"
+  [[ $(grep -c '^require version-baseband=' <<<"$android_info") -eq 1 && \
+     "$expected_baseband" == "$EXPECTED_BASEBAND_VERSION" ]] || \
+    die "stock archive baseband requirement differs from the target profile"
 else
-  note "warning: extract the stock package to enable firmware-version checks"
+  note "warning: extract the stock package to verify its metadata against the live firmware pins"
 fi
 
 printf 'product: %s\n' "$product"

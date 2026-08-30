@@ -9,6 +9,8 @@ source "$script_dir/lib/stock-adb-shell.sh"
 # shellcheck source=lib/recovery-handoff.sh disable=SC1091
 source "$script_dir/lib/recovery-handoff.sh"
 
+require_pixel_target cubs "the transactional stock restore"
+
 require_command awk chmod cp date find flock grep mkdir mktemp mv openssl realpath \
   od rm sed sha256sum sleep sort stat tail timeout tr unzip
 

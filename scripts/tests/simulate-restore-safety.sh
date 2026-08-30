@@ -7,6 +7,8 @@ mock_fastboot="$test_dir/mock-fastboot.sh"
 mock_adb="$test_dir/mock-adb.sh"
 # shellcheck source=../../config/release.env
 source "$project_root/config/release.env"
+# shellcheck source=../../config/targets/cubs/release.env
+source "$project_root/config/targets/cubs/release.env"
 # shellcheck source=../../config/recovery.env
 source "$project_root/config/recovery.env"
 production_fastboot_sha256=$PLATFORM_TOOLS_FASTBOOT_SHA256

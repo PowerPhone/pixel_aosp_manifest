@@ -7,6 +7,8 @@ source "$script_dir/lib/common.sh"
 # shellcheck source=lib/recovery-handoff.sh disable=SC1091
 source "$script_dir/lib/recovery-handoff.sh"
 
+require_pixel_target cubs "the recovery-anchored GSI/Cubs runtime validator"
+
 usage() {
   cat >&2 <<'EOF'
 usage: [CUBS_ADB_SERIAL=<serial>] scripts/validate-runtime.sh gsi|cubs

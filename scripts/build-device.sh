@@ -22,11 +22,18 @@ build_jobs=${BUILD_JOBS:-$(nproc)}
   die "BUILD_JOBS must be a positive integer"
 (( build_jobs <= 256 )) || die "BUILD_JOBS must not exceed 256"
 source_dir=$(realpath -m -- "$source_dir")
-out_dir=${DEVICE_OUT_DIR:-"$source_dir/out_pixel/cubs"}
+out_dir=${DEVICE_OUT_DIR:-"$source_dir/out_pixel/$DEVICE_CODENAME"}
 out_dir=$(realpath -m -- "$out_dir")
-if [[ -n "${CUBS_TARGET_FILES:-}" ]]; then
-  CUBS_TARGET_FILES=$(realpath -m -- "$CUBS_TARGET_FILES")
-  export CUBS_TARGET_FILES
+if [[ -n "${DEVICE_TARGET_FILES:-}" ]]; then
+  [[ ! -L "$DEVICE_TARGET_FILES" ]] || \
+    die "DEVICE_TARGET_FILES must not be a symbolic link"
+  DEVICE_TARGET_FILES=$(realpath -m -- "$DEVICE_TARGET_FILES")
+  export DEVICE_TARGET_FILES
+elif [[ "$DEVICE_CODENAME" == cubs && -n "${CUBS_TARGET_FILES:-}" ]]; then
+  [[ ! -L "$CUBS_TARGET_FILES" ]] || \
+    die "CUBS_TARGET_FILES must not be a symbolic link"
+  DEVICE_TARGET_FILES=$(realpath -m -- "$CUBS_TARGET_FILES")
+  export DEVICE_TARGET_FILES
 fi
 assert_inside_work "$source_dir"
 assert_inside_work "$out_dir"
@@ -34,12 +41,17 @@ case "$out_dir" in
   "$source_dir"/*) ;;
   *) die "DEVICE_OUT_DIR must be inside the AOSP source tree for Soong/Siso" ;;
 esac
+require_target_scoped_output "$source_dir" "$out_dir"
 require_file "$source_dir/build/envsetup.sh"
 require_file "$project_root/manifests/resolved.xml"
 require_file "$source_dir/vendor/google_devices/$DEVICE_CODENAME/$DEVICE_CODENAME.mk"
 
 "$script_dir/apply-source-patches.sh"
-"$script_dir/sanitize-generated-vendor.sh"
+case "$DEVICE_CODENAME" in
+  cubs) "$script_dir/sanitize-generated-vendor.sh" ;;
+  frankel) "$script_dir/sanitize-generated-vendor-frankel.sh" ;;
+  *) die "no generated-vendor sanitizer is implemented for $DEVICE_CODENAME" ;;
+esac
 "$script_dir/attest-generated-vendor.sh" verify
 "$script_dir/check-source.sh" --allow-patches
 
@@ -49,9 +61,9 @@ assert_inside_project "$logs_dir"
 mkdir -p "$out_dir" "$logs_dir"
 [[ -d "$logs_dir" && ! -L "$logs_dir" ]] || \
   die "logs path is not a real directory: $logs_dir"
-build_log="$logs_dir/build-cubs.log"
+build_log="$logs_dir/build-$DEVICE_CODENAME.log"
 [[ ! -L "$build_log" && ( ! -e "$build_log" || -f "$build_log" ) ]] || \
-  die "cubs build log is not a safe regular file: $build_log"
+  die "$DEVICE_CODENAME build log is not a safe regular file: $build_log"
 cd "$source_dir"
 # Siso's config repository flag is relative to the source execution root, and
 # Soong requires output paths to remain below that root.
@@ -91,11 +103,16 @@ source build/envsetup.sh
 # works without the downstream envsetup auto-discovery change.
 # shellcheck disable=SC1090
 source "vendor/google_devices/$DEVICE_CODENAME/cmds-for-envsetup.sh"
-lunch "${DEVICE_CODENAME}-aosp_current-userdebug"
+lunch "$DEVICE_PRODUCT_TARGET"
 
-AOSP_SOURCE_DIR="$source_dir" DEVICE_OUT_DIR="$out_dir" \
-  "$script_dir/attest-build-output.sh" invalidate cubs
-note "building cubs userdebug target-files and boot images with $build_jobs jobs"
+if [[ "$DEVICE_CODENAME" == cubs ]]; then
+  AOSP_SOURCE_DIR="$source_dir" DEVICE_OUT_DIR="$out_dir" \
+    "$script_dir/attest-build-output.sh" invalidate cubs
+else
+  AOSP_SOURCE_DIR="$source_dir" DEVICE_OUT_DIR="$out_dir" \
+    "$script_dir/attest-device-build.sh" invalidate
+fi
+note "building $DEVICE_CODENAME userdebug target-files and boot images with $build_jobs jobs"
 # Cubs uses BOARD_PREBUILT_DTBOIMAGE. AOSP creates the concrete dtbo.img edge
 # but no legacy dtboimage phony target; vbmetaimage and target-files-package
 # both depend on that concrete image and therefore build it fail-closed.
@@ -127,6 +144,11 @@ product_out="$out_dir/target/product/$DEVICE_CODENAME"
 require_file "$product_out/boot.img"
 require_file "$product_out/vendor_boot.img"
 require_file "$product_out/vendor_kernel_boot.img"
-AOSP_SOURCE_DIR="$source_dir" DEVICE_OUT_DIR="$out_dir" \
-  "$script_dir/attest-build-output.sh" create cubs
+if [[ "$DEVICE_CODENAME" == cubs ]]; then
+  AOSP_SOURCE_DIR="$source_dir" DEVICE_OUT_DIR="$out_dir" \
+    "$script_dir/attest-build-output.sh" create cubs
+else
+  AOSP_SOURCE_DIR="$source_dir" DEVICE_OUT_DIR="$out_dir" \
+    "$script_dir/attest-device-build.sh" create
+fi
 note "device output: $product_out"

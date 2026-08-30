@@ -1,5 +1,7 @@
 # Static image validation
 
+> **Scope:** This legacy guide documents the Pixel 11 (`cubs`) workflow only; see the [multi-target layout](multi-target-layout.md) for current target organization.
+
 `scripts/validate-images.sh` is the final, read-only gate between packaging
 and any device operation. It validates completed bundles against the build
 outputs that produced them; it does not invoke `adb`, `fastboot`, or any USB

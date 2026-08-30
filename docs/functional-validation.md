@@ -1,5 +1,7 @@
 # Functional validation
 
+> **Scope:** This legacy guide documents the Pixel 11 (`cubs`) workflow only; see the [multi-target layout](multi-target-layout.md) for current target organization.
+
 This is the manual acceptance record for development images flashed to `cubs`.
 Each exact GSI or complete-cubs candidate receives its own immutable record. It
 complements, but is not replaced by, the read-only checks in

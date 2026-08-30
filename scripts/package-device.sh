@@ -4,6 +4,11 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh disable=SC1091
 source "$script_dir/lib/common.sh"
+if [[ "$DEVICE_CODENAME" == frankel ]]; then
+  exec "$script_dir/package-device-frankel.sh" "$@"
+fi
+[[ "$DEVICE_CODENAME" == cubs ]] || \
+  die "no device packager is implemented for $DEVICE_CODENAME"
 # shellcheck source=../config/recovery.env disable=SC1091
 source "$project_root/config/recovery.env"
 
@@ -211,11 +216,14 @@ case "$bundle_dir" in
   *) die "cubs artifact directory must remain below $artifacts_root" ;;
 esac
 if [[ -n "${CUBS_TARGET_FILES:-}" ]]; then
+  [[ -f "$CUBS_TARGET_FILES" && ! -L "$CUBS_TARGET_FILES" ]] || \
+    die "CUBS_TARGET_FILES is not a safe regular file"
   CUBS_TARGET_FILES=$(realpath -e -- "$CUBS_TARGET_FILES")
   export CUBS_TARGET_FILES
 fi
 assert_inside_work "$source_dir"
 assert_inside_work "$out_dir"
+require_target_scoped_output "$source_dir" "$out_dir"
 assert_inside_project "$bundle_dir"
 AOSP_SOURCE_DIR="$source_dir" \
   "$script_dir/attest-generated-vendor.sh" verify

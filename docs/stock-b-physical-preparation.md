@@ -1,5 +1,7 @@
 # Direct physical-B fastbootd lifeboat
 
+> **Scope:** This legacy guide documents the Pixel 11 (`cubs`) workflow only; see the [multi-target layout](multi-target-layout.md) for current target organization.
+
 Use this fallback only when stock recovery cannot install the pinned full OTA.
 It prepares the 34 physical B partitions needed for fastbootd: 25 firmware
 images and nine boot/recovery images. It never writes `super`, logical

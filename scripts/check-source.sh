@@ -56,6 +56,7 @@ if [[ "$allow_patches" == true ]]; then
     build/make
     build/soong
     frameworks/base
+    frameworks/native
     packages/apps/CarrierConfig2
     system/core
     system/sepolicy

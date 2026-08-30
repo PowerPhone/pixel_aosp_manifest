@@ -7,6 +7,8 @@ source "$script_dir/lib/common.sh"
 # shellcheck source=../config/recovery.env disable=SC1091
 source "$project_root/config/recovery.env"
 
+require_pixel_target cubs "the recovery-anchored GSI packager"
+
 require_command awk find grep install mktemp realpath rm sed sha256sum sort unzip
 
 artifacts_root=$(realpath -m -- "$project_root/artifacts")

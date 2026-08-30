@@ -1,5 +1,7 @@
 # Stock-B pre-flash anchor and physical lifeboat
 
+> **Scope:** This legacy guide documents the Pixel 11 (`cubs`) workflow only; see the [multi-target layout](multi-target-layout.md) for current target organization.
+
 This procedure sends the checksum-pinned Google full OTA from exact stock A to
 inactive B, boots B, and verifies it before the first development write. At
 that point B is an exact stock Android anchor. It is intentionally left current

@@ -16,9 +16,6 @@ PIXEL_AOSP_DEFER_TOOLCHAIN_PATH=true
 # shellcheck source=lib/common.sh
 source "$script_dir/lib/common.sh"
 unset PIXEL_AOSP_DEFER_TOOLCHAIN_PATH
-# shellcheck source=../config/recovery.env disable=SC1091
-source "$project_root/config/recovery.env"
-
 [[ -x /usr/bin/python3 ]] || die "trusted Python bootstrap is missing: /usr/bin/python3"
 
 required_commands=(
@@ -138,8 +135,10 @@ minimum_memory_kib=$((64 * 1024 * 1024))
 (( memory_kib >= minimum_memory_kib )) || \
   die "at least 64 GiB RAM is required for this full device build"
 filesystem_type=$(findmnt -no FSTYPE -T "$project_root")
-[[ "$filesystem_type" == ext4 ]] || \
-  die "workspace must use native ext4; found $filesystem_type"
+case "$filesystem_type" in
+  ext4|btrfs) ;;
+  *) die "workspace must use native ext4 or btrfs; found $filesystem_type" ;;
+esac
 
 printf 'workspace: %s\n' "$project_root"
 printf 'kernel: %s\n' "$(uname -srmo)"

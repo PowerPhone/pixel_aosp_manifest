@@ -1,0 +1,145 @@
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Sun, 30 Aug 2026 00:45:00 -0400
+Subject: [PATCH] Define Frankel-scoped missing feature XML prebuilts
+
+Adevtool replaces stock vendor feature declarations with standard AOSP
+prebuilt_etc modules. The Android 17 source tree defines most of those
+modules, but omits eight declarations needed by Frankel even though their
+Apache-2.0 XML inputs are present in frameworks/native/data/etc.
+
+Undefined PRODUCT_PACKAGES entries do not install anything in the generated
+Pixel products. In particular, omitting android.hardware.wifi.aware causes
+SystemServer to skip the Wi-Fi Aware service and makes
+Context#getSystemService(WifiAwareManager.class) return null to the extracted
+Pixel Modem Service.
+
+Define all eight missing modules under Frankel-prefixed Soong names. Explicit
+filenames preserve the existing vendor/etc/permissions paths while preventing
+the adapter from satisfying unchanged PRODUCT_PACKAGES requests made by Cubs
+or future targets. Frankel's reviewed generated-tree sanitizer rewrites only
+its eight requests to these scoped names.
+
+This is a project-authored AOSP 17 integration fix.
+License: Apache-2.0 (platform/frameworks/native)
+---
+ data/etc/Android.bp | 56 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 56 insertions(+)
+
+diff --git a/data/etc/Android.bp b/data/etc/Android.bp
+index 0654fe1bdf..78443a7fdf 100644
+--- a/data/etc/Android.bp
++++ b/data/etc/Android.bp
+@@ -34,6 +34,13 @@ prebuilt_etc {
+     defaults: ["frameworks_native_data_etc_defaults"],
+ }
+ 
++prebuilt_etc {
++    name: "frankel_android.hardware.audio.pro.prebuilt.xml",
++    src: "android.hardware.audio.pro.xml",
++    filename: "android.hardware.audio.pro.prebuilt.xml",
++    defaults: ["frameworks_native_data_etc_defaults"],
++}
++
+ prebuilt_etc {
+     name: "android.hardware.biometrics.face.prebuilt.xml",
+     src: "android.hardware.biometrics.face.xml",
+@@ -100,6 +107,13 @@ prebuilt_etc {
+     defaults: ["frameworks_native_data_etc_defaults"],
+ }
+ 
++prebuilt_etc {
++    name: "frankel_android.hardware.device_unique_attestation.prebuilt.xml",
++    src: "android.hardware.device_unique_attestation.xml",
++    filename: "android.hardware.device_unique_attestation.prebuilt.xml",
++    defaults: ["frameworks_native_data_etc_defaults"],
++}
++
+ prebuilt_etc {
+     name: "android.hardware.ethernet.prebuilt.xml",
+     src: "android.hardware.ethernet.xml",
+@@ -154,6 +168,13 @@ prebuilt_etc {
+     defaults: ["frameworks_native_data_etc_defaults"],
+ }
+ 
++prebuilt_etc {
++    name: "frankel_android.hardware.opengles.aep.prebuilt.xml",
++    src: "android.hardware.opengles.aep.xml",
++    filename: "android.hardware.opengles.aep.prebuilt.xml",
++    defaults: ["frameworks_native_data_etc_defaults"],
++}
++
+ prebuilt_etc {
+     name: "android.hardware.reboot_escrow.prebuilt.xml",
+     src: "android.hardware.reboot_escrow.xml",
+@@ -382,6 +403,13 @@ prebuilt_etc {
+     defaults: ["frameworks_native_data_etc_defaults"],
+ }
+ 
++prebuilt_etc {
++    name: "frankel_android.hardware.touchscreen.multitouch.jazzhand.prebuilt.xml",
++    src: "android.hardware.touchscreen.multitouch.jazzhand.xml",
++    filename: "android.hardware.touchscreen.multitouch.jazzhand.prebuilt.xml",
++    defaults: ["frameworks_native_data_etc_defaults"],
++}
++
+ prebuilt_etc {
+     name: "android.hardware.usb.accessory.prebuilt.xml",
+     src: "android.hardware.usb.accessory.xml",
+@@ -436,6 +464,13 @@ prebuilt_etc {
+     defaults: ["frameworks_native_data_etc_defaults"],
+ }
+ 
++prebuilt_etc {
++    name: "frankel_android.hardware.wifi.aware.prebuilt.xml",
++    src: "android.hardware.wifi.aware.xml",
++    filename: "android.hardware.wifi.aware.prebuilt.xml",
++    defaults: ["frameworks_native_data_etc_defaults"],
++}
++
+ prebuilt_etc {
+     name: "android.hardware.wifi.direct.prebuilt.xml",
+     src: "android.hardware.wifi.direct.xml",
+@@ -448,6 +483,13 @@ prebuilt_etc {
+     defaults: ["frameworks_native_data_etc_defaults"],
+ }
+ 
++prebuilt_etc {
++    name: "frankel_android.hardware.wifi.rtt.prebuilt.xml",
++    src: "android.hardware.wifi.rtt.xml",
++    filename: "android.hardware.wifi.rtt.prebuilt.xml",
++    defaults: ["frameworks_native_data_etc_defaults"],
++}
++
+ prebuilt_etc {
+     name: "android.software.backup.prebuilt.xml",
+     src: "android.software.backup.xml",
+@@ -480,6 +522,13 @@ prebuilt_etc {
+     defaults: ["frameworks_native_data_etc_defaults"],
+ }
+ 
++prebuilt_etc {
++    name: "frankel_android.software.ipsec_tunnel_migration.prebuilt.xml",
++    src: "android.software.ipsec_tunnel_migration.xml",
++    filename: "android.software.ipsec_tunnel_migration.prebuilt.xml",
++    defaults: ["frameworks_native_data_etc_defaults"],
++}
++
+ prebuilt_etc {
+     name: "android.software.ipsec_tunnels.prebuilt.xml",
+     src: "android.software.ipsec_tunnels.xml",
+@@ -492,6 +541,13 @@ prebuilt_etc {
+     defaults: ["frameworks_native_data_etc_defaults"],
+ }
+ 
++prebuilt_etc {
++    name: "frankel_android.software.midi.prebuilt.xml",
++    src: "android.software.midi.xml",
++    filename: "android.software.midi.prebuilt.xml",
++    defaults: ["frameworks_native_data_etc_defaults"],
++}
++
+ prebuilt_etc {
+     name: "android.software.opengles.deqp.level-2021-03-01.prebuilt.xml",
+     src: "android.software.opengles.deqp.level-2021-03-01.xml",
+-- 
+2.53.0

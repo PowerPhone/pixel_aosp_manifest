@@ -1,5 +1,7 @@
 # Explicit stock-A recovery
 
+> **Scope:** This legacy guide documents the Pixel 11 (`cubs`) workflow only; see the [multi-target layout](multi-target-layout.md) for current target organization.
+
 The recovery input is Google's checksum-pinned `CD1A.260714.001.A9` factory
 archive. Keep the bootloader unlocked throughout development. This project does
 not run Google's outer flashing script or pass the inner archive to fastboot as

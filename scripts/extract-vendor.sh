@@ -99,7 +99,7 @@ done
 export ADEVTOOL_UNPACK_CONCURRENCY=$unpack_concurrency
 export ADEVTOOL_DOWNLOAD_CONCURRENCY=$download_concurrency
 
-note "generating and verifying cubs vendor support from $STOCK_BUILD_ID"
+note "generating and verifying $DEVICE_CODENAME vendor support from $STOCK_BUILD_ID"
 # Intentionally do not pass --noVerify or --updateSpec. A mismatch against the
 # immutable upstream reference is a hard failure for a reproducible extraction.
 vendor/adevtool/bin/run generate-all -d "$DEVICE_CODENAME"
@@ -110,6 +110,10 @@ require_file "$generated_dir/BoardConfig.mk"
 require_file "$generated_dir/stock-kernel/Image.lz4"
 note "verified vendor module against the pinned adevtool specification"
 "$script_dir/check-source.sh" --allow-patches
-"$script_dir/sanitize-generated-vendor.sh"
+case "$DEVICE_CODENAME" in
+  cubs) "$script_dir/sanitize-generated-vendor.sh" ;;
+  frankel) "$script_dir/sanitize-generated-vendor-frankel.sh" ;;
+  *) die "no generated-vendor sanitizer is implemented for $DEVICE_CODENAME" ;;
+esac
 "$script_dir/attest-generated-vendor.sh" create
 note "AOSP-compatible vendor module: $generated_dir"

@@ -15,6 +15,8 @@ source "$script_dir/lib/gsi-static-layout.sh"
 # shellcheck source=lib/cubs-vendor-boot.sh disable=SC1091
 source "$script_dir/lib/cubs-vendor-boot.sh"
 
+require_pixel_target cubs "the legacy GSI/Cubs static validator"
+
 usage() {
   local status=${1:-2}
   cat >&2 <<EOF
@@ -1341,7 +1343,7 @@ validate_attestation() {
   local marker="$bundle/BUILD_ATTESTATION.txt"
   local -a common_keys=(
     format kind source_lock_sha256 resolved_manifest_sha256 patch_lock_sha256
-    base_revisions_sha256 release_env_sha256
+    base_revisions_sha256 release_env_sha256 target_release_env_sha256
     repo_revision aosp_revision source_aosp_build_id output_build_id
     framework_security_patch build_variant
     allow_missing_dependencies selinux_ignore_neverallows
@@ -1355,7 +1357,7 @@ validate_attestation() {
   local image_name key digest soong_variables soong_environment_used
   local source_lock_actual
   local resolved_manifest_sha256 patch_lock_sha256
-  local base_revisions_sha256 release_env_sha256
+  local base_revisions_sha256 release_env_sha256 target_release_env_sha256
   local expected_boot_identity_salt
 
   if [[ "$kind" == gsi ]]; then
@@ -1395,6 +1397,8 @@ validate_attestation() {
   patch_lock_sha256=$(hash_file "$project_root/patches/SHA256SUMS")
   base_revisions_sha256=$(hash_file "$project_root/patches/BASE_REVISIONS")
   release_env_sha256=$(hash_file "$project_root/config/release.env")
+  target_release_env_sha256=$(hash_file \
+    "$project_root/config/targets/$DEVICE_CODENAME/release.env")
   require_value "${attest[resolved_manifest_sha256]}" \
     "$resolved_manifest_sha256" "attested resolved-manifest hash"
   require_value "${attest[patch_lock_sha256]}" "$patch_lock_sha256" \
@@ -1403,12 +1407,15 @@ validate_attestation() {
     "$base_revisions_sha256" "attested base-revision-lock hash"
   require_value "${attest[release_env_sha256]}" "$release_env_sha256" \
     "attested release-configuration hash"
+  require_value "${attest[target_release_env_sha256]}" \
+    "$target_release_env_sha256" "attested target release-configuration hash"
   source_lock_actual=$(
     {
       printf 'resolved_manifest_sha256=%s\n' "$resolved_manifest_sha256"
       printf 'patch_lock_sha256=%s\n' "$patch_lock_sha256"
       printf 'base_revisions_sha256=%s\n' "$base_revisions_sha256"
       printf 'release_env_sha256=%s\n' "$release_env_sha256"
+      printf 'target_release_env_sha256=%s\n' "$target_release_env_sha256"
     } | sha256sum
   )
   source_lock_actual=${source_lock_actual%% *}
@@ -1622,6 +1629,8 @@ locate_cubs_target_files() {
   [[ -d "$root" && ! -L "$root" ]] || die "cubs target-files directory is missing"
   root=$(realpath -e -- "$root")
   if [[ -n "${CUBS_TARGET_FILES:-}" ]]; then
+    [[ -f "$CUBS_TARGET_FILES" && ! -L "$CUBS_TARGET_FILES" ]] || \
+      die "CUBS_TARGET_FILES is not a safe regular file"
     target_files=$(realpath -e -- "$CUBS_TARGET_FILES")
     case "$target_files" in
       "$root"/*) ;;

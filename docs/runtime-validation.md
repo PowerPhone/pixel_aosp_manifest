@@ -1,5 +1,7 @@
 # Runtime validation
 
+> **Scope:** This legacy guide documents the Pixel 11 (`cubs`) workflow only; see the [multi-target layout](multi-target-layout.md) for current target organization.
+
 `scripts/validate-runtime.sh` performs the read-only, post-boot acceptance audit
 for the raw GSI trial and complete cubs build. It never reboots the phone,
 changes a setting, starts an activity, writes a device file, or changes ADB

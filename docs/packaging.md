@@ -1,5 +1,7 @@
 # Packaging and slot-A flashing
 
+> **Scope:** This legacy guide documents the Pixel 11 (`cubs`) workflow only; see the [multi-target layout](multi-target-layout.md) for current target organization.
+
 The packaging scripts turn local build outputs into portable, ignored bundle
 directories with standalone flash runners. A bundle can still depend on the
 explicit device baseline documented below; packaging does not make proprietary

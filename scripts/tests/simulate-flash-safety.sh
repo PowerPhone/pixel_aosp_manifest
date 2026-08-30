@@ -6,6 +6,8 @@ project_root=$(cd -- "$test_dir/../.." && pwd)
 mock_fastboot="$test_dir/mock-fastboot.sh"
 # shellcheck source=../../config/release.env disable=SC1091
 source "$project_root/config/release.env"
+# shellcheck source=../../config/targets/cubs/release.env disable=SC1091
+source "$project_root/config/targets/cubs/release.env"
 # shellcheck source=../../config/recovery.env disable=SC1091
 source "$project_root/config/recovery.env"
 

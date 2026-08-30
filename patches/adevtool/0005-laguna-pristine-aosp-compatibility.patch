@@ -1,0 +1,73 @@
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Sat, 29 Aug 2026 20:30:00 -0400
+Subject: [PATCH] laguna: adapt Pixel 10 products to pristine AOSP
+
+The Pixel 10 product templates in adevtool target the GrapheneOS platform and
+therefore install a GrapheneOS-only USB port-security init fragment and overlay
+framework resources which do not exist in the android-17.0.0_r1 public tree.
+Keep the stock-relevant display color modes, omit those private framework
+hooks, and select the project-authored eUICC flags provider needed by the stock
+support helper on a platform without Google Services Framework.
+
+Pristine AOSP also has no secondary-slot odex input for this bring-up product.
+Disable that image, matching the existing public-AOSP Pixel 11 adapter. Broad
+BoardConfig bring-up escapes remain in the generator output until after
+adevtool verifies its immutable FileTreeSpec; the target sanitizer then removes
+them before any device build.
+
+License: MIT (GrapheneOS/adevtool; see LICENSES/adevtool-MIT.txt)
+---
+ .../platform/laguna/BoardConfig-common.mk          |  3 +++
+ .../google_devices/platform/laguna/device.mk       |  2 +-
+ .../laguna/gos-overlays/GosOverlay/res/values.xml  | 12 ------------
+ 3 files changed, 4 insertions(+), 13 deletions(-)
+
+diff --git a/config/mk/google_devices/platform/laguna/BoardConfig-common.mk b/config/mk/google_devices/platform/laguna/BoardConfig-common.mk
+index 0cd639bb..e5c16d93 100644
+--- a/config/mk/google_devices/platform/laguna/BoardConfig-common.mk
++++ b/config/mk/google_devices/platform/laguna/BoardConfig-common.mk
+@@ -1,4 +1,7 @@
+ include build/make/target/board/BoardConfigMainlineCommon.mk
++# Do not build a secondary-slot odex image during this bring-up workflow.
++BOARD_USES_SYSTEM_OTHER_ODEX :=
++
+ include build/make/target/board/BoardConfigPixelCommon.mk
+ 
+ include vendor/adevtool/config/mk/google_devices/common/BoardConfig-armv9.mk
+diff --git a/config/mk/google_devices/platform/laguna/device.mk b/config/mk/google_devices/platform/laguna/device.mk
+index 45d2f914..0cfc06b2 100644
+--- a/config/mk/google_devices/platform/laguna/device.mk
++++ b/config/mk/google_devices/platform/laguna/device.mk
+@@ -10,8 +10,8 @@ TRUSTY_KEYMINT_IMPL := rust
+ 
+ PRODUCT_PACKAGES += GosOverlay
+ 
+-PRODUCT_PACKAGES += init.laguna.grapheneos.rc
++PRODUCT_PACKAGES += PixelAospGservicesFlagsProvider
+ 
+ PRODUCT_CHECK_VENDOR_SEAPP_VIOLATIONS := true
+ PRODUCT_CHECK_DEV_TYPE_VIOLATIONS := true
+ 
+diff --git a/config/mk/google_devices/platform/laguna/gos-overlays/GosOverlay/res/values/values.xml b/config/mk/google_devices/platform/laguna/gos-overlays/GosOverlay/res/values/values.xml
+index 05e83002..774e8aaf 100644
+--- a/config/mk/google_devices/platform/laguna/gos-overlays/GosOverlay/res/values/values.xml
++++ b/config/mk/google_devices/platform/laguna/gos-overlays/GosOverlay/res/values/values.xml
+@@ -5,16 +5,4 @@
+         <item>2</item> <!-- COLOR_MODE_SATURATED -->
+         <item>3</item> <!-- COLOR_MODE_AUTOMATIC -->
+     </integer-array>
+-
+-
+-    <!-- Exempt ImsService from privacy (location) indicators -->
+-    <string name="config_systemTelephonyPackage" translatable="false">com.shannon.imsservice</string>
+-
+-    <bool name="config_Google_apps_can_have_special_access_to_accelerators">true</bool>
+-
+-    <bool name="config_GoogleCamera_needs_seinfo_for_access_to_accelerators">true</bool>
+-
+-    <string name="config_gnssPsdsType">samsung</string>
+-
+-    <bool name="config_usbPortSecuritySupported">true</bool>
+ </resources>
+-- 
+2.53.0

@@ -9,6 +9,8 @@ source "$script_dir/lib/cubs-sepolicy.sh"
 # shellcheck source=lib/cubs-fstab.sh disable=SC1091
 source "$script_dir/lib/cubs-fstab.sh"
 
+require_pixel_target cubs "the cubs/Malibu generated-vendor sanitizer"
+
 check_only=false
 if [[ "${1:-}" == --check ]]; then
   check_only=true

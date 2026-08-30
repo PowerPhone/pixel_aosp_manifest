@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <manifest>
   <!--
-    Device bring-up projects not present in the AOSP manifest. Revisions are
-    immutable commits so a later upstream branch update cannot silently alter a
-    build. Generated proprietary output remains local and is never committed.
+    Shared Pixel bring-up projects absent from the public AOSP manifest.
+    Revisions are immutable; generated proprietary output remains local and
+    is never committed. The pinned adevtool/state revisions contain target
+    data for cubs, frankel, and other supported Pixel generations.
   -->
   <remote name="grapheneos" fetch="https://github.com/GrapheneOS/" />
 
@@ -14,7 +15,6 @@
       revision="b01ccecab3468f3bcfa0d23adc361ad074989674"
       clone-depth="1" />
 
-  <!-- Reference module state used to classify source-buildable vs proprietary files. -->
   <project
       path="vendor/state"
       name="vendor_state"
@@ -22,7 +22,6 @@
       revision="afd6a0c9f6ca13d395f00e98227a0866cc14de07"
       clone-depth="1" />
 
-  <!-- adevtool host dependency used for resource-table inspection. -->
   <project
       path="tools/arsclib"
       name="platform_tools_arsclib"
@@ -30,7 +29,6 @@
       revision="a67388430c8319f4c7066626e340b5c4d7f27882"
       clone-depth="1" />
 
-  <!-- Pixel product makefiles expect the source-built CarrierConfig2 module. -->
   <project
       path="packages/apps/CarrierConfig2"
       name="platform_packages_apps_CarrierConfig2"

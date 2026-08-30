@@ -5,6 +5,8 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
 source "$script_dir/lib/common.sh"
 
+require_pixel_target cubs "the legacy GSI build"
+
 export BUILD_NUMBER="$AOSP_BUILD_NUMBER"
 export BUILD_USERNAME="$AOSP_BUILD_USERNAME"
 export BUILD_HOSTNAME="$AOSP_BUILD_HOSTNAME"

@@ -1,9 +1,48 @@
-# AOSP 17 for Pixel 11 (`cubs`)
+# AOSP 17 for Google Pixel devices
 
-This repository reconstructs a reproducible Android 17 `userdebug` development
-workflow for the Google Pixel 11 (`cubs`). It builds a standard ARM64 AOSP GSI
-and a complete cubs product whose proprietary support is extracted locally from
-Google's matching stock release.
+This repository reconstructs reproducible Android 17 `userdebug` development
+workflows for bootloader-unlocked Google Pixel devices whose current AOSP build
+support is no longer published by Google. It builds a standard ARM64 AOSP GSI
+and complete device products whose proprietary support is extracted locally
+from the matching stock releases. The target is always selected explicitly
+with `PIXEL_TARGET`; it is never inferred from an attached USB device.
+
+## Target status
+
+| Phone | Codename | Platform | Repository status |
+| --- | --- | --- | --- |
+| Pixel 11 | `cubs` | Malibu | Real-hardware boot qualified; broader functional qualification remains incomplete |
+| Pixel 10 | `frankel` | Laguna | Hardened complete bundle passed two real-hardware boots and two 66-pass/zero-failure runtime audits; broader end-to-end qualification remains partial |
+| Pixel 9 | To be established from its own stock package | To be established | Future target; no build or qualification claim |
+
+Read [`docs/multi-target-layout.md`](docs/multi-target-layout.md) for the target
+boundary and output-isolation rules. Frankel work is documented in
+[`docs/frankel-baseline.md`](docs/frankel-baseline.md) and
+[`docs/frankel-build-and-flash.md`](docs/frankel-build-and-flash.md). The
+serial-free qualification record and exact final evidence are in
+[`docs/frankel-validation.md`](docs/frankel-validation.md).
+
+### Pixel 10 qualification status
+
+> **The hardened complete `frankel` bundle boots on real hardware.** Its
+> guarded runner flashed all 36 packaged A-only images, wiped data/metadata,
+> selected A, and rebooted without a verification bypass. Android 17 reached
+> `sys.boot_completed=1` in 20 seconds, then completed a normal 29-second
+> reboot. Both runtime audits recorded 66 passes and zero failures with
+> enforcing SELinux and verity. The eUICC and Pixel Modem Service compatibility
+> faults from the preliminary candidate were absent; delayed checks after both
+> boots found no target-process crash, provider rejection, or tombstone. Rear
+> and front camera captures, Wi-Fi scan, Bluetooth enablement, an active audio
+> track, vibration, storage, sensors, display/touch presence, and
+> NFC/fingerprint service presence passed their recorded smoke checks. SIMs
+> remained `NOT_READY`, no UWB service
+> was exposed, and the documented end-to-end/manual checks remain unqualified.
+> Physical B was already unbootable; the operator accepted this no-lifeboat
+> exception. The exact tested `userdebug` system remains booted on A. See
+> [`docs/frankel-validation.md`](docs/frankel-validation.md) for hashes and the
+> exact qualification boundary.
+
+### Pixel 11 qualification status (Cubs-only)
 
 > **The corrected complete `cubs` bundle boots on real hardware, but broader
 > qualification remains incomplete.** It was flashed with its packaged
@@ -22,19 +61,27 @@ Google's matching stock release.
 > [`docs/validation.md`](docs/validation.md) and
 > [`docs/recovery.md`](docs/recovery.md) before any device write.
 
-## Pinned baseline
+## Pinned baselines
 
 | Input | Version |
 | --- | --- |
 | AOSP source | `android-17.0.0_r1` (`CP2A.260605.016`, SPL `2026-06-05`) |
-| Pixel 11 stock | `CD1A.260714.001.A9` (SPL `2026-08-05`) |
 | Device support tool | GrapheneOS `adevtool` commit `b01ccecab3468f3bcfa0d23adc361ad074989674` |
 | Repo implementation | commit `b85886fa9f5b4e2189cc5b2f40bd0a80459d4c77` |
 | Node.js | `24.20.0` |
 | Yarn | `1.22.22` |
 | Android Platform-Tools | `37.0.1` |
-| Host tested | Ubuntu 26.04.1 x86_64 under WSL2 |
+| Host tested | Ubuntu 26.04.1 x86_64 under WSL2 on a native Linux Btrfs workspace |
 | Windows USB forwarding | [`usbipd-win 5.3.0`](https://github.com/dorssel/usbipd-win/releases/tag/v5.3.0) |
+
+The target profiles pin these latest reviewed stable global stock donors as of
+2026-08-29:
+
+| Phone | Target profile | Stock donor | Vendor SPL |
+| --- | --- | --- | --- |
+| Pixel 11 | [`config/targets/cubs/release.env`](config/targets/cubs/release.env) | `CD1A.260714.001.A9` | `2026-08-05` |
+| Pixel 10 | [`config/targets/frankel/release.env`](config/targets/frankel/release.env) | `CP2A.260805.005` | `2026-08-05` |
+| Pixel 9 | Not yet defined | Not yet selected | Not yet established |
 
 [`android-17.0.0_r1`](https://android.googlesource.com/platform/manifest/+/refs/tags/android-17.0.0_r1)
 was the newest stable Android 17 tag in Google's official
@@ -52,22 +99,25 @@ an audit record in
 not an installable lock. Preserve equivalent Ubuntu sources externally and
 record the resolved package versions when reproducing a release.
 
-The framework is the June AOSP release while the proprietary vendor/firmware
-baseline is Google's August cubs release. This is intentional, but it must not
-be described as carrying August framework security coverage. Android's DSU
-security-patch comparison also prevents qualifying this older-SPL GSI through
-DSU on the newer stock OS, so device validation uses a carefully isolated raw
-slot-A flash.
+The framework is the June AOSP release while both current proprietary
+vendor/firmware donors carry an August SPL. This is intentional, but neither
+device build may be described as carrying August framework security coverage.
+Android's DSU security-patch comparison also prevents qualifying this
+older-SPL GSI through DSU on the newer stock OS, so device validation uses a
+carefully isolated raw slot-A flash.
 
 ## Legal and redistribution boundary
 
-Google's [factory image terms](https://developers.google.com/android/images#cubs)
-and [full OTA terms](https://developers.google.com/android/ota#cubs) restrict
-disassembly, decompilation, reverse engineering, modification, and
-redistribution except where the applicable device license or law allows it.
-This workflow necessarily performs local extraction and assembles modified
-development images. Every builder must review and accept the applicable terms
-and obtain legal advice where appropriate.
+Google publishes separate factory-image and full-OTA downloads for
+[Pixel 11 (`cubs`) factory images](https://developers.google.com/android/images#cubs),
+[Pixel 11 full OTAs](https://developers.google.com/android/ota#cubs),
+[Pixel 10 (`frankel`) factory images](https://developers.google.com/android/images#frankel),
+and [Pixel 10 full OTAs](https://developers.google.com/android/ota#frankel).
+The associated terms restrict disassembly, decompilation, reverse engineering,
+modification, and redistribution except where the applicable device license or
+law allows it. This workflow necessarily performs local extraction and
+assembles modified development images. Every builder must review and accept
+the applicable terms and obtain legal advice where appropriate.
 
 This repository publishes only original scripts/documentation, pinned source
 manifests, and auditable compatibility patches. It does not publish Google
@@ -78,24 +128,26 @@ their own licenses and terms. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES
 
 ## Host requirements
 
-The supported and tested reproduction path is Ubuntu 26.04.1 x86_64, either
-native or under WSL2, with at least 64 GiB RAM on an ext4 filesystem. The host
-check requires 400 GiB to remain free whenever source sync, vendor extraction,
-or either build starts. This is working headroom, not a total-disk or
+The supported reproduction path is Ubuntu 26.04.1 x86_64, either native or
+under WSL2, with at least 64 GiB RAM on a native Linux `ext4` or `btrfs`
+filesystem. The current host was tested on Btrfs; the host gate accepts both
+filesystems. It requires 400 GiB to remain free whenever source sync, vendor
+extraction, or a build starts. This is working headroom, not a total-disk or
 clean-start capacity estimate: provision that 400 GiB in addition to the space
 consumed by source, downloads, retained outputs, artifacts, and caches. WSL2
-users must keep the workspace inside the Linux ext4 filesystem, not `/mnt/c`.
-Other Linux distributions may be adaptable, but the installer and tested
-package names are Ubuntu-specific.
+users must keep the workspace in its Linux filesystem rather than on a Windows
+mount such as `/mnt/c`. Other Linux distributions may be adaptable, but the
+installer and tested package names are Ubuntu-specific.
 
-Each build output uses an isolated, ignored ccache with an explicit 50 GiB
-default cap, so retaining both GSI and cubs caches can consume up to 100 GiB in
-addition to source and build outputs. Cache contents are acceleration state,
-not source-lock or release-archive content. Override `CCACHE_MAXSIZE` or point
-both builds at a reviewed shared `CCACHE_DIR` when storage policy requires a
-different tradeoff; set `USE_CCACHE=0` to disable it explicitly. Never publish
-a ccache directory, and clear or disable it when investigating a suspected
-reproducibility failure.
+Each output root uses an isolated, ignored ccache with an explicit 50 GiB
+default cap. Budget 50 GiB per retained output cache: GSI plus Cubs plus
+Frankel can therefore reserve up to 150 GiB in addition to source and build
+outputs, and each future device target can add another 50 GiB. Cache contents
+are acceleration state, not source-lock or release-archive content. Override
+`CCACHE_MAXSIZE` or point selected builds at a reviewed shared `CCACHE_DIR` when
+storage policy requires a different tradeoff; set `USE_CCACHE=0` to disable it
+explicitly. Never publish a ccache directory, and clear or disable it when
+investigating a suspected reproducibility failure.
 
 The tested WSL2 USB path also requires the exact x64 `usbipd-win 5.3.0`
 release on the Windows host. The official installer is
@@ -132,7 +184,7 @@ the reviewed Git URL and run every command from the repository root:
 git clone YOUR_REPOSITORY_URL pixel_aosp_manifest
 cd pixel_aosp_manifest
 scripts/install-host-deps.sh
-scripts/check-host.sh
+PIXEL_TARGET=frankel scripts/check-host.sh  # or PIXEL_TARGET=cubs
 scripts/lint.sh
 ```
 
@@ -153,8 +205,8 @@ android-sdk-libsparse-utils bison brotli build-essential ca-certificates ccache
 curl device-tree-compiler diffutils e2fsprogs erofs-utils f2fs-tools flex
 fontconfig git-core git-lfs gnupg gperf lib32z1-dev libc6-dev-i386
 libgl1-mesa-dev libx11-dev libxml2-utils jq lz4 openssh-client openssl pkgconf
-protobuf-compiler python3-protobuf repo rsync shellcheck unzip x11proto-core-dev
-util-linux xsltproc xxd zip zlib1g-dev zstd xz-utils 7zip
+protobuf-compiler python3 python3-protobuf repo rsync shellcheck unzip
+x11proto-core-dev util-linux xsltproc xxd zip zlib1g-dev zstd xz-utils 7zip
 ```
 
 Node.js, Yarn, and Google Platform-Tools are installed separately under
@@ -174,34 +226,89 @@ The version name can be absent only between those two renames while the
 exclusive lock is held. Convenience symlinks are replaced atomically through a
 temporary sibling symlink and rename.
 
-## Reproduce the build
+## Reproduce a selected target
 
-The intended order keeps the portable AOSP output distinct from cubs support:
+Run target-aware commands with an explicit `PIXEL_TARGET`. Choose one of the
+following workflows; do not rely on the temporary legacy default of `cubs`.
+
+For Pixel 10 (`frankel`), the current build/integration path is:
 
 ```bash
-GOOGLE_PIXEL_TERMS_ACCEPTED=1 scripts/download-stock.sh
-scripts/extract-stock.sh
-scripts/sync-source.sh
+PIXEL_TARGET=frankel scripts/check-host.sh
+PIXEL_TARGET=frankel scripts/sync-source.sh
+PIXEL_TARGET=frankel GOOGLE_PIXEL_TERMS_ACCEPTED=1 scripts/download-stock.sh
+PIXEL_TARGET=frankel scripts/extract-stock.sh
+PIXEL_TARGET=frankel scripts/extract-vendor.sh
+PIXEL_TARGET=frankel scripts/build-device.sh
+PIXEL_TARGET=frankel scripts/package-device.sh
+# After flashing and reaching Android over ADB:
+PIXEL_TARGET=frankel scripts/validate-frankel-runtime.sh
+```
 
-# Standard Android 17 ARM64 userdebug GSI: system, vbmeta, and pvmfw.
-scripts/build-gsi.sh
-scripts/package-gsi.sh
+The standalone Frankel bundle is published under
+`artifacts/frankel/device/`; its runner is
+`artifacts/frankel/device/flash-all.sh`. The bundle is complete for the
+reviewed Frankel port: 23 donor firmware images, seven source-built physical OS
+images, six source-built logical images, metadata, attestations, and the
+guarded runner. These proprietary/local outputs are ignored by Git and are not
+part of the public source repository.
 
-# Verified cubs extraction and the minimal pristine-AOSP compatibility delta.
-scripts/extract-vendor.sh
-scripts/build-device.sh
-scripts/package-device.sh
+The Frankel source integration also installs the standard AOSP Wi-Fi Aware and
+Wi-Fi RTT feature declarations requested by the generated Laguna product and a
+narrow, read-only eUICC flags provider for the GSF-free product. Its eight
+missing feature producers use Frankel-prefixed Soong names and retain the
+original installed filenames, so unchanged Cubs requests do not inherit the
+adapter. The provider
+uses the authority expected by the extracted Pixel eUICC support app but is
+not a general Google Services Framework implementation; see the runbook for
+its caller and coexistence boundaries.
+
+Hardware evidence is candidate-specific: a later rebuild or repack is not
+qualified merely because this exact bundle passed. Follow the real slot-A and
+post-boot procedure in
+[`docs/frankel-build-and-flash.md`](docs/frankel-build-and-flash.md), and bind
+each new result to the evidence fields in
+[`docs/frankel-validation.md`](docs/frankel-validation.md).
+
+For the already boot-qualified Pixel 11 (`cubs`) device product:
+
+```bash
+PIXEL_TARGET=cubs scripts/check-host.sh
+PIXEL_TARGET=cubs scripts/sync-source.sh
+PIXEL_TARGET=cubs GOOGLE_PIXEL_TERMS_ACCEPTED=1 scripts/download-stock.sh
+PIXEL_TARGET=cubs scripts/extract-stock.sh
+PIXEL_TARGET=cubs scripts/extract-vendor.sh
+PIXEL_TARGET=cubs scripts/build-device.sh
+PIXEL_TARGET=cubs scripts/package-device.sh
+```
+
+The standard Android 17 ARM64 `userdebug` GSI build produces `system.img`,
+`vbmeta.img`, and `pvmfw.img`. Its current recovery-anchored package/flash path
+is Cubs-only, so select Cubs explicitly:
+
+```bash
+PIXEL_TARGET=cubs scripts/build-gsi.sh
+PIXEL_TARGET=cubs scripts/package-gsi.sh
 ```
 
 `scripts/sync-source.sh` rejects unexpected `.repo/local_manifests` entries and
 requires the synced revisions to match the committed `manifests/resolved.xml`.
-Only a maintainer intentionally reviewing a revision update should run
-`CUBS_UPDATE_SOURCE_LOCK=1 scripts/sync-source.sh`; ordinary reproductions must
-never refresh the lock implicitly.
+Only a maintainer intentionally reviewing a revision update should run, for
+the selected profile, for example:
 
-The patch driver is idempotent and records the smallest known delta needed by
-current `adevtool`; it does not replace AOSP with a downstream OS. Never use
-`adevtool --noVerify` or `--updateSpec` in this workflow.
+```bash
+PIXEL_TARGET=frankel PIXEL_AOSP_UPDATE_SOURCE_LOCK=1 scripts/sync-source.sh
+```
+
+Ordinary reproductions must never refresh the lock implicitly. The legacy
+`CUBS_UPDATE_SOURCE_LOCK` spelling is accepted only for migration; new
+instructions and automation must use `PIXEL_AOSP_UPDATE_SOURCE_LOCK`.
+
+The patch driver is idempotent and records the smallest known target-aware
+delta needed by current `adevtool`; it does not replace AOSP with a downstream
+OS. Never use `adevtool --noVerify` or `--updateSpec` in this workflow.
+
+### Pixel 11 vendor, build, and AVB gates (Cubs-only)
 
 Extraction writes an ignored, deterministic attestation at
 `work/attestations/cubs-generated-vendor.attestation`. It binds every generated
@@ -260,17 +367,19 @@ class path. These output-validation pins live in
 [`config/cubs-dexpreopt.env`](config/cubs-dexpreopt.env), deliberately outside
 the Android build-input identity in `config/release.env`.
 
+### Pixel 11 flashing and recovery (Cubs-only)
+
 Development flashing remains gated until the corresponding package command
 completes the mandatory staging validation and published-copy revalidation.
 The exact-stock slot-A recovery path is already available, but it is
 destructive:
 
 ```bash
-scripts/check-device.sh
+PIXEL_TARGET=cubs scripts/check-device.sh
 export CUBS_FASTBOOT_SERIAL='<fastboot-serial>'
 export CUBS_ALLOW_DATA_WIPE=1
 export CUBS_RESTORE_CONFIRM=RESTORE_STOCK_A_SHARED_SUPER_INVALIDATES_B_ANDROID
-scripts/restore-stock.sh
+PIXEL_TARGET=cubs scripts/restore-stock.sh
 ```
 
 Pixel 11's virtual A/B logical `_a` and `_b` views share physical `super`
@@ -354,29 +463,46 @@ archive is itself ignored and is not an input to later builds.
 
 ## Repository layout
 
-- `config/`: device/release metadata plus separately scoped host-recovery pins,
-  URLs, and hashes.
+- `config/release.env`: AOSP, Repo, adevtool, Node, Yarn, and Platform-Tools
+  inputs shared by all targets.
+- `config/targets/<codename>/release.env`: one reviewed stock donor and device
+  identity per supported target; see [`config/targets/README.md`](config/targets/README.md).
+- `config/recovery.env` and the existing Cubs validation configs: legacy
+  Cubs-only recovery and qualification policy, not reusable Frankel policy.
 - `manifests/`: pinned Repo projects and the resolved source manifest.
-- `patches/`: auditable compatibility patches with upstream provenance.
-- `scripts/`: setup, sync, extraction, build, validation, flash, and recovery.
-- `docs/`: architecture, device baseline, recovery, and validation records.
+- `patches/`: auditable common and platform-specific compatibility patches
+  with upstream provenance.
+- `scripts/lib/target-profile.sh`: validates `PIXEL_TARGET` against the fixed
+  allowlist and loads exactly one profile.
+- `scripts/`: shared setup/sync orchestration plus target-aware extraction,
+  build, packaging, validation, flash, and recovery entry points.
+- `docs/`: shared architecture plus explicitly device-scoped baselines,
+  flashing runbooks, recovery policy, and validation records.
 - `skills/android-gsi-device-port/`: reusable Codex guidance for bringing AOSP
   to other bootloader-unlocked phones without maintained OEM device support.
 - `work/`: ignored source, toolchains, extraction state, and build outputs
-  (including `work/aosp/out_pixel/`).
+  (`work/aosp/out_pixel/gsi/`, `work/aosp/out_pixel/cubs/`, and
+  `work/aosp/out_pixel/frankel/`).
 - `downloads/`, `artifacts/`, `logs/`: ignored proprietary inputs, local image
-  bundles, and host-specific build/validation logs.
+  bundles, and host-specific build/validation logs. Current device bundle roots
+  are the legacy `artifacts/cubs/` and the target-scoped
+  `artifacts/frankel/device/`.
 - `.cache/`: ignored private recovery journals and attestations; never publish
   or copy this state between devices.
 
-Start with [`docs/architecture.md`](docs/architecture.md), then read
-[`docs/device-baseline.md`](docs/device-baseline.md) and
-[`docs/recovery.md`](docs/recovery.md) before any device write. Post-boot
-qualification requires both the read-only
-[`docs/runtime-validation.md`](docs/runtime-validation.md) audit and the manual
-[`docs/functional-validation.md`](docs/functional-validation.md) acceptance
-matrix; neither a completed boot nor registered HAL services alone establishes
-working hardware.
+Start with [`docs/multi-target-layout.md`](docs/multi-target-layout.md) and
+[`docs/architecture.md`](docs/architecture.md). For Frankel, continue with
+[`docs/frankel-baseline.md`](docs/frankel-baseline.md) and
+[`docs/frankel-build-and-flash.md`](docs/frankel-build-and-flash.md), then
+record real-device evidence in
+[`docs/frankel-validation.md`](docs/frankel-validation.md). The
+existing [`docs/device-baseline.md`](docs/device-baseline.md),
+[`docs/recovery.md`](docs/recovery.md),
+[`docs/runtime-validation.md`](docs/runtime-validation.md), and
+[`docs/functional-validation.md`](docs/functional-validation.md) describe the
+Cubs-only baseline, recovery system, and acceptance gates. Neither a completed
+build nor registered HAL services alone establishes working hardware for a new
+target.
 
 ## Primary references
 

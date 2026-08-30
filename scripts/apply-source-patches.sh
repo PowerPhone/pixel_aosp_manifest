@@ -132,17 +132,22 @@ apply_stack \
   "$project_root/patches/build-soong/0005-select-adevtool-fbpack-unpacker.patch" \
   "$project_root/patches/build-soong/0006-merge-cpio-roots-before-archiving.patch"
 
-# Framework resource-tooling patches used by adevtool form one ordered stack.
-# List every file explicitly so an unreviewed glob match can never enter a
-# release build merely by appearing in the patches directory.
+# Framework resource-tooling and Pixel compatibility patches form one ordered
+# stack. List every file explicitly so an unreviewed glob match can never enter
+# a release build merely by appearing in the patches directory.
 framework_patches=(
   "$project_root/patches/frameworks-base/0001-aapt2-stringified-configuration.patch"
   "$project_root/patches/frameworks-base/0002-aapt2-proto-adevtool-conversion.patch"
   "$project_root/patches/frameworks-base/0003-aapt2-brief-package-info.patch"
   "$project_root/patches/frameworks-base/0004-aapt2-proto-java-library.patch"
   "$project_root/patches/frameworks-base/0005-aapt2-brief-package-library.patch"
+  "$project_root/patches/frameworks-base/0006-pixel-euicc-gservices-flags-provider.patch"
 )
 apply_stack "$source_dir/frameworks/base" "${framework_patches[@]}"
+
+apply_stack \
+  "$source_dir/frameworks/native" \
+  "$project_root/patches/frameworks-native/0001-define-missing-feature-prebuilts.patch"
 
 apply_stack \
   "$source_dir/system/core" \
@@ -162,7 +167,8 @@ apply_stack \
   "$project_root/patches/adevtool/0001-pristine-aosp-compatibility.patch" \
   "$project_root/patches/adevtool/0002-malibu-avb-chain-topology.patch" \
   "$project_root/patches/adevtool/0003-strict-aosp17-sepolicy.patch" \
-  "$project_root/patches/adevtool/0004-malibu-firmware-avb-descriptors.patch"
+  "$project_root/patches/adevtool/0004-malibu-firmware-avb-descriptors.patch" \
+  "$project_root/patches/adevtool/0005-laguna-pristine-aosp-compatibility.patch"
 apply_stack \
   "$source_dir/packages/apps/CarrierConfig2" \
   "$project_root/patches/carrierconfig2/0001-omit-grapheneos-test-apis.patch"

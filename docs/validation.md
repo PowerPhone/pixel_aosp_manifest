@@ -1,5 +1,7 @@
 # Validation log
 
+> **Scope:** This legacy guide documents the Pixel 11 (`cubs`) workflow only; see the [multi-target layout](multi-target-layout.md) for current target organization.
+
 ## Status
 
 The raw AOSP 17 GSI probe has completed its controlled slot-A flash, first boot,

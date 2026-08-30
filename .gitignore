@@ -6,7 +6,7 @@
 # Downloaded Google firmware and extracted proprietary material
 /downloads/
 /proprietary/
-/vendor/google_devices/cubs/
+/vendor/google_devices/
 /artifacts/
 
 # Local state and logs

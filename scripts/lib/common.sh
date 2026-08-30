@@ -12,6 +12,8 @@ project_root=$(builtin cd -- "$common_directory/../.." && builtin pwd -P)
 unset common_source common_directory
 # shellcheck source=../../config/release.env
 source "$project_root/config/release.env"
+# shellcheck source=target-profile.sh
+source "$project_root/scripts/lib/target-profile.sh"
 
 workspace_node="$project_root/work/toolchains/node"
 workspace_platform_tools="$project_root/work/toolchains/platform-tools"
@@ -35,6 +37,33 @@ die() {
 
 note() {
   printf '==> %s\n' "$*"
+}
+
+require_pixel_target() {
+  local expected_target=$1
+  local workflow=${2:-this workflow}
+  [[ "$DEVICE_CODENAME" == "$expected_target" && \
+     "$PIXEL_TARGET" == "$expected_target" ]] || \
+    die "$workflow supports only PIXEL_TARGET=$expected_target (selected $PIXEL_TARGET)"
+}
+
+require_target_scoped_output() {
+  local source_dir=$1
+  local output_dir=$2
+  local target_output_path target_output_root
+
+  source_dir=$(realpath -m -- "$source_dir")
+  output_dir=$(realpath -m -- "$output_dir")
+  target_output_path="$source_dir/out_pixel/$DEVICE_CODENAME"
+  target_output_root=$(realpath -m -- "$target_output_path")
+  [[ "$target_output_root" == "$target_output_path" ]] || \
+    die "device output namespace must not resolve through a symbolic link: $target_output_path"
+  case "$output_dir" in
+    "$target_output_root"|"$target_output_root"/*) ;;
+    *)
+      die "device output for $DEVICE_CODENAME must remain under $target_output_root"
+      ;;
+  esac
 }
 
 require_command() {

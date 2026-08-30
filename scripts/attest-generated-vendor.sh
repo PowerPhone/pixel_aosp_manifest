@@ -30,14 +30,27 @@ vendor_state_dir="$source_dir/vendor/state"
 vendor_state_spec="$vendor_state_dir/$DEVICE_CODENAME.json"
 resolved_manifest="$project_root/manifests/resolved.xml"
 patch_sha256_lock="$project_root/patches/SHA256SUMS"
+release_env="$project_root/config/release.env"
+target_release_env="$project_root/config/targets/$DEVICE_CODENAME/release.env"
 adevtool_package_json="$adevtool_dir/package.json"
 adevtool_yarn_lock="$adevtool_dir/yarn.lock"
 adevtool_config_dir="$adevtool_dir/config"
 vendor_spec="$adevtool_dir/vendor-specs/google_devices/$DEVICE_CODENAME.yml"
 vendor_skels_dir="$adevtool_dir/vendor-skels/google_devices/$DEVICE_CODENAME"
 gservices_flags_dir="$adevtool_dir/gservices-flags/google_devices/$DEVICE_CODENAME"
-sanitizer="$script_dir/sanitize-generated-vendor.sh"
-fstab_sanitizer_library="$script_dir/lib/cubs-fstab.sh"
+case "$DEVICE_CODENAME" in
+  cubs)
+    sanitizer="$script_dir/sanitize-generated-vendor.sh"
+    target_sanitizer_library="$script_dir/lib/cubs-fstab.sh"
+    target_sanitizer_library_path=scripts/lib/cubs-fstab.sh
+    ;;
+  frankel)
+    sanitizer="$script_dir/sanitize-generated-vendor-frankel.sh"
+    target_sanitizer_library="$sanitizer"
+    target_sanitizer_library_path=scripts/sanitize-generated-vendor-frankel.sh
+    ;;
+  *) die "no generated-vendor attestation policy for $DEVICE_CODENAME" ;;
+esac
 attestation_dir="$project_root/work/attestations"
 attestation="$attestation_dir/${DEVICE_CODENAME}-generated-vendor.attestation"
 
@@ -55,13 +68,15 @@ require_file "$generated_dir/BoardConfig.mk"
   die "generated product entry points must not be symlinks"
 require_file "$resolved_manifest"
 require_file "$patch_sha256_lock"
+require_file "$release_env"
+require_file "$target_release_env"
 require_file "$adevtool_package_json"
 require_file "$adevtool_yarn_lock"
 require_file "$vendor_spec"
 require_file "$sanitizer"
-require_file "$fstab_sanitizer_library"
-[[ ! -L "$fstab_sanitizer_library" ]] || \
-  die "fstab sanitizer library must not be a symlink"
+require_file "$target_sanitizer_library"
+[[ ! -L "$target_sanitizer_library" ]] || \
+  die "target sanitizer library must not be a symlink"
 for input_directory in \
   "$adevtool_config_dir" \
   "$vendor_skels_dir" \
@@ -70,10 +85,16 @@ for input_directory in \
     die "adevtool generation input is not a real directory: $input_directory"
 done
 for input_file in \
+  "$vendor_state_spec" \
+  "$resolved_manifest" \
   "$patch_sha256_lock" \
+  "$release_env" \
+  "$target_release_env" \
   "$adevtool_package_json" \
   "$adevtool_yarn_lock" \
-  "$vendor_spec"; do
+  "$vendor_spec" \
+  "$sanitizer" \
+  "$target_sanitizer_library"; do
   [[ ! -L "$input_file" ]] || \
     die "provenance input must not be a symlink: $input_file"
 done
@@ -116,14 +137,18 @@ resolved_manifest_sha256=$(sha256sum "$resolved_manifest")
 resolved_manifest_sha256=${resolved_manifest_sha256%% *}
 patch_sha256_lock_sha256=$(sha256sum "$patch_sha256_lock")
 patch_sha256_lock_sha256=${patch_sha256_lock_sha256%% *}
+release_env_sha256=$(sha256sum "$release_env")
+release_env_sha256=${release_env_sha256%% *}
+target_release_env_sha256=$(sha256sum "$target_release_env")
+target_release_env_sha256=${target_release_env_sha256%% *}
 adevtool_package_json_sha256=$(sha256sum "$adevtool_package_json")
 adevtool_package_json_sha256=${adevtool_package_json_sha256%% *}
 adevtool_yarn_lock_sha256=$(sha256sum "$adevtool_yarn_lock")
 adevtool_yarn_lock_sha256=${adevtool_yarn_lock_sha256%% *}
 sanitizer_sha256=$(sha256sum "$sanitizer")
 sanitizer_sha256=${sanitizer_sha256%% *}
-fstab_sanitizer_library_sha256=$(sha256sum "$fstab_sanitizer_library")
-fstab_sanitizer_library_sha256=${fstab_sanitizer_library_sha256%% *}
+target_sanitizer_library_sha256=$(sha256sum "$target_sanitizer_library")
+target_sanitizer_library_sha256=${target_sanitizer_library_sha256%% *}
 
 mkdir -p "$attestation_dir"
 [[ -d "$attestation_dir" && ! -L "$attestation_dir" ]] || \
@@ -225,6 +250,8 @@ entry_count=1
   printf 'factory_image_filename=%s\n' "$FACTORY_IMAGE_FILENAME"
   printf 'factory_image_sha256=%s\n' "$FACTORY_IMAGE_SHA256"
   printf 'aosp_revision=%s\n' "$AOSP_REVISION"
+  printf 'release_env_sha256=%s\n' "$release_env_sha256"
+  printf 'target_release_env_sha256=%s\n' "$target_release_env_sha256"
   printf 'resolved_manifest_sha256=%s\n' "$resolved_manifest_sha256"
   printf 'patch_sha256_lock_path=patches/SHA256SUMS\n'
   printf 'patch_sha256_lock_sha256=%s\n' "$patch_sha256_lock_sha256"
@@ -238,11 +265,12 @@ entry_count=1
     "$generation_inputs_inventory_sha256"
   printf 'vendor_state_revision=%s\n' "$actual_vendor_state_revision"
   printf 'vendor_state_spec_sha256=%s\n' "$vendor_state_spec_sha256"
-  printf 'sanitizer_path=scripts/sanitize-generated-vendor.sh\n'
+  printf 'sanitizer_path=%s\n' "${sanitizer#"$project_root"/}"
   printf 'sanitizer_sha256=%s\n' "$sanitizer_sha256"
-  printf 'fstab_sanitizer_library_path=scripts/lib/cubs-fstab.sh\n'
-  printf 'fstab_sanitizer_library_sha256=%s\n' \
-    "$fstab_sanitizer_library_sha256"
+  printf 'target_sanitizer_library_path=%s\n' \
+    "$target_sanitizer_library_path"
+  printf 'target_sanitizer_library_sha256=%s\n' \
+    "$target_sanitizer_library_sha256"
   printf 'strict_neverallows=true\n'
   printf 'duplicate_rules_strict=true\n'
   printf 'tree_path=vendor/google_devices/%s\n' "$DEVICE_CODENAME"

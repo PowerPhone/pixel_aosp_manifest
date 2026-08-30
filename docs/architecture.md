@@ -1,5 +1,7 @@
 # Build architecture
 
+> **Scope:** This legacy guide documents the Pixel 11 (`cubs`) workflow only; see the [multi-target layout](multi-target-layout.md) for current target organization.
+
 This project intentionally produces two related outputs instead of conflating
 them.
 
@@ -67,9 +69,10 @@ supplying hardware-specific partitions from the extracted support module. Its
 self-contained flash set includes exactly 25 individually slotted firmware
 images, while the outer aggregate bootloader/radio containers remain excluded.
 This track produces target-files and factory-style images packaged for a
-controlled complete-device qualification flash. Their format and contents have
-passed static validation; runtime and hardware suitability remain unproven
-until the complete cubs bundle boots and completes the acceptance record.
+controlled complete-device qualification flash. The corrected complete Cubs
+bundle passed static validation and repeated real-hardware boot audits with
+enforcing dm-verity; broader functional qualification remains incomplete. See
+the recorded evidence and limits in [`validation.md`](validation.md).
 
 After the reviewed compatibility sanitizer runs, extraction atomically creates
 a local vendor-tree attestation. Its sorted manifest covers regular-file
