@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Thu, 4 Sep 2026 03:30:00 +0000
+Subject: [PATCH] tinyalsa: expose the existing PCM xrun counter
+
+The PCM implementation already increments its cumulative xrun counter before
+automatically recovering an EPIPE. Expose that counter, matching legacy
+tinyalsa, so latency-sensitive clients can detect recovered underruns and
+overruns rather than accepting a nominally successful transfer.
+---
+diff --git a/include/tinyalsa/pcm.h b/include/tinyalsa/pcm.h
+--- a/include/tinyalsa/pcm.h
++++ b/include/tinyalsa/pcm.h
+@@ -317,6 +317,14 @@ int pcm_get_file_descriptor(const struct pcm *pcm);
+ 
+ const char *pcm_get_error(const struct pcm *pcm);
+ 
++/** Returns the number of kernel-reported underruns or overruns observed by
++ * this PCM handle, including errors tinyalsa recovered internally.
++ * @param pcm A PCM handle.
++ * @return The cumulative xrun count for this handle.
++ * @ingroup libtinyalsa-pcm
++ */
++int pcm_get_xruns(struct pcm *pcm);
++
+ int pcm_set_config(struct pcm *pcm, const struct pcm_config *config);
+ 
+ unsigned int pcm_format_to_bits(enum pcm_format format);
+@@ -376,4 +384,3 @@ int pcm_ioctl(struct pcm *pcm, int code, ...) TINYALSA_DEPRECATED;
+ #endif
+ 
+ #endif
+-
+diff --git a/src/pcm.c b/src/pcm.c
+--- a/src/pcm.c
++++ b/src/pcm.c
+@@ -420,6 +420,12 @@ const char* pcm_get_error(const struct pcm *pcm)
+     return pcm->error;
+ }
+ 
++/** Returns underruns or overruns observed by this PCM handle. */
++int pcm_get_xruns(struct pcm *pcm)
++{
++    return pcm->xruns;
++}
++
+ /** Sets the PCM configuration.
+  * @param pcm A PCM handle.
+  * @param config The configuration to use for the
+-- 
+2.43.0

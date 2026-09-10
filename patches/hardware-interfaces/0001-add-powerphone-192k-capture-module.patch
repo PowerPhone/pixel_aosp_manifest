@@ -1,0 +1,473 @@
+diff --git a/audio/aidl/default/Android.bp b/audio/aidl/default/Android.bp
+index f46c2ee30d..4c5fb47acb 100644
+--- a/audio/aidl/default/Android.bp
++++ b/audio/aidl/default/Android.bp
+@@ -209,6 +209,45 @@ cc_binary {
+     installable: false, //installed in apex com.android.hardware.audio
+ }
+ 
++// Opt-in research module for direct, exact-rate capture from Frankel's
++// controller-backed ALSA card. This is intentionally a separate IModule: it
++// does not replace the vendor primary module or register IConfig/effects.
++cc_binary {
++    name: "android.hardware.audio.service-aidl.powerphone",
++    relative_install_path: "hw",
++    defaults: [
++        "aidlaudioservice_defaults",
++        "latest_android_hardware_audio_core_sounddose_ndk_shared",
++        "latest_android_hardware_audio_core_ndk_shared",
++        "latest_android_hardware_bluetooth_audio_ndk_shared",
++        "latest_android_media_audio_common_types_ndk_shared",
++    ],
++    static_libs: [
++        "libaudioserviceexampleimpl",
++    ],
++    shared_libs: [
++        "android.hardware.bluetooth.audio-impl",
++        "libaudio_aidl_conversion_common_ndk",
++        "libbluetooth_audio_session_aidl",
++        "liblog",
++        "libmedia_helper",
++        "libstagefright_foundation",
++    ],
++    srcs: [
++        "powerphone/Powerphone.cpp",
++        "powerphone/main.cpp",
++    ],
++    init_rc: ["powerphone/android.hardware.audio.service-aidl.powerphone.rc"],
++    vintf_fragments: ["powerphone/android.hardware.audio.service-aidl.powerphone.xml"],
++    cflags: [
++        "-Wall",
++        "-Wextra",
++        "-Werror",
++        "-Wthread-safety",
++        "-DBACKEND_NDK",
++    ],
++}
++
+ cc_test {
+     name: "audio_policy_config_xml_converter_tests",
+     vendor_available: true,
+diff --git a/audio/aidl/default/powerphone/Powerphone.h b/audio/aidl/default/powerphone/Powerphone.h
+new file mode 100644
+index 0000000000..b44101c1da
+--- /dev/null
++++ b/audio/aidl/default/powerphone/Powerphone.h
+@@ -0,0 +1,75 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <mutex>
++#include <vector>
++
++#include "core-impl/Module.h"
++#include "core-impl/StreamAlsa.h"
++
++namespace aidl::android::hardware::audio::core::powerphone {
++
++std::unique_ptr<Module::Configuration> makeConfiguration();
++
++class StreamPowerphone : public StreamAlsa {
++  public:
++    StreamPowerphone(StreamContext* context, const Metadata& metadata);
++
++    ndk::ScopedAStatus setConnectedDevices(const ConnectedDevices& devices) override;
++
++  protected:
++    std::vector<alsa::DeviceProfile> getDeviceProfiles() override;
++
++  private:
++    std::mutex mLock;
++    std::vector<alsa::DeviceProfile> mDeviceProfiles GUARDED_BY(mLock);
++};
++
++class StreamInPowerphone final : public StreamIn, public StreamPowerphone {
++  public:
++    friend class ndk::SharedRefBase;
++    StreamInPowerphone(
++            StreamContext&& context,
++            const ::aidl::android::hardware::audio::common::SinkMetadata& sinkMetadata,
++            const std::vector<::aidl::android::media::audio::common::MicrophoneInfo>& microphones);
++
++  private:
++    void onClose(StreamDescriptor::State) override { defaultOnClose(); }
++};
++
++class ModulePowerphone final : public Module {
++  public:
++    explicit ModulePowerphone(std::unique_ptr<Configuration>&& config)
++        : Module(Type::DEFAULT, std::move(config)) {}
++
++  protected:
++    ndk::ScopedAStatus createInputStream(
++            StreamContext&& context,
++            const ::aidl::android::hardware::audio::common::SinkMetadata& sinkMetadata,
++            const std::vector<::aidl::android::media::audio::common::MicrophoneInfo>& microphones,
++            std::shared_ptr<StreamIn>* result) override;
++    ndk::ScopedAStatus createOutputStream(
++            StreamContext&& context,
++            const ::aidl::android::hardware::audio::common::SourceMetadata& sourceMetadata,
++            const std::optional<::aidl::android::media::audio::common::AudioOffloadInfo>& offloadInfo,
++            std::shared_ptr<StreamOut>* result) override;
++    int32_t getNominalLatencyMs(
++            const ::aidl::android::media::audio::common::AudioPortConfig& portConfig) override;
++};
++
++}  // namespace aidl::android::hardware::audio::core::powerphone
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+new file mode 100644
+index 0000000000..3653ad8131
+--- /dev/null
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -0,0 +1,230 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#define LOG_TAG "AHAL_Powerphone"
++
++#include "Powerphone.h"
++
++#include <array>
++#include <cstdio>
++#include <string>
++
++#include <Log.h>
++
++using aidl::android::hardware::audio::common::SinkMetadata;
++using aidl::android::hardware::audio::common::SourceMetadata;
++using aidl::android::media::audio::common::AudioChannelLayout;
++using aidl::android::media::audio::common::AudioDevice;
++using aidl::android::media::audio::common::AudioDeviceAddress;
++using aidl::android::media::audio::common::AudioDeviceType;
++using aidl::android::media::audio::common::AudioFormatDescription;
++using aidl::android::media::audio::common::AudioFormatType;
++using aidl::android::media::audio::common::AudioGainConfig;
++using aidl::android::media::audio::common::AudioIoFlags;
++using aidl::android::media::audio::common::AudioOffloadInfo;
++using aidl::android::media::audio::common::AudioPort;
++using aidl::android::media::audio::common::AudioPortConfig;
++using aidl::android::media::audio::common::AudioPortDeviceExt;
++using aidl::android::media::audio::common::AudioPortExt;
++using aidl::android::media::audio::common::AudioPortMixExt;
++using aidl::android::media::audio::common::AudioProfile;
++using aidl::android::media::audio::common::Int;
++using aidl::android::media::audio::common::MicrophoneInfo;
++using aidl::android::media::audio::common::PcmType;
++
++namespace aidl::android::hardware::audio::core::powerphone {
++namespace {
++
++constexpr int32_t kCard = 1;
++constexpr int32_t kRate = 192000;
++
++struct Endpoint {
++    const char* name;
++    const char* address;
++    AudioDeviceType type;
++    int32_t device;
++};
++
++// PDM wiring is established, but enclosure-hole mapping is not. The two
++// Android device types below merely keep three logical built-in routes
++// distinguishable until live acoustic calibration supplies physical names.
++constexpr std::array<Endpoint, 3> kEndpoints{{
++        {"PowerPhone DMIC1 (PDM0)", "CARD_1_DEV_0", AudioDeviceType::IN_MICROPHONE, 0},
++        {"PowerPhone DMIC2 (PDM2)", "CARD_1_DEV_2", AudioDeviceType::IN_MICROPHONE, 2},
++        {"PowerPhone DMIC3 (PDM3)", "CARD_1_DEV_3", AudioDeviceType::IN_MICROPHONE_BACK, 3},
++}};
++
++AudioDevice makeAudioDevice(const Endpoint& endpoint) {
++    AudioDevice device;
++    device.type.type = endpoint.type;
++    device.type.connection = "";
++    device.address = AudioDeviceAddress::make<AudioDeviceAddress::Tag::id>(endpoint.address);
++    return device;
++}
++
++AudioPortExt makeDeviceExt(const Endpoint& endpoint) {
++    AudioPortDeviceExt deviceExt;
++    deviceExt.device = makeAudioDevice(endpoint);
++    return AudioPortExt::make<AudioPortExt::Tag::device>(std::move(deviceExt));
++}
++
++AudioPortExt makeMixExt() {
++    AudioPortMixExt mixExt;
++    mixExt.maxOpenStreamCount = 1;
++    mixExt.maxActiveStreamCount = 1;
++    return AudioPortExt::make<AudioPortExt::Tag::mix>(std::move(mixExt));
++}
++
++AudioProfile makeProfile() {
++    return AudioProfile{
++            .format = AudioFormatDescription{.type = AudioFormatType::PCM,
++                                             .pcm = PcmType::INT_32_BIT},
++            .channelMasks = {AudioChannelLayout::make<AudioChannelLayout::Tag::layoutMask>(
++                    AudioChannelLayout::LAYOUT_MONO)},
++            .sampleRates = {kRate},
++    };
++}
++
++bool isEndpoint(int32_t card, int32_t device) {
++    if (card != kCard) return false;
++    for (const auto& endpoint : kEndpoints) {
++        if (endpoint.device == device) return true;
++    }
++    return false;
++}
++
++std::optional<alsa::DeviceProfile> parseDevice(const AudioDevice& device) {
++    if (device.address.getTag() != AudioDeviceAddress::Tag::id) return std::nullopt;
++    const std::string& address = device.address.get<AudioDeviceAddress::Tag::id>();
++    int32_t card = -1;
++    int32_t pcmDevice = -1;
++    int consumed = 0;
++    if (std::sscanf(address.c_str(), "CARD_%d_DEV_%d%n", &card, &pcmDevice, &consumed) != 2 ||
++        consumed != static_cast<int>(address.size()) || !isEndpoint(card, pcmDevice)) {
++        return std::nullopt;
++    }
++    return alsa::DeviceProfile{
++            .card = card,
++            .device = pcmDevice,
++            .direction = PCM_IN,
++            .isExternal = false,
++    };
++}
++
++}  // namespace
++
++std::unique_ptr<Module::Configuration> makeConfiguration() {
++    auto config = std::make_unique<Module::Configuration>();
++    const AudioProfile profile = makeProfile();
++
++    for (const auto& endpoint : kEndpoints) {
++        AudioPort devicePort;
++        devicePort.id = config->nextPortId++;
++        devicePort.name = endpoint.name;
++        devicePort.flags = AudioIoFlags::make<AudioIoFlags::Tag::input>(0);
++        devicePort.profiles = {profile};
++        devicePort.ext = makeDeviceExt(endpoint);
++        config->ports.push_back(devicePort);
++
++        AudioPortConfig deviceConfig;
++        deviceConfig.id = devicePort.id;
++        deviceConfig.portId = devicePort.id;
++        deviceConfig.format = AudioFormatDescription{};
++        deviceConfig.channelMask = AudioChannelLayout{};
++        deviceConfig.sampleRate = Int{.value = 0};
++        deviceConfig.gain = AudioGainConfig{};
++        deviceConfig.flags = devicePort.flags;
++        deviceConfig.ext = devicePort.ext;
++        config->initialConfigs.push_back(deviceConfig);
++
++        AudioPort mixPort;
++        mixPort.id = config->nextPortId++;
++        mixPort.name = std::string(endpoint.name) + " 192k input";
++        // UNPROCESSED is carried as source metadata. Keep the mix flags at
++        // NONE so blocking Java AudioRecord and non-low-latency AAudio can use
++        // the same exact-rate route; FAST/RAW requests are retried without
++        // optional flags by AudioPolicyManager.
++        mixPort.flags = AudioIoFlags::make<AudioIoFlags::Tag::input>(0);
++        mixPort.profiles = {profile};
++        mixPort.ext = makeMixExt();
++        config->ports.push_back(mixPort);
++
++        AudioRoute route;
++        route.sourcePortIds = {devicePort.id};
++        route.sinkPortId = mixPort.id;
++        config->routes.push_back(std::move(route));
++    }
++
++    config->portConfigs = config->initialConfigs;
++    return config;
++}
++
++StreamPowerphone::StreamPowerphone(StreamContext* context, const Metadata& metadata)
++    : StreamAlsa(context, metadata, 1 /* readWriteRetries */) {}
++
++ndk::ScopedAStatus StreamPowerphone::setConnectedDevices(const ConnectedDevices& devices) {
++    if (devices.size() > 1) {
++        LOG(ERROR) << __func__ << ": expected at most one input device, got " << devices.size();
++        return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++    }
++
++    std::vector<alsa::DeviceProfile> profiles;
++    if (!devices.empty()) {
++        auto profile = parseDevice(devices.front());
++        if (!profile.has_value()) {
++            LOG(ERROR) << __func__ << ": rejected device " << devices.front().toString();
++            return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
++        }
++        profiles.push_back(*profile);
++    }
++    RETURN_STATUS_IF_ERROR(StreamCommonImpl::setConnectedDevices(devices));
++    std::lock_guard lock(mLock);
++    mDeviceProfiles = std::move(profiles);
++    return ndk::ScopedAStatus::ok();
++}
++
++std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
++    std::lock_guard lock(mLock);
++    return mDeviceProfiles;
++}
++
++StreamInPowerphone::StreamInPowerphone(StreamContext&& context, const SinkMetadata& sinkMetadata,
++                                       const std::vector<MicrophoneInfo>& microphones)
++    : StreamIn(std::move(context), microphones),
++      StreamPowerphone(&mContextInstance, sinkMetadata) {}
++
++ndk::ScopedAStatus ModulePowerphone::createInputStream(
++        StreamContext&& context, const SinkMetadata& sinkMetadata,
++        const std::vector<MicrophoneInfo>& microphones, std::shared_ptr<StreamIn>* result) {
++    return createStreamInstance<StreamInPowerphone>(result, std::move(context), sinkMetadata,
++                                                    microphones);
++}
++
++ndk::ScopedAStatus ModulePowerphone::createOutputStream(
++        StreamContext&& context __unused, const SourceMetadata& sourceMetadata __unused,
++        const std::optional<AudioOffloadInfo>& offloadInfo __unused,
++        std::shared_ptr<StreamOut>* result __unused) {
++    return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++}
++
++int32_t ModulePowerphone::getNominalLatencyMs(const AudioPortConfig&) {
++    // 20 ms rounds to a 4096-frame ALSA buffer at 192 kHz. This gives the
++    // research path enough scheduling margin without a global tinyalsa property
++    // that would also alter Google's primary HAL.
++    return 20;
++}
++
++}  // namespace aidl::android::hardware::audio::core::powerphone
+diff --git a/audio/aidl/default/powerphone/main.cpp b/audio/aidl/default/powerphone/main.cpp
+new file mode 100644
+index 0000000000..fbfa2c9b4c
+--- /dev/null
++++ b/audio/aidl/default/powerphone/main.cpp
+@@ -0,0 +1,46 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <cstdlib>
++
++#define LOG_TAG "AHAL_PowerphoneMain"
++#include <Log.h>
++#include <android/binder_ibinder_platform.h>
++#include <android/binder_manager.h>
++#include <android/binder_process.h>
++
++#include "Powerphone.h"
++
++using aidl::android::hardware::audio::core::Module;
++using aidl::android::hardware::audio::core::powerphone::ModulePowerphone;
++using aidl::android::hardware::audio::core::powerphone::makeConfiguration;
++
++int main() {
++    ABinderProcess_setThreadPoolMaxThreadCount(8);
++    ABinderProcess_startThreadPool();
++
++    auto module = ndk::SharedRefBase::make<ModulePowerphone>(makeConfiguration());
++    const std::string instance = std::string(Module::descriptor) + "/powerphone";
++    const binder_status_t status = AServiceManager_addService(module->asBinder().get(),
++                                                              instance.c_str());
++    if (status != STATUS_OK) {
++        LOG(ERROR) << "failed to register " << instance << ": " << status;
++        return EXIT_FAILURE;
++    }
++    LOG(INFO) << "registered " << instance;
++    ABinderProcess_joinThreadPool();
++    return EXIT_FAILURE;
++}
+diff --git a/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc b/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc
+new file mode 100644
+index 0000000000..90050e9a6e
+--- /dev/null
++++ b/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc
+@@ -0,0 +1,19 @@
++service vendor.audio-hal-powerphone /vendor/bin/hw/android.hardware.audio.service-aidl.powerphone
++    class hal
++    disabled
++    user audioserver
++    group audio
++    capabilities BLOCK_SUSPEND SYS_NICE
++    rlimit rtprio 10 10
++    ioprio rt 4
++    task_profiles ProcessCapacityHigh HighPerformance
++    onrestart restart audioserver
++
++# A dedicated, fail-closed loader owns this property. It may set the value to
++# one only after validating the stock card 0, exact frankel_pdm_alsa module
++# parameters, polling_enabled=0, and the fixed card-1 PCM topology.
++on property:vendor.powerphone.pdm.ready=0
++    stop vendor.audio-hal-powerphone
++
++on property:vendor.powerphone.pdm.ready=1
++    start vendor.audio-hal-powerphone
+diff --git a/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.xml b/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.xml
+new file mode 100644
+index 0000000000..d61a4cf0d9
+--- /dev/null
++++ b/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.xml
+@@ -0,0 +1,7 @@
++<manifest version="9.0" type="device">
++    <hal format="aidl">
++        <name>android.hardware.audio.core</name>
++        <version>4</version>
++        <fqname>IModule/powerphone</fqname>
++    </hal>
++</manifest>
+diff --git a/audio/aidl/default/powerphone/compatibility_matrix.powerphone.xml b/audio/aidl/default/powerphone/compatibility_matrix.powerphone.xml
+new file mode 100644
+index 0000000000..8afd3a4ed2
+--- /dev/null
++++ b/audio/aidl/default/powerphone/compatibility_matrix.powerphone.xml
+@@ -0,0 +1,10 @@
++<compatibility-matrix version="9.0" type="framework">
++    <hal format="aidl">
++        <name>android.hardware.audio.core</name>
++        <version>4</version>
++        <interface>
++            <name>IModule</name>
++            <instance>powerphone</instance>
++        </interface>
++    </hal>
++</compatibility-matrix>

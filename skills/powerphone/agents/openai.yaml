@@ -1,0 +1,4 @@
+interface:
+  display_name: "PowerPhone"
+  short_description: "Maximize and qualify built-in Android audio rates"
+  default_prompt: "Use $powerphone to maximize each built-in acoustic endpoint's stable transport rate and qualify its physical bandwidth on this AOSP userdebug phone."

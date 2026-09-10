@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+cc_binary {
+    name: "frankel_powerphone_d10_bootstrap",
+    vendor: true,
+    srcs: ["frankel_powerphone_d10_bootstrap.cpp"],
+    shared_libs: ["libtinyalsa"],
+    required: [
+        "frankel_aoc_d10_patch",
+        "frankel_aoc_speaker_patch",
+        "frankel_powerphone_audioserver_gate",
+    ],
+    init_rc: ["frankel_powerphone_d10_bootstrap.rc"],
+    cpp_std: "c++20",
+    cflags: [
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    ],
+}
+
+// This file must be parsed in init's platform context.  Keeping the service
+// definition in /vendor and the cross-partition audioserver gate in
+// /system_ext avoids an invalid vendor-init dependency on private
+// init.svc.audioserver state.
+prebuilt_etc {
+    name: "frankel_powerphone_audioserver_gate",
+    src: "frankel_powerphone_audioserver_gate.rc",
+    filename_from_src: true,
+    sub_dir: "init",
+    system_ext_specific: true,
+}

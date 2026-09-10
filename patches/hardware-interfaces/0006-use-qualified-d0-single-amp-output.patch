@@ -1,0 +1,201 @@
+diff --git a/audio/aidl/default/powerphone/Powerphone.h b/audio/aidl/default/powerphone/Powerphone.h
+--- a/audio/aidl/default/powerphone/Powerphone.h
++++ b/audio/aidl/default/powerphone/Powerphone.h
+@@ -31,7 +31,6 @@ std::unique_ptr<Module::Configuration> makeConfiguration();
+ enum class PlaybackEndpoint {
+     EARPIECE,
+     BOTTOM_CANDIDATE,
+-    BOTH,
+ };
+ 
+ enum class CaptureEndpoint {
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -61,7 +61,7 @@ namespace {
+ constexpr int32_t kCaptureCard = 0;
+ constexpr int32_t kCaptureDevice = 10;
+ constexpr int32_t kPlaybackCard = 0;
+-constexpr int32_t kPlaybackDevice = 28;
++constexpr int32_t kPlaybackDevice = 0;
+ constexpr int32_t kRate = 192000;
+ constexpr char kCaptureReadyProperty[] = "vendor.powerphone.pdm.ready";
+ constexpr char kSpeakerReadyProperty[] = "vendor.powerphone.aoc_speaker_192k.ready";
+@@ -82,7 +82,7 @@ struct Endpoint {
+ // internal physical endpoints, while remaining invisible to the default
+ // media, ring, call, and record strategies. Only an app that selects the exact
+ // PowerPhone address may activate one.
+-constexpr std::array<Endpoint, 6> kEndpoints{{
++constexpr std::array<Endpoint, 5> kEndpoints{{
+         {"PowerPhone AoC logical mic 0", "POWERPHONE_C0_D10_MIC0",
+          AudioDeviceType::IN_BUS, kCaptureCard, kCaptureDevice, PCM_IN,
+          CaptureEndpoint::LOGICAL_MIC_0, std::nullopt},
+@@ -92,16 +92,14 @@ constexpr std::array<Endpoint, 6> kEndpoints{{
+         {"PowerPhone AoC logical mic 2", "POWERPHONE_C0_D10_MIC2",
+          AudioDeviceType::IN_BUS, kCaptureCard, kCaptureDevice, PCM_IN,
+          CaptureEndpoint::LOGICAL_MIC_2, std::nullopt},
+-        {"PowerPhone earpiece 192k", "POWERPHONE_C0_D28_EARPIECE", AudioDeviceType::OUT_BUS,
++        {"PowerPhone earpiece 192k", "POWERPHONE_C0_D0_EARPIECE", AudioDeviceType::OUT_BUS,
+          kPlaybackCard, kPlaybackDevice, PCM_OUT, std::nullopt, PlaybackEndpoint::EARPIECE},
+         // Frankel's mixer paths identify this as the R amplifier. Enclosure-hole
+         // mapping still requires an acoustic check, so keep that uncertainty in
+         // the port name.
+-        {"PowerPhone R amp (bottom candidate) 192k", "POWERPHONE_C0_D28_BOTTOM",
++        {"PowerPhone R amp (bottom candidate) 192k", "POWERPHONE_C0_D0_BOTTOM",
+          AudioDeviceType::OUT_BUS, kPlaybackCard, kPlaybackDevice, PCM_OUT, std::nullopt,
+          PlaybackEndpoint::BOTTOM_CANDIDATE},
+-        {"PowerPhone both speakers 192k", "POWERPHONE_C0_D28_BOTH", AudioDeviceType::OUT_BUS,
+-         kPlaybackCard, kPlaybackDevice, PCM_OUT, std::nullopt, PlaybackEndpoint::BOTH},
+ }};
+ 
+ AudioDevice makeAudioDevice(const Endpoint& endpoint) {
+@@ -139,11 +137,10 @@ AudioProfile makeOutputProfile() {
+     return AudioProfile{
+             .format = AudioFormatDescription{.type = AudioFormatType::PCM,
+                                              .pcm = PcmType::INT_32_BIT},
+-            // PCM 0,28 and TDM_0_RX have only been qualified with the exact
+-            // four-slot geometry. An index mask avoids inventing positional
+-            // speaker semantics for those transport slots.
++            // PCM 0,0 is a stereo S32 frontend. The AoC converts that stream
++            // to the independently qualified four-S32 TDM_0_RX bus.
+             .channelMasks = {AudioChannelLayout::make<AudioChannelLayout::Tag::indexMask>(
+-                    AudioChannelLayout::INDEX_MASK_4)},
++                    AudioChannelLayout::INDEX_MASK_2)},
+             .sampleRates = {kRate},
+     };
+ }
+@@ -414,24 +411,42 @@ class CaptureRoute {
+ 
+     bool setCaptureList(int logicalMicId) {
+         mixer_ctl* ctl = control("BUILDIN MIC ID CAPTURE LIST", 4);
+-        const std::array<long, 4> wanted{{logicalMicId, -1, -1, -1}};
+-        std::array<long, 4> actual{};
+-        if (ctl == nullptr || mixer_ctl_set_array(ctl, wanted.data(), wanted.size()) != 0 ||
+-            mixer_ctl_get_array(ctl, actual.data(), actual.size()) != 0 || actual != wanted) {
++        if (ctl == nullptr) {
+             LOG(ERROR) << "failed to select exact D10 logical microphone " << logicalMicId;
+             mOwnershipLost = true;
+             return false;
+         }
++        const std::array<int, 4> wanted{{logicalMicId, -1, -1, -1}};
++        // Program each selector explicitly so this ownership guard does not
++        // depend on the userspace/kernel representation of INTEGER arrays.
++        // Clear unused selectors before selecting the active microphone.
++        constexpr std::array<unsigned int, 4> order{{1, 2, 3, 0}};
++        for (const unsigned int index : order) {
++            if (mixer_ctl_set_value(ctl, index, wanted[index]) != 0) {
++                LOG(ERROR) << "failed to select exact D10 logical microphone " << logicalMicId;
++                mOwnershipLost = true;
++                return false;
++            }
++        }
++        for (unsigned int index = 0; index < wanted.size(); ++index) {
++            if (mixer_ctl_get_value(ctl, index) != wanted[index]) {
++                LOG(ERROR) << "D10 capture-list readback failed at index " << index;
++                mOwnershipLost = true;
++                return false;
++            }
++        }
+         return true;
+     }
+ 
+     bool captureListMatches() const {
+         if (!mEndpoint.has_value()) return false;
+         mixer_ctl* ctl = control("BUILDIN MIC ID CAPTURE LIST", 4);
+-        const std::array<long, 4> expected{{logicalMic(*mEndpoint), -1, -1, -1}};
+-        std::array<long, 4> actual{};
+-        return ctl != nullptr && mixer_ctl_get_array(ctl, actual.data(), actual.size()) == 0 &&
+-               actual == expected;
++        const std::array<int, 4> expected{{logicalMic(*mEndpoint), -1, -1, -1}};
++        if (ctl == nullptr) return false;
++        for (unsigned int index = 0; index < expected.size(); ++index) {
++            if (mixer_ctl_get_value(ctl, index) != expected[index]) return false;
++        }
++        return true;
+     }
+ 
+     bool matchesOwnedState() const {
+@@ -534,10 +549,8 @@ class PlaybackRoute {
+             cleanup();
+             return false;
+         }
+-        const bool main =
+-                endpoint == PlaybackEndpoint::EARPIECE || endpoint == PlaybackEndpoint::BOTH;
+-        const bool right = endpoint == PlaybackEndpoint::BOTTOM_CANDIDATE ||
+-                           endpoint == PlaybackEndpoint::BOTH;
++        const bool main = endpoint == PlaybackEndpoint::EARPIECE;
++        const bool right = endpoint == PlaybackEndpoint::BOTTOM_CANDIDATE;
+         if ((main && !setValue("Main AMP Enable Switch", 1)) ||
+             (right && !setValue("R Main AMP Enable Switch", 1))) {
+             cleanup();
+@@ -704,10 +717,8 @@ class PlaybackRoute {
+ 
+     bool matchesOwnedState() const {
+         if (!mEndpoint.has_value() || !conflictingRoutesAreIdle()) return false;
+-        const bool main =
+-                *mEndpoint == PlaybackEndpoint::EARPIECE || *mEndpoint == PlaybackEndpoint::BOTH;
+-        const bool right = *mEndpoint == PlaybackEndpoint::BOTTOM_CANDIDATE ||
+-                           *mEndpoint == PlaybackEndpoint::BOTH;
++        const bool main = *mEndpoint == PlaybackEndpoint::EARPIECE;
++        const bool right = *mEndpoint == PlaybackEndpoint::BOTTOM_CANDIDATE;
+         if (!valueMatches("Main AMP Enable Switch", main ? 1 : 0) ||
+             !valueMatches("R Main AMP Enable Switch", right ? 1 : 0) ||
+             !valueMatches("TDM_0_RX Mixer US", 1) || !enumMatches("Ultrasonic Mode", "In Band") ||
+@@ -916,7 +927,7 @@ std::unique_ptr<Module::Configuration> makeConfiguration() {
+ 
+     AudioPort outputMixPort;
+     outputMixPort.id = config->nextPortId++;
+-    outputMixPort.name = "PowerPhone PCM0,28 192k four-slot output";
++    outputMixPort.name = "PowerPhone PCM0,0 192k stereo S32 output";
+     // A normal mixer port lets AudioTrack/AAudio use PCM_FLOAT clients while
+     // AudioFlinger converts to the exact S32 backend. DIRECT/FAST/RAW would
+     // either require exact client format or select an unrelated vendor path.
+@@ -1083,7 +1094,7 @@ ::android::status_t StreamPowerphone::start() {
+                        << " is absent or false; volatile AoC patch is not certified";
+             return ::android::PERMISSION_DENIED;
+         } else if (!acquirePlaybackLease(this)) {
+-            LOG(ERROR) << __func__ << ": PCM 0,28 is already owned by another sidecar stream";
++            LOG(ERROR) << __func__ << ": PCM 0,0 is already owned by another sidecar stream";
+             return ::android::WOULD_BLOCK;
+         } else {
+             mOwnsPlaybackLease = true;
+@@ -1106,7 +1117,14 @@ ::android::status_t StreamPowerphone::start() {
+     }
+ 
+     const ::android::status_t status = StreamAlsa::start();
+-    if (status != ::android::OK || mAlsaDeviceProxies.size() != 1) {
++    const bool exactGeometry =
++            mAlsaDeviceProxies.size() == 1 && mAlsaDeviceProxies.front().get() != nullptr &&
++            proxy_get_period_size(mAlsaDeviceProxies.front().get()) == 480 &&
++            mAlsaDeviceProxies.front().get()->alsa_config.period_count == 4;
++    if (status != ::android::OK || !exactGeometry) {
++        if (status == ::android::OK) {
++            LOG(ERROR) << __func__ << ": PCM 0,0 did not retain exact 480x4 geometry";
++        }
+         StreamAlsa::standby();
+         std::lock_guard lock(mLock);
+         cleanupPlaybackRouteLocked();
+@@ -1300,14 +1318,20 @@ ndk::ScopedAStatus ModulePowerphone::calculateBufferSizeFrames(const AudioFormatD
+     const bool exactOutput = flags.getTag() == AudioIoFlags::Tag::output &&
+                              format.type == AudioFormatType::PCM &&
+                              format.pcm == PcmType::INT_32_BIT;
+-    if (sampleRateHz == kRate && (exactInput || exactOutput)) {
++    if (sampleRateHz == kRate && exactInput) {
+         // The attached-device tinyalsa adapter divides this total by its default
+         // period_count=4.  7680 therefore yields the live-qualified 1920x4
+-        // ALSA geometry on both PCM0,D10 capture and PCM0,D28 playback, and
+-        // both values are multiples of the 96-frame AoC quantum.
++        // ALSA geometry on PCM0,D10 capture. It is a multiple of the
++        // 96-frame AoC quantum.
+         *bufferSizeFrames = 7680;
+         return ndk::ScopedAStatus::ok();
+     }
++    if (sampleRateHz == kRate && exactOutput) {
++        // The attached-device adapter divides this total by period_count=4,
++        // yielding the hardware-qualified PCM0,D0 480x4 geometry.
++        *bufferSizeFrames = 1920;
++        return ndk::ScopedAStatus::ok();
++    }
+     return Module::calculateBufferSizeFrames(format, flags, latencyMs, sampleRateHz,
+                                              bufferSizeFrames);
+ }

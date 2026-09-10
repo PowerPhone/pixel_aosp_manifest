@@ -1,0 +1,4 @@
+### GENERATED SECTION - DO NOT MODIFY - BEGIN ###
+common --registry=file://%workspace%/kleaf/external/bazelbuild-bazel-central-registry
+common --config=no_internet
+### GENERATED SECTION - DO NOT MODIFY - END ###

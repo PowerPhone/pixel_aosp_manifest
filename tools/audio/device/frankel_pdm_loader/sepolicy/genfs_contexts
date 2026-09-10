@@ -1,0 +1,1 @@
+genfscon sysfs /module/frankel_pdm_alsa u:object_r:vendor_powerphone_pdm_sysfs:s0

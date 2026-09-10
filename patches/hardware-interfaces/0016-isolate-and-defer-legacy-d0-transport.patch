@@ -1,0 +1,911 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Thu, 4 Sep 2026 07:25:00 +0000
+Subject: [PATCH] audio: isolate and defer the legacy D0 transport
+
+Frankel's sustained PCM0,D0 path is sensitive to both transaction geometry
+and control ioctls. Put libtinyalsa-v1 behind a scalar-only shared-library
+facade so its duplicate pcm_* symbols and incompatible object layout cannot
+interpose on libtinyalsav2. Bind EP1 and open the legacy blocking PCM only
+when the first complete client ring is already available, then submit whole
+1,920-frame rings without mixer or SYNC_PTR traffic between writes.
+
+Keep capture on the existing tinyalsav2 path and its qualified FIFO/3 worker,
+while playback remains SCHED_OTHER. Give playback a four-ring framework queue
+for scheduling margin and preserve fail-closed route ownership and xrun
+accounting.
+---
+diff --git a/audio/aidl/default/Android.bp b/audio/aidl/default/Android.bp
+index c21dc3c311..0f72e37812 100644
+--- a/audio/aidl/default/Android.bp
++++ b/audio/aidl/default/Android.bp
+@@ -212,6 +212,32 @@ cc_binary {
+ // Opt-in research module for direct, exact-rate Frankel capture and PCM0,D0
+ // speaker output. This is intentionally a separate IModule: it does not
+ // replace the vendor primary module or register IConfig/effects.
++//
++// libtinyalsa and libtinyalsav2 export the same unversioned pcm_* API while
++// using incompatible private/public object layouts. Keep the old playback
++// transport in its own ELF, bind all of its internal calls locally, and export
++// only the scalar PowerPhone facade. This prevents either implementation from
++// interposing on the other inside the HAL process.
++cc_library_shared {
++    name: "libpowerphone_tinyalsa_v1",
++    vendor: true,
++    srcs: ["powerphone/LegacyTinyalsaV1.c"],
++    static_libs: ["libtinyalsa"],
++    shared_libs: ["libdl"],
++    export_include_dirs: ["powerphone/include"],
++    version_script: "powerphone/libpowerphone_tinyalsa_v1.map.txt",
++    ldflags: [
++        "-Wl,-Bsymbolic",
++        "-Wl,--exclude-libs,ALL",
++    ],
++    cflags: [
++        "-Wall",
++        "-Wextra",
++        "-Werror",
++    ],
++    stl: "none",
++}
++
+ cc_binary {
+     name: "android.hardware.audio.service-aidl.powerphone",
+     relative_install_path: "hw",
+@@ -231,6 +257,7 @@ cc_binary {
+         "libbluetooth_audio_session_aidl",
+         "liblog",
+         "libmedia_helper",
++        "libpowerphone_tinyalsa_v1",
+         "libstagefright_foundation",
+     ],
+     srcs: [
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+index b677654951..477d7afe47 100644
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -20,15 +20,17 @@
+ 
+ #include <algorithm>
+ #include <array>
+-#include <chrono>
++#include <cerrno>
+ #include <cstdint>
+ #include <limits>
+ #include <memory>
+ #include <string>
+-#include <thread>
+ #include <utility>
+ #include <vector>
+ 
++#include <sched.h>
++#include <unistd.h>
++
+ #include <Log.h>
+ #include <android-base/properties.h>
+ 
+@@ -69,12 +71,10 @@ constexpr size_t kCaptureAlsaPeriodFrames = 1920;
+ constexpr size_t kCaptureAlsaBufferFrames = 7680;
+ constexpr size_t kPlaybackAlsaPeriodFrames = 480;
+ constexpr size_t kPlaybackAlsaBufferFrames = 1920;
+-constexpr size_t kPlaybackPrimeStablePeriods = 32;
+-constexpr std::chrono::milliseconds kPlaybackPrimeMinimumWallTime{100};
+-constexpr std::chrono::milliseconds kPlaybackPrimeMinimumStableSpan{60};
+-constexpr std::chrono::milliseconds kPlaybackPrimeRetryDelay{5};
+-constexpr std::chrono::milliseconds kPlaybackPrimeTimeout{10000};
+-constexpr size_t kFrameworkBufferFrames = 1920;
++constexpr size_t kCaptureFrameworkBufferFrames = 1920;
++constexpr size_t kPlaybackFrameworkBufferFrames = 7680;
++constexpr int32_t kPlaybackLatencyMs =
++        (kPlaybackAlsaBufferFrames * 1000 + kRate - 1) / kRate;
+ constexpr char kCaptureReadyProperty[] = "vendor.powerphone.pdm.ready";
+ constexpr char kSpeakerReadyProperty[] = "vendor.powerphone.aoc_speaker_192k.ready";
+ 
+@@ -1008,7 +1008,7 @@ StreamPowerphone::StreamPowerphone(StreamContext* context, const Metadata& metad
+ 
+ StreamPowerphone::~StreamPowerphone() {
+     cleanupWorker();
+-    // Never tear the route down while its PCM proxy is still open.
++    // Never tear the route down while its PCM transport is still open.
+     StreamAlsa::standby();
+     std::lock_guard lock(mLock);
+     cleanupCaptureRouteLocked();
+@@ -1043,7 +1043,7 @@ ndk::ScopedAStatus StreamPowerphone::setConnectedDevices(const ConnectedDevices&
+         std::lock_guard lock(mLock);
+         const bool activeRouteChange =
+                 (mIsInput && mCaptureRoute != nullptr && captureEndpoint != mCaptureEndpoint) ||
+-                (!mIsInput && mPlaybackRoute != nullptr && playbackEndpoint != mPlaybackEndpoint);
++                (!mIsInput && mOwnsPlaybackLease && playbackEndpoint != mPlaybackEndpoint);
+         if (activeRouteChange) {
+             LOG(ERROR) << __func__ << ": refusing an active research route change";
+             return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+@@ -1063,6 +1063,18 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+ }
+ 
+ ::android::status_t StreamPowerphone::start() {
++    // Capture was qualified with the blocking worker at FIFO/3.  Do not apply
++    // that policy to playback: clean-device PCM0,D0 trials showed FIFO/3
++    // stalls and fails earlier than the otherwise identical SCHED_OTHER path.
++    if (mIsInput) {
++        sched_param schedulerParameters{};
++        schedulerParameters.sched_priority = 3;
++        if (sched_setscheduler(0, SCHED_FIFO | SCHED_RESET_ON_FORK, &schedulerParameters) != 0) {
++            const int schedulerErrno = errno;
++            LOG(ERROR) << __func__ << ": failed to promote capture ALSA worker to "
++                       << "SCHED_FIFO/3: errno=" << schedulerErrno;
++        }
++    }
+     if (mIsInput) {
+         bool resumedRoute = false;
+         bool resumedReady = false;
+@@ -1151,14 +1163,21 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+     bool resumedRoute = false;
+     bool resumedReady = false;
+     bool resumedOwnership = false;
+-    std::vector<alsa::DeviceProfile> profiles;
+     {
+         std::lock_guard lock(mLock);
+         if (mPlaybackRoute != nullptr) {
+-            // Resume after pause; the PCM proxy and owned route remain active.
++            // Resume after pause; the legacy PCM and owned route remain active.
+             resumedRoute = true;
+             resumedReady = ::android::base::GetBoolProperty(kSpeakerReadyProperty, false);
+-            resumedOwnership = mPlaybackRoute->isActive();
++            resumedOwnership = mPlaybackRoute->isActive() &&
++                    mLegacyPlaybackPcm != nullptr &&
++                    powerphone_legacy_pcm_is_ready(mLegacyPlaybackPcm);
++        } else if (mPlaybackOpenPending && mOwnsPlaybackLease) {
++            // START can be repeated before the first nonzero burst. The route
++            // remains deliberately unbound until that burst is in hand.
++            return ::android::base::GetBoolProperty(kSpeakerReadyProperty, false)
++                    ? ::android::OK
++                    : ::android::PERMISSION_DENIED;
+         } else if (!mPlaybackEndpoint.has_value() || mDeviceProfiles.size() != 1) {
+             LOG(ERROR) << __func__ << ": no unique PowerPhone output is connected";
+             return ::android::NO_INIT;
+@@ -1169,18 +1188,16 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         } else if (!acquirePlaybackLease(this)) {
+             LOG(ERROR) << __func__ << ": PCM 0,0 is already owned by another sidecar stream";
+             return ::android::WOULD_BLOCK;
+-        } else if (!mConfig.has_value() || !mAlsaDeviceProxies.empty()) {
++        } else if (!mConfig.has_value() || mConfig->rate != kRate || mConfig->channels != 2 ||
++                   mConfig->format != PCM_FORMAT_S32_LE ||
++                   mFrameSizeBytes != 2 * sizeof(int32_t) || !mAlsaDeviceProxies.empty() ||
++                   mLegacyPlaybackPcm != nullptr) {
+             releasePlaybackLease(this);
+             LOG(ERROR) << __func__ << ": playback PCM state is not ready for a fresh open";
+             return ::android::NO_INIT;
+         } else {
+             mOwnsPlaybackLease = true;
+-            profiles = mDeviceProfiles;
+-            mPlaybackRoute = std::make_unique<PlaybackRoute>();
+-            if (!mPlaybackRoute->configure(*mPlaybackEndpoint)) {
+-                cleanupPlaybackRouteLocked();
+-                return ::android::INVALID_OPERATION;
+-            }
++            mPlaybackOpenPending = true;
+         }
+     }
+ 
+@@ -1193,141 +1210,177 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         cleanupPlaybackRouteLocked();
+         return resumedReady ? ::android::INVALID_OPERATION : ::android::PERMISSION_DENIED;
+     }
++    // Binding EP1 starts a timing-sensitive asynchronous sink. Defer all route
++    // and PCM work until transfer() already owns the first complete client
++    // ring, so no framework command/reply gap can occur between binding and
++    // the first WRITEI.
++    return ::android::OK;
++}
+ 
+-    // The framework/FMQ buffer is decoupled from the fixed AoC frontend ring.
+-    // Open PCM0,D0 with the independently qualified 480x4 ALSA geometry, then
+-    // feed it complete hardware periods from transfer().
+-    ::android::status_t status = ::android::NO_INIT;
+-    alsa::DeviceProxy proxy(profiles.front());
+-    if (profile_fill_builtin_device_info(proxy.getProfile(),
+-                                         const_cast<struct pcm_config*>(&mConfig.value()),
+-                                         kPlaybackAlsaBufferFrames)) {
+-        // These are the exact software thresholds used by the qualified
+-        // tinyplay path. Starting after one 480-frame period is essential:
+-        // the AoC endpoint consumes the first ring while completing its
+-        // asynchronous 192 kHz sink activation.
+-        proxy.getProfile()->default_config.start_threshold = kPlaybackAlsaPeriodFrames;
+-        proxy.getProfile()->default_config.stop_threshold = kPlaybackAlsaBufferFrames;
+-        proxy.getProfile()->default_config.silence_threshold = kPlaybackAlsaBufferFrames;
+-        proxy.getProfile()->default_config.silence_size = 0;
+-        if (proxy_prepare_from_default_config(proxy.get(), proxy.getProfile()) == 0 &&
+-            proxy_open(proxy.get()) == 0) {
+-            mAlsaDeviceProxies.push_back(std::move(proxy));
+-            status = ::android::OK;
++::android::status_t StreamPowerphone::openPlaybackForFirstTransfer() {
++    {
++        std::lock_guard lock(mLock);
++        if (!mPlaybackOpenPending || !mOwnsPlaybackLease || !mPlaybackEndpoint.has_value() ||
++            mDeviceProfiles.size() != 1 || !mConfig.has_value() ||
++            !mAlsaDeviceProxies.empty() || mLegacyPlaybackPcm != nullptr ||
++            mPlaybackRoute != nullptr) {
++            LOG(ERROR) << __func__ << ": deferred playback state is inconsistent";
++            cleanupPlaybackRouteLocked();
++            return ::android::NO_INIT;
++        }
++        if (!::android::base::GetBoolProperty(kSpeakerReadyProperty, false)) {
++            cleanupPlaybackRouteLocked();
++            return ::android::PERMISSION_DENIED;
+         }
++        mPlaybackRoute = std::make_unique<PlaybackRoute>();
++        if (!mPlaybackRoute->configure(*mPlaybackEndpoint)) {
++            cleanupPlaybackRouteLocked();
++            return ::android::INVALID_OPERATION;
++        }
++    }
++
++    // The framework/FMQ buffer is decoupled from the fixed AoC frontend ring.
++    // Open PCM0,D0 at 480x4 immediately after the final EP1 mixer write. The
++    // isolated facade uses the byte-oriented libtinyalsa-v1 transaction that
++    // the legacy tinyplay hardware trial qualified. Capture and mixer control
++    // deliberately remain on libtinyalsav2 in this process.
++    powerphone_legacy_pcm_open_result openResult{};
++    powerphone_legacy_pcm* playbackPcm = powerphone_legacy_pcm_open_playback(
++            kPlaybackCard, kPlaybackDevice, 2, kRate, kPlaybackAlsaPeriodFrames,
++            kPlaybackAlsaBufferFrames / kPlaybackAlsaPeriodFrames,
++            POWERPHONE_LEGACY_PCM_FORMAT_S32_LE, &openResult);
++    if (playbackPcm == nullptr || !powerphone_legacy_pcm_is_ready(playbackPcm)) {
++        const std::string error = playbackPcm == nullptr
++                ? "legacy PCM facade returned null"
++                : powerphone_legacy_pcm_get_error(playbackPcm);
++        if (playbackPcm != nullptr) {
++            powerphone_legacy_pcm_close(playbackPcm);
++        }
++        LOG(ERROR) << __func__ << ": exact legacy PCM_OUT open failed: " << error;
++        std::lock_guard lock(mLock);
++        cleanupPlaybackRouteLocked();
++        return ::android::NO_INIT;
+     }
+     const bool exactGeometry =
+-            mAlsaDeviceProxies.size() == 1 && mAlsaDeviceProxies.front().get() != nullptr &&
+-            proxy_get_sample_rate(mAlsaDeviceProxies.front().get()) == kRate &&
+-            proxy_get_format(mAlsaDeviceProxies.front().get()) == PCM_FORMAT_S32_LE &&
+-            proxy_get_channel_count(mAlsaDeviceProxies.front().get()) == 2 &&
+-            proxy_get_period_size(mAlsaDeviceProxies.front().get()) ==
+-                    kPlaybackAlsaPeriodFrames &&
+-            mAlsaDeviceProxies.front().get()->alsa_config.period_count == 4;
+-    if (status != ::android::OK || !exactGeometry) {
+-        if (status == ::android::OK) {
+-            LOG(ERROR) << __func__ << ": PCM 0,0 did not retain exact 480x4 geometry";
+-        }
+-        StreamAlsa::standby();
++            openResult.period_size_frames == kPlaybackAlsaPeriodFrames &&
++            openResult.period_count ==
++                    kPlaybackAlsaBufferFrames / kPlaybackAlsaPeriodFrames &&
++            openResult.buffer_size_frames == kPlaybackAlsaBufferFrames &&
++            powerphone_legacy_pcm_get_buffer_size(playbackPcm) == kPlaybackAlsaBufferFrames;
++    const int initialXruns = powerphone_legacy_pcm_get_xruns(playbackPcm);
++    if (!exactGeometry || initialXruns != 0) {
++        LOG(ERROR) << __func__ << ": PCM 0,0 did not retain exact legacy 480x4 geometry: "
++                   << "period=" << openResult.period_size_frames
++                   << ", count=" << openResult.period_count
++                   << ", buffer=" << openResult.buffer_size_frames
++                   << ", xruns=" << initialXruns;
++        powerphone_legacy_pcm_close(playbackPcm);
+         std::lock_guard lock(mLock);
+         cleanupPlaybackRouteLocked();
+-        return status == ::android::OK ? ::android::NO_INIT : status;
++        return ::android::NO_INIT;
+     }
++
+     const bool ready = ::android::base::GetBoolProperty(kSpeakerReadyProperty, false);
+     bool ownsRoute = false;
+     {
+         std::lock_guard lock(mLock);
+-        ownsRoute = mPlaybackRoute != nullptr && mPlaybackRoute->isActive();
++        ownsRoute = mPlaybackRoute != nullptr && mPlaybackRoute->isActive() &&
++                mOwnsPlaybackLease && mLegacyPlaybackPcm == nullptr;
++        if (ready && ownsRoute) {
++            mLegacyPlaybackPcm = playbackPcm;
++            playbackPcm = nullptr;
++            mPlaybackOpenPending = false;
++            mPlaybackXrunsBaseline.store(initialXruns, std::memory_order_release);
++        }
+     }
+     if (!ready || !ownsRoute) {
+         LOG(ERROR) << __func__ << ": speaker state changed while opening PCM: "
+                    << (ready ? "mixer ownership lost" : "readiness revoked");
+-        StreamAlsa::standby();
++        // Close the PCM before unbinding EP1. This is the same ordering used
++        // by normal standby and prevents a live producer from outliving its
++        // asynchronous sink route.
++        if (playbackPcm != nullptr) {
++            powerphone_legacy_pcm_close(playbackPcm);
++        }
+         std::lock_guard lock(mLock);
+         cleanupPlaybackRouteLocked();
+         return ready ? ::android::INVALID_OPERATION : ::android::PERMISSION_DENIED;
+     }
++    return ::android::OK;
++}
+ 
+-    // Starting D0 also starts the asynchronous AoC speaker sink. Its initial
+-    // lock/setup interval is longer than the four-period kernel ring, so prime
+-    // with silence and discard startup xruns until consecutive full hardware
+-    // periods take real playback time to transfer. Before its sink is running,
+-    // AoC can accept many writes immediately; counting those writes alone gives
+-    // a false-positive and the first client period then underruns. Require both
+-    // a 100 ms warm-up and at least 60 ms across a clean 32-period streak
+-    // (nominally 80 ms). Client audio is not consumed until this completes, and
+-    // all later xruns remain fatal.
+-    alsa_device_proxy* playbackProxy = mAlsaDeviceProxies.front().get();
+-    std::array<int32_t, kPlaybackAlsaPeriodFrames * 2> silence{};
+-    size_t stablePeriods = 0;
+-    size_t startupReopens = 0;
+-    size_t fastStreaks = 0;
+-    bool playbackStable = false;
+-    const auto primeStarted = std::chrono::steady_clock::now();
+-    auto stableStarted = primeStarted;
+-    const auto primeDeadline = primeStarted + kPlaybackPrimeTimeout;
+-    while (!playbackStable && std::chrono::steady_clock::now() < primeDeadline) {
+-        const auto writeStarted = std::chrono::steady_clock::now();
+-        const int xrunsBefore = pcm_get_xruns(playbackProxy->pcm);
+-        const int writtenFrames =
+-                pcm_writei(playbackProxy->pcm, silence.data(), kPlaybackAlsaPeriodFrames);
+-        const int xrunsAfter = pcm_get_xruns(playbackProxy->pcm);
+-        if (writtenFrames == static_cast<int>(kPlaybackAlsaPeriodFrames) &&
+-            xrunsAfter == xrunsBefore) {
+-            if (stablePeriods == 0) stableStarted = writeStarted;
+-            ++stablePeriods;
+-            if (stablePeriods == kPlaybackPrimeStablePeriods) {
+-                const auto now = std::chrono::steady_clock::now();
+-                const auto totalSpan = now - primeStarted;
+-                const auto stableSpan = now - stableStarted;
+-                if (totalSpan >= kPlaybackPrimeMinimumWallTime &&
+-                    stableSpan >= kPlaybackPrimeMinimumStableSpan) {
+-                    playbackStable = true;
+-                } else {
+-                    // The frontend is still accepting silence faster than the
+-                    // 192 kHz hardware clock can consume it. Start an entirely
+-                    // new measured streak; the delay is outside that streak.
+-                    ++fastStreaks;
+-                    stablePeriods = 0;
+-                    std::this_thread::sleep_for(kPlaybackPrimeRetryDelay);
+-                }
+-            }
+-        } else {
+-            stablePeriods = 0;
+-            // AoC may report EIO, rather than EPIPE, while the sink is still
+-            // locking. Once the sink is active, PREPARE is rejected with
+-            // EBUSY; close and reopen only the silent startup PCM while keeping
+-            // EP1 bound so the fresh ring attaches to the running sink. This
+-            // recovery is never used for client audio.
+-            if (writtenFrames < 0) {
+-                ++startupReopens;
+-                proxy_close(playbackProxy);
+-                if (proxy_open(playbackProxy) != 0) break;
+-            }
++::android::status_t StreamPowerphone::drain(StreamDescriptor::DrainMode mode) {
++    if (mIsInput) return StreamAlsaBase::drain(mode);
++    powerphone_legacy_pcm* playbackPcm = nullptr;
++    {
++        std::lock_guard lock(mLock);
++        playbackPcm = mLegacyPlaybackPcm;
++    }
++    if (playbackPcm == nullptr || !powerphone_legacy_pcm_is_ready(playbackPcm)) {
++        LOG(ERROR) << __func__ << ": no opened legacy playback device";
++        return ::android::NO_INIT;
++    }
++
++    const int expectedXruns = mPlaybackXrunsBaseline.load(std::memory_order_acquire);
++    const int xrunsBefore = powerphone_legacy_pcm_get_xruns(playbackPcm);
++    if (xrunsBefore != expectedXruns) {
++        LOG(ERROR) << __func__ << ": refusing drain after an integrity failure: xruns="
++                   << xrunsBefore << " (expected " << expectedXruns << "), pcm_error="
++                   << powerphone_legacy_pcm_get_error(playbackPcm);
++        standby();
++        return ::android::INVALID_OPERATION;
++    }
++
++    // Legacy tinyplay has no pcm_drain operation. It waits exactly one ALSA
++    // ring before close; do the same without inserting a new AoC-facing ioctl.
++    usleep(static_cast<useconds_t>(kPlaybackLatencyMs * 1000));
++    const int xrunsAfter = powerphone_legacy_pcm_get_xruns(playbackPcm);
++    if (xrunsAfter != expectedXruns) {
++        LOG(ERROR) << __func__ << ": playback integrity failed while draining: xruns="
++                   << xrunsBefore << "->" << xrunsAfter << ", pcm_error="
++                   << powerphone_legacy_pcm_get_error(playbackPcm);
++        standby();
++        return ::android::INVALID_OPERATION;
++    }
++    return ::android::OK;
++}
++
++::android::status_t StreamPowerphone::pause() {
++    if (mIsInput) {
++        if (mAlsaDeviceProxies.size() != 1 || mAlsaDeviceProxies.front().get() == nullptr ||
++            mAlsaDeviceProxies.front().get()->pcm == nullptr) {
++            LOG(ERROR) << __func__ << ": no unique opened capture device";
++            return ::android::NO_INIT;
++        }
++        if (proxy_stop(mAlsaDeviceProxies.front().get()) != 0) {
++            LOG(ERROR) << __func__ << ": capture PCM drop failed: "
++                       << pcm_get_error(mAlsaDeviceProxies.front().get()->pcm);
++            return ::android::INVALID_OPERATION;
+         }
++        return ::android::OK;
+     }
+-    if (!playbackStable) {
+-        const char* error =
+-                playbackProxy->pcm == nullptr ? nullptr : pcm_get_error(playbackProxy->pcm);
+-        const int xruns =
+-                playbackProxy->pcm == nullptr ? -1 : pcm_get_xruns(playbackProxy->pcm);
+-        LOG(ERROR) << __func__ << ": speaker PCM did not stabilize during silent priming: "
+-                   << "stable_periods=" << stablePeriods
+-                   << ", reopens=" << startupReopens
+-                   << ", fast_streaks=" << fastStreaks
+-                   << ", xruns=" << xruns
+-                   << ", pcm_error=" << (error == nullptr ? "<none>" : error);
+-        StreamAlsa::standby();
++
++    powerphone_legacy_pcm* playbackPcm = nullptr;
++    {
+         std::lock_guard lock(mLock);
+-        cleanupPlaybackRouteLocked();
++        playbackPcm = mLegacyPlaybackPcm;
++    }
++    if (playbackPcm == nullptr || !powerphone_legacy_pcm_is_ready(playbackPcm)) {
++        LOG(ERROR) << __func__ << ": no opened legacy playback device";
++        return ::android::NO_INIT;
++    }
++    const int expectedXruns = mPlaybackXrunsBaseline.load(std::memory_order_acquire);
++    const int xrunsBefore = powerphone_legacy_pcm_get_xruns(playbackPcm);
++    const int stopStatus = powerphone_legacy_pcm_stop(playbackPcm);
++    const int xrunsAfter = powerphone_legacy_pcm_get_xruns(playbackPcm);
++    if (stopStatus != 0 || xrunsBefore != expectedXruns || xrunsAfter != expectedXruns) {
++        LOG(ERROR) << __func__ << ": legacy playback PCM drop failed: status=" << stopStatus
++                   << ", xruns=" << xrunsBefore << "->" << xrunsAfter << " (expected "
++                   << expectedXruns << "), pcm_error="
++                   << powerphone_legacy_pcm_get_error(playbackPcm);
++        standby();
+         return ::android::INVALID_OPERATION;
+     }
+-    const int startupXruns = pcm_get_xruns(playbackProxy->pcm);
+-    mPlaybackXrunsBaseline.store(startupXruns, std::memory_order_release);
+-    LOG(INFO) << __func__ << ": speaker PCM primed with " << startupXruns
+-              << " startup xrun(s) and " << startupReopens
+-              << " EIO reopen(s) after rejecting " << fastStreaks
+-              << " faster-than-hardware streak(s); steady-state transfers are now strict";
+     return ::android::OK;
+ }
+ 
+@@ -1406,9 +1459,49 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         }
+         return ::android::OK;
+     }
+-    if (mAlsaDeviceProxies.size() != 1 || mAlsaDeviceProxies.front().get() == nullptr ||
+-        mAlsaDeviceProxies.front().get()->pcm == nullptr) {
+-        LOG(ERROR) << __func__ << ": no unique opened playback device";
++    // AudioFlinger may issue a zero-frame burst immediately after START. Do
++    // not bind EP1 until a complete first client ring is actually available.
++    if (frameCount == 0) {
++        *actualFrameCount = 0;
++        *latencyMs = kPlaybackLatencyMs;
++        return ::android::OK;
++    }
++    // Reject a partial/overflowing client burst before the deferred route is
++    // bound.  Once EP1 is active, AoC expects the first D0 transaction to be a
++    // complete 1,920-frame ring; opening on an invalid burst can strand the
++    // asynchronous sink without a producer.
++    if (buffer == nullptr || mFrameSizeBytes != 2 * sizeof(int32_t) ||
++        frameCount % kPlaybackAlsaBufferFrames != 0 ||
++        frameCount > std::numeric_limits<size_t>::max() / mFrameSizeBytes) {
++        LOG(ERROR) << __func__ << ": refusing invalid playback burst before open: frames="
++                   << frameCount << ", frame_size=" << mFrameSizeBytes;
++        StreamAlsa::standby();
++        {
++            std::lock_guard lock(mLock);
++            cleanupPlaybackRouteLocked();
++        }
++        *actualFrameCount = 0;
++        return ::android::INVALID_OPERATION;
++    }
++    bool openPending = false;
++    {
++        std::lock_guard lock(mLock);
++        openPending = mPlaybackOpenPending;
++    }
++    if (openPending) {
++        const ::android::status_t openStatus = openPlaybackForFirstTransfer();
++        if (openStatus != ::android::OK) {
++            *actualFrameCount = 0;
++            return openStatus;
++        }
++    }
++    powerphone_legacy_pcm* playbackPcm = nullptr;
++    {
++        std::lock_guard lock(mLock);
++        playbackPcm = mLegacyPlaybackPcm;
++    }
++    if (playbackPcm == nullptr || !powerphone_legacy_pcm_is_ready(playbackPcm)) {
++        LOG(ERROR) << __func__ << ": no opened legacy playback device";
+         StreamAlsa::standby();
+         {
+             std::lock_guard lock(mLock);
+@@ -1440,12 +1533,10 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         *actualFrameCount = 0;
+         return ready ? ::android::INVALID_OPERATION : ::android::PERMISSION_DENIED;
+     }
+-    alsa_device_proxy* playbackProxy = mAlsaDeviceProxies.front().get();
+     const int expectedXruns = mPlaybackXrunsBaseline.load(std::memory_order_acquire);
+-    const int initialXruns = pcm_get_xruns(playbackProxy->pcm);
+-    if (initialXruns != expectedXruns || mFrameSizeBytes == 0 ||
+-        frameCount > std::numeric_limits<size_t>::max() / mFrameSizeBytes) {
+-        const char* error = pcm_get_error(playbackProxy->pcm);
++    const int initialXruns = powerphone_legacy_pcm_get_xruns(playbackPcm);
++    if (initialXruns != expectedXruns) {
++        const char* error = powerphone_legacy_pcm_get_error(playbackPcm);
+         LOG(ERROR) << __func__ << ": refusing invalid playback transfer: frames=" << frameCount
+                    << ", frame_size=" << mFrameSizeBytes << ", xruns=" << initialXruns
+                    << " (expected " << expectedXruns << ')'
+@@ -1460,24 +1551,26 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+     }
+     const size_t bytesToTransfer = frameCount * mFrameSizeBytes;
+     alsa::applyGain(buffer, mGain, bytesToTransfer, mConfig.value().format, mConfig->channels);
+-    // Feed one 480-frame hardware period per blocking write. The 40 ms FMQ may
+-    // hand us several periods at once, but no mixer I/O occurs between chunks.
++    // Use the isolated libtinyalsa-v1 byte API and match the stable legacy
++    // tinyplay transaction by feeding one complete 1,920-frame ring per
++    // blocking write. There is deliberately no generic proxy retry: any
++    // non-xrun failure is terminal, while a recovered EPIPE remains visible
++    // through the legacy handle's xrun counter.
+     size_t transferredFrames = 0;
+     while (transferredFrames < frameCount) {
+         const size_t chunkFrames =
+-                std::min(kPlaybackAlsaPeriodFrames, frameCount - transferredFrames);
++                std::min(kPlaybackAlsaBufferFrames, frameCount - transferredFrames);
+         const size_t chunkBytes = chunkFrames * mFrameSizeBytes;
+         auto* chunk = static_cast<uint8_t*>(buffer) + transferredFrames * mFrameSizeBytes;
+-        const bool oversized = chunkBytes > std::numeric_limits<unsigned int>::max();
++        const bool oversized = chunkBytes > std::numeric_limits<uint32_t>::max();
+         const int writeStatus =
+                 oversized ? -1
+-                          : proxy_write_with_retries(playbackProxy, chunk,
+-                                                     static_cast<unsigned int>(chunkBytes),
+-                                                     mReadWriteRetries);
+-        const int xrunsAfter = pcm_get_xruns(playbackProxy->pcm);
++                          : powerphone_legacy_pcm_write(
++                                    playbackPcm, chunk, static_cast<uint32_t>(chunkBytes));
++        const int xrunsAfter = powerphone_legacy_pcm_get_xruns(playbackPcm);
+         if (writeStatus != 0 || xrunsAfter != expectedXruns) {
+-            const char* error = pcm_get_error(playbackProxy->pcm);
+-            LOG(ERROR) << __func__ << ": PCM period write failed after " << transferredFrames
++            const char* error = powerphone_legacy_pcm_get_error(playbackPcm);
++            LOG(ERROR) << __func__ << ": PCM ring write failed after " << transferredFrames
+                        << " frames: status=" << writeStatus << ", oversized=" << oversized
+                        << ", xruns=" << initialXruns << "->" << xrunsAfter
+                        << ", pcm_error=" << (error == nullptr ? "<none>" : error);
+@@ -1492,9 +1585,19 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         transferredFrames += chunkFrames;
+     }
+     *actualFrameCount = transferredFrames;
+-    const unsigned latency = proxy_get_latency(mAlsaDeviceProxies.front().get());
+-    *latencyMs = static_cast<int32_t>(
+-            std::min(latency, static_cast<unsigned>(std::numeric_limits<int32_t>::max())));
++    *latencyMs = kPlaybackLatencyMs;
++    return ::android::OK;
++}
++
++::android::status_t StreamPowerphone::refinePosition(StreamDescriptor::Position* position) {
++    if (mIsInput) return StreamAlsaBase::refinePosition(position);
++    // The generic refinement performs SNDRV_PCM_IOCTL_SYNC_PTR after every
++    // FMQ command, including START while D0 is still in SETUP. Frankel's AoC
++    // frontend cannot interleave that control operation with its whole-ring
++    // RW sequence: the next WRITEI fails with EIO. Keep the worker's already
++    // populated monotonic software frame/time pair; transport integrity is
++    // enforced independently by exact writes and the legacy tinyalsa xrun
++    // counter.
+     return ::android::OK;
+ }
+ 
+@@ -1520,7 +1623,25 @@ void StreamPowerphone::cleanupCaptureRouteLocked() {
+ }
+ 
+ void StreamPowerphone::cleanupPlaybackRouteLocked() {
++    // The PCM owns the producer side of EP1. Close it before restoring any
++    // mixer control so the asynchronous sink can never be unbound while a
++    // live file descriptor is still capable of writing into it.
++    if (mLegacyPlaybackPcm != nullptr) {
++        const int expectedXruns = mPlaybackXrunsBaseline.load(std::memory_order_acquire);
++        const int finalXruns = powerphone_legacy_pcm_get_xruns(mLegacyPlaybackPcm);
++        if (finalXruns != expectedXruns) {
++            LOG(ERROR) << __func__ << ": closing playback after an unreported integrity "
++                       << "failure: xruns=" << finalXruns << " (expected " << expectedXruns
++                       << ')';
++        }
++        const int closeStatus = powerphone_legacy_pcm_close(mLegacyPlaybackPcm);
++        if (closeStatus != 0) {
++            LOG(ERROR) << __func__ << ": legacy playback PCM close failed: " << closeStatus;
++        }
++        mLegacyPlaybackPcm = nullptr;
++    }
+     mPlaybackXrunsBaseline.store(0, std::memory_order_release);
++    mPlaybackOpenPending = false;
+     if (mPlaybackRoute != nullptr) {
+         mPlaybackRoute->cleanup();
+         mPlaybackRoute.reset();
+@@ -1585,14 +1706,14 @@ ndk::ScopedAStatus ModulePowerphone::calculateBufferSizeFrames(const AudioFormat
+     if (sampleRateHz == kRate && exactInput) {
+         // One 10 ms framework burst avoids aggregating four client reads.
+         // start() independently retains PCM0,D10's qualified 1920x4 ring.
+-        *bufferSizeFrames = kFrameworkBufferFrames;
++        *bufferSizeFrames = kCaptureFrameworkBufferFrames;
+         return ndk::ScopedAStatus::ok();
+     }
+     if (sampleRateHz == kRate && exactOutput) {
+-        // One 10 ms framework queue is decoupled from PCM0,D0's qualified
+-        // 480x4 ring. This bounds app callback/write latency without changing
+-        // the hardware geometry.
+-        *bufferSizeFrames = kFrameworkBufferFrames;
++        // Aggregate four 10 ms rings into one 40 ms framework transaction.
++        // This gives the HAL worker scheduling margin while transfer() still
++        // submits independently qualified 1920-frame PCM0,D0 ring writes.
++        *bufferSizeFrames = kPlaybackFrameworkBufferFrames;
+         return ndk::ScopedAStatus::ok();
+     }
+     return Module::calculateBufferSizeFrames(format, flags, latencyMs, sampleRateHz,
+diff --git a/audio/aidl/default/powerphone/Powerphone.h b/audio/aidl/default/powerphone/Powerphone.h
+index 19f61fe615..249f632001 100644
+--- a/audio/aidl/default/powerphone/Powerphone.h
++++ b/audio/aidl/default/powerphone/Powerphone.h
+@@ -22,6 +22,8 @@
+ #include <optional>
+ #include <vector>
+ 
++#include <powerphone/LegacyTinyalsaV1.h>
++
+ #include "core-impl/Module.h"
+ #include "core-impl/StreamAlsa.h"
+ 
+@@ -50,16 +52,20 @@ class StreamPowerphone : public StreamAlsa {
+ 
+     ndk::ScopedAStatus setConnectedDevices(const ConnectedDevices& devices) override;
+ 
++    ::android::status_t drain(StreamDescriptor::DrainMode mode) override;
++    ::android::status_t pause() override;
+     ::android::status_t standby() override;
+     ::android::status_t start() override;
+     ::android::status_t transfer(void* buffer, size_t frameCount, size_t* actualFrameCount,
+                                  int32_t* latencyMs) override;
++    ::android::status_t refinePosition(StreamDescriptor::Position* position) override;
+     void shutdown() override;
+ 
+   protected:
+     std::vector<alsa::DeviceProfile> getDeviceProfiles() override;
+ 
+   private:
++    ::android::status_t openPlaybackForFirstTransfer();
+     void cleanupCaptureRouteLocked() REQUIRES(mLock);
+     void cleanupPlaybackRouteLocked() REQUIRES(mLock);
+ 
+@@ -71,6 +77,8 @@ class StreamPowerphone : public StreamAlsa {
+     std::optional<PlaybackEndpoint> mPlaybackEndpoint GUARDED_BY(mLock);
+     std::unique_ptr<PlaybackRoute> mPlaybackRoute GUARDED_BY(mLock);
+     bool mOwnsPlaybackLease GUARDED_BY(mLock) = false;
++    bool mPlaybackOpenPending GUARDED_BY(mLock) = false;
++    struct powerphone_legacy_pcm* mLegacyPlaybackPcm GUARDED_BY(mLock) = nullptr;
+     std::atomic<int> mPlaybackXrunsBaseline{0};
+ };
+ 
+diff --git a/audio/aidl/default/powerphone/LegacyTinyalsaV1.c b/audio/aidl/default/powerphone/LegacyTinyalsaV1.c
+new file mode 100644
+index 0000000000..c23be8f756
+--- /dev/null
++++ b/audio/aidl/default/powerphone/LegacyTinyalsaV1.c
+@@ -0,0 +1,123 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <errno.h>
++#include <limits.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++#include <powerphone/LegacyTinyalsaV1.h>
++#include <tinyalsa/asoundlib.h>
++
++/* This facade is built only for Android targets where these ABI facts hold. */
++_Static_assert(sizeof(unsigned int) == sizeof(uint32_t), "unexpected unsigned-int ABI");
++_Static_assert(sizeof(int) == sizeof(int32_t), "unexpected int ABI");
++_Static_assert(sizeof(enum pcm_format) == sizeof(int32_t), "unexpected legacy enum ABI");
++_Static_assert(sizeof(struct pcm_config) == 10 * sizeof(uint32_t),
++               "unexpected legacy pcm_config ABI");
++_Static_assert(sizeof(struct powerphone_legacy_pcm_open_result) == 3 * sizeof(uint32_t),
++               "unexpected PowerPhone facade ABI");
++_Static_assert(PCM_OUT == 0, "unexpected legacy PCM_OUT value");
++_Static_assert((uint32_t)PCM_FORMAT_S16_LE == POWERPHONE_LEGACY_PCM_FORMAT_S16_LE,
++               "unexpected legacy S16 format value");
++_Static_assert((uint32_t)PCM_FORMAT_S32_LE == POWERPHONE_LEGACY_PCM_FORMAT_S32_LE,
++               "unexpected legacy S32 format value");
++
++static struct pcm* unwrap(struct powerphone_legacy_pcm* pcm) {
++    return (struct pcm*)pcm;
++}
++
++struct powerphone_legacy_pcm* powerphone_legacy_pcm_open_playback(
++        uint32_t card, uint32_t device, uint32_t channels, uint32_t rate,
++        uint32_t period_size_frames, uint32_t period_count, uint32_t format,
++        struct powerphone_legacy_pcm_open_result* result) {
++    struct pcm_config config;
++    enum pcm_format legacy_format;
++    struct pcm* pcm;
++
++    if (result != NULL) {
++        memset(result, 0, sizeof(*result));
++    }
++    if (channels == 0 || rate == 0 || period_size_frames == 0 || period_count == 0) {
++        errno = EINVAL;
++        return NULL;
++    }
++    switch (format) {
++        case POWERPHONE_LEGACY_PCM_FORMAT_S16_LE:
++            legacy_format = PCM_FORMAT_S16_LE;
++            break;
++        case POWERPHONE_LEGACY_PCM_FORMAT_S32_LE:
++            legacy_format = PCM_FORMAT_S32_LE;
++            break;
++        default:
++            errno = EINVAL;
++            return NULL;
++    }
++
++    memset(&config, 0, sizeof(config));
++    config.channels = channels;
++    config.rate = rate;
++    config.period_size = period_size_frames;
++    config.period_count = period_count;
++    config.format = legacy_format;
++    /*
++     * Keep all software thresholds at zero.  This is the exact legacy
++     * tinyplay contract: for a blocking playback PCM, libtinyalsa v1 resolves
++     * them to half-buffer start, full-buffer stop, zero silence, and an
++     * avail_min of one frame.
++     */
++
++    pcm = pcm_open(card, device, PCM_OUT, &config);
++    if (pcm != NULL && pcm_is_ready(pcm) && result != NULL) {
++        result->period_size_frames = config.period_size;
++        result->period_count = config.period_count;
++        result->buffer_size_frames = pcm_get_buffer_size(pcm);
++    }
++    return (struct powerphone_legacy_pcm*)pcm;
++}
++
++int powerphone_legacy_pcm_is_ready(struct powerphone_legacy_pcm* pcm) {
++    return pcm != NULL && pcm_is_ready(unwrap(pcm));
++}
++
++const char* powerphone_legacy_pcm_get_error(struct powerphone_legacy_pcm* pcm) {
++    return pcm == NULL ? "legacy PCM handle is null" : pcm_get_error(unwrap(pcm));
++}
++
++uint32_t powerphone_legacy_pcm_get_buffer_size(struct powerphone_legacy_pcm* pcm) {
++    return pcm == NULL ? 0 : pcm_get_buffer_size(unwrap(pcm));
++}
++
++int powerphone_legacy_pcm_get_xruns(struct powerphone_legacy_pcm* pcm) {
++    return pcm == NULL ? -EINVAL : pcm_get_xruns(unwrap(pcm));
++}
++
++int powerphone_legacy_pcm_write(struct powerphone_legacy_pcm* pcm, const void* data,
++                                uint32_t byte_count) {
++    if (pcm == NULL || data == NULL) {
++        return -EINVAL;
++    }
++    return pcm_write(unwrap(pcm), data, byte_count);
++}
++
++int powerphone_legacy_pcm_stop(struct powerphone_legacy_pcm* pcm) {
++    return pcm == NULL ? -EINVAL : pcm_stop(unwrap(pcm));
++}
++
++int powerphone_legacy_pcm_close(struct powerphone_legacy_pcm* pcm) {
++    return pcm == NULL ? 0 : pcm_close(unwrap(pcm));
++}
+diff --git a/audio/aidl/default/powerphone/include/powerphone/LegacyTinyalsaV1.h b/audio/aidl/default/powerphone/include/powerphone/LegacyTinyalsaV1.h
+new file mode 100644
+index 0000000000..0010bae3c9
+--- /dev/null
++++ b/audio/aidl/default/powerphone/include/powerphone/LegacyTinyalsaV1.h
+@@ -0,0 +1,66 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*
++ * The old and new tinyalsa libraries intentionally expose many identically
++ * named C symbols, but their private PCM objects and public pcm_config layouts
++ * are not ABI-compatible.  This interface is therefore scalar-only and keeps
++ * the legacy handle opaque.  No tinyalsa type may cross this boundary.
++ */
++struct powerphone_legacy_pcm;
++
++#define POWERPHONE_LEGACY_PCM_FORMAT_S16_LE 0u
++#define POWERPHONE_LEGACY_PCM_FORMAT_S32_LE 1u
++
++struct powerphone_legacy_pcm_open_result {
++    uint32_t period_size_frames;
++    uint32_t period_count;
++    uint32_t buffer_size_frames;
++};
++
++/*
++ * Opens a blocking RW-interleaved playback PCM with PCM_OUT only.  The
++ * start/stop/silence/avail-min fields use legacy tinyplay's zero defaults.
++ * Like legacy pcm_open(), a non-null return can still describe a failed open;
++ * callers must check powerphone_legacy_pcm_is_ready() before using it.
++ */
++struct powerphone_legacy_pcm* powerphone_legacy_pcm_open_playback(
++        uint32_t card, uint32_t device, uint32_t channels, uint32_t rate,
++        uint32_t period_size_frames, uint32_t period_count, uint32_t format,
++        struct powerphone_legacy_pcm_open_result* result);
++
++int powerphone_legacy_pcm_is_ready(struct powerphone_legacy_pcm* pcm);
++const char* powerphone_legacy_pcm_get_error(struct powerphone_legacy_pcm* pcm);
++uint32_t powerphone_legacy_pcm_get_buffer_size(struct powerphone_legacy_pcm* pcm);
++int powerphone_legacy_pcm_get_xruns(struct powerphone_legacy_pcm* pcm);
++
++/* Byte-oriented, blocking legacy pcm_write() semantics. */
++int powerphone_legacy_pcm_write(struct powerphone_legacy_pcm* pcm, const void* data,
++                                uint32_t byte_count);
++int powerphone_legacy_pcm_stop(struct powerphone_legacy_pcm* pcm);
++int powerphone_legacy_pcm_close(struct powerphone_legacy_pcm* pcm);
++
++#ifdef __cplusplus
++} /* extern "C" */
++#endif
+diff --git a/audio/aidl/default/powerphone/libpowerphone_tinyalsa_v1.map.txt b/audio/aidl/default/powerphone/libpowerphone_tinyalsa_v1.map.txt
+new file mode 100644
+index 0000000000..84f105611a
+--- /dev/null
++++ b/audio/aidl/default/powerphone/libpowerphone_tinyalsa_v1.map.txt
+@@ -0,0 +1,6 @@
++{
++  global:
++    powerphone_legacy_pcm_*;
++  local:
++    *;
++};
+-- 
+2.43.0
+

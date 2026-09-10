@@ -1,0 +1,127 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Thu, 4 Sep 2026 01:00:00 +0000
+Subject: [PATCH] audio: keep mixer IO off realtime stream paths
+
+The full PowerPhone ownership audits read dozens of mixer controls. Running
+them on every audio transfer starves PCM0,D0, causing repeated xrun recovery
+and eventually an AoC watchdog reset; it can similarly starve D10 capture. The
+qualified tinyplay/tinycap paths do no mixer IO while their PCMs are active.
+
+Keep the boot certificate and in-process lease checks in the hot path, while
+retaining full ownership verification at route start and before cleanup writes.
+Submit each AudioFlinger burst with one blocking PCM write.
+---
+ audio/aidl/default/powerphone/Powerphone.cpp | 85 ++++++++++++++-------
+ 1 file changed, 52 insertions(+), 33 deletions(-)
+
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -1169,14 +1169,14 @@ ::android::status_t StreamPowerphone::transfer(void* buffer, size_t frameCount,
+                                                size_t* actualFrameCount, int32_t* latencyMs) {
+     if (mIsInput) {
+         const bool ready = ::android::base::GetBoolProperty(kCaptureReadyProperty, false);
+-        bool ownsRoute = false;
++        bool routeExists = false;
+         {
+             std::lock_guard lock(mLock);
+-            ownsRoute = mCaptureRoute != nullptr && mCaptureRoute->verifyOwnership();
++            routeExists = mCaptureRoute != nullptr && mOwnsCaptureLease;
+         }
+-        if (!ready || !ownsRoute) {
++        if (!ready || !routeExists) {
+             LOG(ERROR) << __func__ << ": " << kCaptureReadyProperty
+-                       << (ready ? " mixer ownership was lost; closing capture PCM"
++                       << (ready ? " route lease is absent; closing capture PCM"
+                                  : " was revoked; closing capture PCM");
+             StreamAlsa::standby();
+             {
+@@ -1194,49 +1194,48 @@ ::android::status_t StreamPowerphone::transfer(void* buffer, size_t frameCount,
+         return ::android::NO_INIT;
+     }
+ 
++    // Mixer reads cross the ALSA control path and are not real-time safe on
++    // Frankel. Full ownership is proved when the route starts and again before
++    // cleanup mutates it; the transfer path only checks the in-process lease
++    // and boot-local certificate. This mirrors the qualified tinyplay path,
++    // which performs no mixer I/O while PCM0,D0 is running.
++    const bool ready = ::android::base::GetBoolProperty(kSpeakerReadyProperty, false);
++    bool routeExists = false;
++    {
++        std::lock_guard lock(mLock);
++        routeExists = mPlaybackRoute != nullptr && mOwnsPlaybackLease;
++    }
++    if (!ready || !routeExists) {
++        LOG(ERROR) << __func__ << ": refusing playback transfer: "
++                   << (ready ? "route lease is absent" : "speaker readiness revoked");
++        StreamAlsa::standby();
++        {
++            std::lock_guard lock(mLock);
++            cleanupPlaybackRouteLocked();
++        }
++        *actualFrameCount = 0;
++        return ready ? ::android::INVALID_OPERATION : ::android::PERMISSION_DENIED;
++    }
+     const size_t bytesToTransfer = frameCount * mFrameSizeBytes;
+     alsa::applyGain(buffer, mGain, bytesToTransfer, mConfig.value().format, mConfig->channels);
+-    const size_t periodFrames =
+-            std::max<size_t>(1, proxy_get_period_size(mAlsaDeviceProxies.front().get()));
+-    size_t transferredFrames = 0;
+-    while (transferredFrames < frameCount) {
+-        const bool ready = ::android::base::GetBoolProperty(kSpeakerReadyProperty, false);
+-        bool ownsRoute = false;
++    // Submit the complete AudioFlinger burst in one blocking write. Splitting
++    // each 1920-frame burst into four calls made tinyalsa repeatedly cross its
++    // xrun recovery path despite the same 480x4 kernel geometry working with
++    // tinyplay.
++    if (bytesToTransfer > std::numeric_limits<unsigned int>::max() ||
++        proxy_write_with_retries(mAlsaDeviceProxies.front().get(), buffer,
++                                 static_cast<unsigned int>(bytesToTransfer),
++                                 mReadWriteRetries) != 0) {
++        LOG(ERROR) << __func__ << ": PCM burst write failed";
++        StreamAlsa::standby();
+         {
+             std::lock_guard lock(mLock);
+-            ownsRoute = mPlaybackRoute != nullptr && mPlaybackRoute->verifyOwnership();
+-        }
+-        if (!ready || !ownsRoute) {
+-            LOG(ERROR) << __func__ << ": aborting before the next ALSA period: "
+-                       << (ready ? "mixer ownership lost" : "speaker readiness revoked");
+-            StreamAlsa::standby();
+-            {
+-                std::lock_guard lock(mLock);
+-                cleanupPlaybackRouteLocked();
+-            }
+-            *actualFrameCount = transferredFrames;
+-            return ready ? ::android::INVALID_OPERATION : ::android::PERMISSION_DENIED;
+-        }
+-        const size_t chunkFrames = std::min(periodFrames, frameCount - transferredFrames);
+-        const size_t chunkBytes = chunkFrames * mFrameSizeBytes;
+-        auto* chunk = static_cast<uint8_t*>(buffer) + transferredFrames * mFrameSizeBytes;
+-        if (chunkBytes > std::numeric_limits<unsigned int>::max() ||
+-            proxy_write_with_retries(mAlsaDeviceProxies.front().get(), chunk,
+-                                     static_cast<unsigned int>(chunkBytes),
+-                                     mReadWriteRetries) != 0) {
+-            LOG(ERROR) << __func__ << ": period-sized PCM write failed after " << transferredFrames
+-                       << " frames";
+-            StreamAlsa::standby();
+-            {
+-                std::lock_guard lock(mLock);
+-                cleanupPlaybackRouteLocked();
+-            }
+-            *actualFrameCount = transferredFrames;
+-            return ::android::INVALID_OPERATION;
++            cleanupPlaybackRouteLocked();
+         }
+-        transferredFrames += chunkFrames;
++        *actualFrameCount = 0;
++        return ::android::INVALID_OPERATION;
+     }
+-    *actualFrameCount = transferredFrames;
++    *actualFrameCount = frameCount;
+     const unsigned latency = proxy_get_latency(mAlsaDeviceProxies.front().get());
+     *latencyMs = static_cast<int32_t>(
+             std::min(latency, static_cast<unsigned>(std::numeric_limits<int32_t>::max())));
+-- 
+2.51.0

@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Thu, 4 Sep 2026 01:10:00 +0000
+Subject: [PATCH] audio: decouple PowerPhone framework and ALSA buffers
+
+Give AudioFlinger and the AIDL FMQ 40 ms of scheduling margin while retaining
+the live-qualified PCM0,D0 480x4 ALSA geometry. The source-unavailable AoC
+frontend rejects a single write larger than its 1920-frame ring, so explicitly
+open that ring and feed one complete ring at a time without mixer IO between
+chunks.
+---
+ audio/aidl/default/powerphone/Powerphone.cpp | 57 ++++++++++++++++++----------
+ 1 file changed, 37 insertions(+), 20 deletions(-)
+
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -63,6 +63,7 @@ constexpr int32_t kCaptureDevice = 10;
+ constexpr int32_t kPlaybackCard = 0;
+ constexpr int32_t kPlaybackDevice = 0;
+ constexpr int32_t kRate = 192000;
++constexpr size_t kPlaybackAlsaBufferFrames = 1920;
+ constexpr char kCaptureReadyProperty[] = "vendor.powerphone.pdm.ready";
+ constexpr char kSpeakerReadyProperty[] = "vendor.powerphone.aoc_speaker_192k.ready";
+ 
+@@ -1124,7 +1125,20 @@ ::android::status_t StreamPowerphone::start() {
+         return resumedReady ? ::android::INVALID_OPERATION : ::android::PERMISSION_DENIED;
+     }
+ 
+-    const ::android::status_t status = StreamAlsa::start();
++    // The framework/FMQ buffer is deliberately larger than the fixed AoC
++    // frontend ring. Open PCM0,D0 with the independently qualified 480x4 ALSA
++    // geometry, then feed it complete rings from transfer().
++    ::android::status_t status = ::android::NO_INIT;
++    const std::vector<alsa::DeviceProfile> profiles = getDeviceProfiles();
++    if (mAlsaDeviceProxies.empty() && profiles.size() == 1 && mConfig.has_value()) {
++        alsa::DeviceProxy proxy = alsa::openProxyForAttachedDevice(
++                profiles.front(), const_cast<struct pcm_config*>(&mConfig.value()),
++                kPlaybackAlsaBufferFrames);
++        if (proxy.get() != nullptr) {
++            mAlsaDeviceProxies.push_back(std::move(proxy));
++            status = ::android::OK;
++        }
++    }
+     const bool exactGeometry =
+             mAlsaDeviceProxies.size() == 1 && mAlsaDeviceProxies.front().get() != nullptr &&
+             proxy_get_period_size(mAlsaDeviceProxies.front().get()) == 480 &&
+@@ -1218,24 +1232,31 @@ ::android::status_t StreamPowerphone::transfer(void* buffer, size_t frameCount,
+     }
+     const size_t bytesToTransfer = frameCount * mFrameSizeBytes;
+     alsa::applyGain(buffer, mGain, bytesToTransfer, mConfig.value().format, mConfig->channels);
+-    // Submit the complete AudioFlinger burst in one blocking write. Splitting
+-    // each 1920-frame burst into four calls made tinyalsa repeatedly cross its
+-    // xrun recovery path despite the same 480x4 kernel geometry working with
+-    // tinyplay.
+-    if (bytesToTransfer > std::numeric_limits<unsigned int>::max() ||
+-        proxy_write_with_retries(mAlsaDeviceProxies.front().get(), buffer,
+-                                 static_cast<unsigned int>(bytesToTransfer),
+-                                 mReadWriteRetries) != 0) {
+-        LOG(ERROR) << __func__ << ": PCM burst write failed";
+-        StreamAlsa::standby();
+-        {
+-            std::lock_guard lock(mLock);
+-            cleanupPlaybackRouteLocked();
++    // Feed one complete 480x4 AoC ring per blocking write. The 40 ms FMQ may
++    // hand us several rings at once, but no mixer I/O occurs between chunks.
++    size_t transferredFrames = 0;
++    while (transferredFrames < frameCount) {
++        const size_t chunkFrames =
++                std::min(kPlaybackAlsaBufferFrames, frameCount - transferredFrames);
++        const size_t chunkBytes = chunkFrames * mFrameSizeBytes;
++        auto* chunk = static_cast<uint8_t*>(buffer) + transferredFrames * mFrameSizeBytes;
++        if (chunkBytes > std::numeric_limits<unsigned int>::max() ||
++            proxy_write_with_retries(mAlsaDeviceProxies.front().get(), chunk,
++                                     static_cast<unsigned int>(chunkBytes),
++                                     mReadWriteRetries) != 0) {
++            LOG(ERROR) << __func__ << ": PCM ring write failed after " << transferredFrames
++                       << " frames";
++            StreamAlsa::standby();
++            {
++                std::lock_guard lock(mLock);
++                cleanupPlaybackRouteLocked();
++            }
++            *actualFrameCount = transferredFrames;
++            return ::android::INVALID_OPERATION;
+         }
+-        *actualFrameCount = 0;
+-        return ::android::INVALID_OPERATION;
++        transferredFrames += chunkFrames;
+     }
+-    *actualFrameCount = frameCount;
++    *actualFrameCount = transferredFrames;
+     const unsigned latency = proxy_get_latency(mAlsaDeviceProxies.front().get());
+     *latencyMs = static_cast<int32_t>(
+             std::min(latency, static_cast<unsigned>(std::numeric_limits<int32_t>::max())));
+@@ -1334,9 +1355,10 @@ ndk::ScopedAStatus ModulePowerphone::calculateBufferSizeFrames(const AudioFormat
+         return ndk::ScopedAStatus::ok();
+     }
+     if (sampleRateHz == kRate && exactOutput) {
+-        // The attached-device adapter divides this total by period_count=4,
+-        // yielding the hardware-qualified PCM0,D0 480x4 geometry.
+-        *bufferSizeFrames = 1920;
++        // Give AudioFlinger/FMQ 40 ms of scheduling margin. start() decouples
++        // this queue from the source-unavailable AoC frontend and explicitly
++        // retains its independently qualified PCM0,D0 480x4 ALSA ring.
++        *bufferSizeFrames = 7680;
+         return ndk::ScopedAStatus::ok();
+     }
+     return Module::calculateBufferSizeFrames(format, flags, latencyMs, sampleRateHz,
+-- 
+2.51.0

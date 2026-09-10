@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Thu, 4 Sep 2026 00:15:00 +0000
+Subject: [PATCH] audio: do not request undefined PowerPhone device gain
+
+An explicitly present, default-constructed AudioGainConfig is still a gain
+request.  The PowerPhone device ports intentionally expose no gain controls,
+so the generic AIDL module rejects every startup probe before AudioPolicyManager
+can mark the attached BUS devices available.  Leave the optional gain absent.
+---
+ audio/aidl/default/powerphone/Powerphone.cpp | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+index 90cb0aa4a..1008da121 100644
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -906,6 +906,5 @@ std::unique_ptr<Module::Configuration> makeConfiguration() {
+         deviceConfig.channelMask = AudioChannelLayout{};
+         deviceConfig.sampleRate = Int{.value = 0};
+-        deviceConfig.gain = AudioGainConfig{};
+         deviceConfig.flags = devicePort.flags;
+         deviceConfig.ext = devicePort.ext;
+         config->initialConfigs.push_back(deviceConfig);
+-- 
+2.51.0

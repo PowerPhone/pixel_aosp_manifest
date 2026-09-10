@@ -1,0 +1,1085 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Fri, 4 Sep 2026 18:25:00 +0000
+Subject: [PATCH] audio: use qualified native q192 speaker path
+
+The final hardware-qualified PowerPhone output uses the guarded native-q192
+source-0 profile, two S32 TDM slots at 12.288 MHz, and the one-period-lag D0
+transport whose module SHA-256 starts 37cc7ff. Direct tests on physical
+amplifiers completed with PCM0,D0 S32_LE/stereo/192000, 1920x2 geometry, a
+1920-frame start threshold, zero xruns, and correct native cadence.
+
+Reproduce that transaction in the additive AIDL module while retaining its
+7680-frame framework/FMQ scheduling margin. Prepare the legacy PCM exactly
+once, feed it one 1920-frame period at a time, and issue
+SNDRV_PCM_IOCTL_WRITEI_FRAMES directly. This bypasses pcm_write(), whose error
+path clears tinyalsa's private prepared/running state. Hardware observed the
+transient EFAULT at byte offset 15360, on the second period after the first was
+accepted. Give the first write no retry, permit the bounded 32-by-1-ms retry
+only on that second startup write, permanently clear eligibility after it
+succeeds, and keep every later failure or xrun terminal.
+
+Both Cirrus Digital PCM Volume controls reset to zero. Snapshot and set only
+the selected endpoint to the stock value 817 while both amplifiers and EP1 are
+proved off: Digital PCM Volume for earpiece, R Digital PCM Volume for bottom.
+Verify that selected control throughout active ownership, and restore it only
+after both amplifiers and EP1 are hard-off. Never touch the inactive endpoint's
+digital volume.
+
+Pin the final PCM geometry, explicit preparation, exact syscall order,
+second-write retry/no-reset behavior, and endpoint-scoped mixer ordering in the
+host facade tests.
+---
+ audio/aidl/default/Android.bp                      |   2 +
+ audio/aidl/default/powerphone/LegacyTinyalsaV1.c   |  79 +++++++-
+ .../aidl/default/powerphone/PlaybackRouteVolume.c  | 103 ++++++++++
+ audio/aidl/default/powerphone/Powerphone.cpp       | 165 +++++++++++++---
+ audio/aidl/default/powerphone/Powerphone.h         |   1 +
+ .../include/powerphone/LegacyTinyalsaV1.h          |  28 ++-
+ .../include/powerphone/PlaybackRouteVolume.h       |  64 ++++++
+ .../powerphone/tests/LegacyTinyalsaV1Test.cpp      | 219 +++++++++++++++++++--
+ 8 files changed, 604 insertions(+), 57 deletions(-)
+
+diff --git a/audio/aidl/default/Android.bp b/audio/aidl/default/Android.bp
+index 2f3e88a71e9b7e84249318411ddc4b21f31b8150..c5068091ed869d05d6796687c9c8193e9f608d51 100644
+--- a/audio/aidl/default/Android.bp
++++ b/audio/aidl/default/Android.bp
+@@ -244,6 +244,7 @@ cc_test {
+     vendor_available: true,
+     srcs: [
+         "powerphone/LegacyTinyalsaV1.c",
++        "powerphone/PlaybackRouteVolume.c",
+         "powerphone/tests/LegacyTinyalsaV1Test.cpp",
+     ],
+     include_dirs: ["external/tinyalsa/include"],
+@@ -279,6 +280,7 @@ cc_binary {
+         "libstagefright_foundation",
+     ],
+     srcs: [
++        "powerphone/PlaybackRouteVolume.c",
+         "powerphone/Powerphone.cpp",
+         "powerphone/main.cpp",
+     ],
+diff --git a/audio/aidl/default/powerphone/LegacyTinyalsaV1.c b/audio/aidl/default/powerphone/LegacyTinyalsaV1.c
+index fe994cb2fa94dfff2d44de8e5b2bd31925184d33..787e2549e4e2a7869658687756fa8087c202ca98 100644
+--- a/audio/aidl/default/powerphone/LegacyTinyalsaV1.c
++++ b/audio/aidl/default/powerphone/LegacyTinyalsaV1.c
+@@ -19,6 +19,11 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ #include <string.h>
++#include <time.h>
++
++#include <sound/asound.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
+ 
+ #include <powerphone/LegacyTinyalsaV1.h>
+ #include <tinyalsa/asoundlib.h>
+@@ -41,6 +46,12 @@ static struct pcm* unwrap(struct powerphone_legacy_pcm* pcm) {
+     return (struct pcm*)pcm;
+ }
+ 
++/* Weak only so the host unit test can substitute the syscall boundary. */
++__attribute__((weak)) int powerphone_legacy_writei_ioctl(
++        int fd, struct snd_xferi* transfer_request) {
++    return ioctl(fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, transfer_request);
++}
++
+ static int parameter_in_range(const struct pcm_params* params, enum pcm_param param,
+                               uint32_t value) {
+     return value >= pcm_params_get_min(params, param) &&
+@@ -49,7 +60,8 @@ static int parameter_in_range(const struct pcm_params* params, enum pcm_param pa
+ 
+ struct powerphone_legacy_pcm* powerphone_legacy_pcm_open_playback(
+         uint32_t card, uint32_t device, uint32_t channels, uint32_t rate,
+-        uint32_t period_size_frames, uint32_t period_count, uint32_t format,
++        uint32_t period_size_frames, uint32_t period_count,
++        uint32_t start_threshold_frames, uint32_t format,
+         struct powerphone_legacy_pcm_open_result* result) {
+     struct pcm_config config;
+     enum pcm_format legacy_format;
+@@ -60,7 +72,9 @@ struct powerphone_legacy_pcm* powerphone_legacy_pcm_open_playback(
+     if (result != NULL) {
+         memset(result, 0, sizeof(*result));
+     }
+-    if (channels == 0 || rate == 0 || period_size_frames == 0 || period_count == 0) {
++    if (channels == 0 || rate == 0 || period_size_frames == 0 || period_count == 0 ||
++        start_threshold_frames == 0 || period_count > UINT32_MAX / period_size_frames ||
++        start_threshold_frames > period_size_frames * period_count) {
+         errno = EINVAL;
+         return NULL;
+     }
+@@ -84,10 +98,11 @@ struct powerphone_legacy_pcm* powerphone_legacy_pcm_open_playback(
+     config.period_size = period_size_frames;
+     config.period_count = period_count;
+     config.format = legacy_format;
++    config.start_threshold = start_threshold_frames;
+     /*
+-     * Keep all software thresholds at zero.  This is the exact legacy
+-     * tinyplay contract: for a blocking playback PCM, libtinyalsa v1 resolves
+-     * them to half-buffer start, full-buffer stop, zero silence, and an
++     * Frankel's native-q192 system path is qualified with an explicit
++     * one-period start. Keep the remaining software fields at zero so
++     * libtinyalsa v1 resolves them to full-buffer stop, zero silence, and an
+      * avail_min of one frame.
+      */
+ 
+@@ -138,12 +153,58 @@ int powerphone_legacy_pcm_get_xruns(struct powerphone_legacy_pcm* pcm) {
+     return pcm == NULL ? -EINVAL : pcm_get_xruns(unwrap(pcm));
+ }
+ 
+-int powerphone_legacy_pcm_write(struct powerphone_legacy_pcm* pcm, const void* data,
+-                                uint32_t byte_count) {
+-    if (pcm == NULL || data == NULL) {
++int powerphone_legacy_pcm_prepare(struct powerphone_legacy_pcm* pcm) {
++    return pcm == NULL ? -EINVAL : pcm_prepare(unwrap(pcm));
++}
++
++int powerphone_legacy_pcm_writei_frames(struct powerphone_legacy_pcm* pcm,
++                                        const void* data, uint32_t frame_count,
++                                        uint32_t max_efault_retries,
++                                        uint32_t efault_retry_sleep_us,
++                                        uint32_t* actual_efault_retries) {
++    uint32_t retries = 0;
++
++    if (actual_efault_retries != NULL) {
++        *actual_efault_retries = 0;
++    }
++    if (pcm == NULL || data == NULL || frame_count == 0) {
+         return -EINVAL;
+     }
+-    return pcm_write(unwrap(pcm), data, byte_count);
++
++    const int fd = pcm_get_poll_fd(unwrap(pcm));
++    if (fd < 0) {
++        return fd;
++    }
++    for (;;) {
++        struct snd_xferi transfer_request;
++        int write_result;
++        int write_errno;
++
++        memset(&transfer_request, 0, sizeof(transfer_request));
++        transfer_request.buf = (void*)data;
++        transfer_request.frames = frame_count;
++        errno = 0;
++        write_result = powerphone_legacy_writei_ioctl(fd, &transfer_request);
++        write_errno = errno;
++        if (write_result == 0) {
++            if (actual_efault_retries != NULL) {
++                *actual_efault_retries = retries;
++            }
++            return 0;
++        }
++        if ((write_errno != EFAULT && write_result != -EFAULT) ||
++            retries >= max_efault_retries) {
++            if (actual_efault_retries != NULL) {
++                *actual_efault_retries = retries;
++            }
++            return write_errno != 0 ? -write_errno
++                                    : (write_result < 0 ? write_result : -EIO);
++        }
++        ++retries;
++        if (efault_retry_sleep_us != 0) {
++            usleep(efault_retry_sleep_us);
++        }
++    }
+ }
+ 
+ int powerphone_legacy_pcm_stop(struct powerphone_legacy_pcm* pcm) {
+diff --git a/audio/aidl/default/powerphone/PlaybackRouteVolume.c b/audio/aidl/default/powerphone/PlaybackRouteVolume.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..ca7e52a104acc6e781b304d604a70b1a10853f3a
+--- /dev/null
++++ b/audio/aidl/default/powerphone/PlaybackRouteVolume.c
+@@ -0,0 +1,103 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <errno.h>
++#include <stddef.h>
++#include <string.h>
++
++#include <powerphone/PlaybackRouteVolume.h>
++
++static const char kEarpieceDigitalPcmVolume[] = "Digital PCM Volume";
++static const char kBottomDigitalPcmVolume[] = "R Digital PCM Volume";
++
++static int validate(const struct powerphone_playback_volume_state* state,
++                    const struct powerphone_playback_volume_ops* ops) {
++    return state != NULL && ops != NULL && ops->get != NULL && ops->set != NULL;
++}
++
++void powerphone_playback_volume_reset(struct powerphone_playback_volume_state* state) {
++    if (state != NULL) {
++        memset(state, 0, sizeof(*state));
++    }
++}
++
++int powerphone_playback_volume_configure(
++        struct powerphone_playback_volume_state* state,
++        enum powerphone_playback_volume_endpoint endpoint,
++        const struct powerphone_playback_volume_ops* ops) {
++    int32_t actual;
++    int status;
++
++    if (!validate(state, ops)) return -EINVAL;
++    powerphone_playback_volume_reset(state);
++    switch (endpoint) {
++        case POWERPHONE_PLAYBACK_VOLUME_EARPIECE:
++            state->control_name = kEarpieceDigitalPcmVolume;
++            break;
++        case POWERPHONE_PLAYBACK_VOLUME_BOTTOM:
++            state->control_name = kBottomDigitalPcmVolume;
++            break;
++        default:
++            return -EINVAL;
++    }
++    status = ops->get(ops->context, state->control_name, &state->saved_value);
++    if (status != 0) {
++        powerphone_playback_volume_reset(state);
++        return status;
++    }
++    /* A failed write may still have touched hardware, so retain the snapshot. */
++    state->restore_required = 1;
++    status = ops->set(ops->context, state->control_name,
++                      POWERPHONE_PLAYBACK_DIGITAL_PCM_VOLUME);
++    if (status != 0) return status;
++    status = ops->get(ops->context, state->control_name, &actual);
++    if (status != 0) return status;
++    return actual == POWERPHONE_PLAYBACK_DIGITAL_PCM_VOLUME ? 0 : -EIO;
++}
++
++int powerphone_playback_volume_verify(
++        const struct powerphone_playback_volume_state* state,
++        const struct powerphone_playback_volume_ops* ops) {
++    int32_t actual;
++    int status;
++
++    if (!validate(state, ops) || state->restore_required == 0 ||
++        state->control_name == NULL) {
++        return -EINVAL;
++    }
++    status = ops->get(ops->context, state->control_name, &actual);
++    if (status != 0) return status;
++    return actual == POWERPHONE_PLAYBACK_DIGITAL_PCM_VOLUME ? 0 : -EIO;
++}
++
++int powerphone_playback_volume_restore(
++        struct powerphone_playback_volume_state* state, int hard_off_proved,
++        const struct powerphone_playback_volume_ops* ops) {
++    int32_t actual;
++    int status;
++
++    if (!validate(state, ops)) return -EINVAL;
++    if (state->restore_required == 0) return 0;
++    if (state->control_name == NULL) return -EINVAL;
++    if (!hard_off_proved) return -EPERM;
++    status = ops->set(ops->context, state->control_name, state->saved_value);
++    if (status != 0) return status;
++    status = ops->get(ops->context, state->control_name, &actual);
++    if (status != 0) return status;
++    if (actual != state->saved_value) return -EIO;
++    powerphone_playback_volume_reset(state);
++    return 0;
++}
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+index 149c49c9c3696ec18ccd1b23de5817523199a732..46e930a9cc0de288ca78bba7d325e7951691fb07 100644
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -18,6 +18,8 @@
+ 
+ #include "Powerphone.h"
+ 
++#include <powerphone/PlaybackRouteVolume.h>
++
+ #include <algorithm>
+ #include <array>
+ #include <cerrno>
+@@ -69,10 +71,13 @@ constexpr int32_t kPlaybackDevice = 0;
+ constexpr int32_t kRate = 192000;
+ constexpr size_t kCaptureAlsaPeriodFrames = 1920;
+ constexpr size_t kCaptureAlsaBufferFrames = 7680;
+-constexpr size_t kPlaybackAlsaPeriodFrames = 480;
+-constexpr size_t kPlaybackAlsaBufferFrames = 1920;
++constexpr size_t kPlaybackAlsaPeriodFrames = 1920;
++constexpr size_t kPlaybackAlsaBufferFrames = 3840;
++constexpr size_t kPlaybackAlsaStartThresholdFrames = 1920;
+ constexpr size_t kCaptureFrameworkBufferFrames = 1920;
+ constexpr size_t kPlaybackFrameworkBufferFrames = 7680;
++constexpr uint32_t kPlaybackSecondWriteEfaultRetries = 32;
++constexpr uint32_t kPlaybackSecondWriteEfaultRetrySleepUs = 1000;
+ constexpr int kPlaybackRtPriority = 90;
+ constexpr int kPlaybackPcmOpenWaitMs = 200;
+ constexpr char kPcmStreamWaitControl[] = "PCM Stream Wait Time in MSec";
+@@ -153,7 +158,7 @@ AudioProfile makeOutputProfile() {
+             .format = AudioFormatDescription{.type = AudioFormatType::PCM,
+                                              .pcm = PcmType::INT_32_BIT},
+             // PCM 0,0 is a stereo S32 frontend. The AoC converts that stream
+-            // to the independently qualified four-S32 TDM_0_RX bus.
++            // to the independently qualified two-S32-slot TDM_0_RX bus.
+             .channelMasks = {AudioChannelLayout::make<AudioChannelLayout::Tag::indexMask>(
+                     AudioChannelLayout::INDEX_MASK_2)},
+             .sampleRates = {kRate},
+@@ -559,8 +564,8 @@ class PlaybackRoute {
+ 
+         if (!snapshotAndSetEnum("TDM_0_RX Sample Rate", "SR_192K") ||
+             !snapshotAndSetEnum("TDM_0_RX Format", "S32_LE") ||
+-            !snapshotAndSetEnum("TDM_0_RX Chan", "Four") ||
+-            !snapshotAndSetEnum("TDM_0_RX nSlot", "Four") ||
++            !snapshotAndSetEnum("TDM_0_RX Chan", "Two") ||
++            !snapshotAndSetEnum("TDM_0_RX nSlot", "Two") ||
+             !snapshotAndSetEnum("TDM_0_RX SlotFmt", "S32_LE")) {
+             cleanup();
+             return false;
+@@ -579,6 +584,20 @@ class PlaybackRoute {
+             }
+         }
+ 
++        // Both amplifiers and EP1 are still proved off. Snapshot and set only
++        // the selected codec's stock digital gain; touching the inactive
++        // codec would violate endpoint isolation.
++        powerphone_playback_volume_ops volumeOps = playbackVolumeOps();
++        const int volumeStatus = powerphone_playback_volume_configure(
++                &mPlaybackVolume, playbackVolumeEndpoint(endpoint), &volumeOps);
++        if (volumeStatus != 0) {
++            LOG(ERROR) << "failed to configure selected Digital PCM Volume: " << volumeStatus;
++            cleanup();
++            return false;
++        }
++        rememberExpected(mPlaybackVolume.control_name,
++                         POWERPHONE_PLAYBACK_DIGITAL_PCM_VOLUME);
++
+         // From this point onward an error path must force the route and both
+         // amplifiers off. Prepare every codec and power control before binding
+         // EP1 so that route activation is the final mixer operation before PCM
+@@ -681,6 +700,16 @@ class PlaybackRoute {
+             // matches the expected snapshot.
+             safeToRestore = expectedStateMatches() && idlePowerAndRoutes();
+         }
++        if (safeToRestore) {
++            powerphone_playback_volume_ops volumeOps = playbackVolumeOps();
++            const int volumeStatus = powerphone_playback_volume_restore(
++                    &mPlaybackVolume, 1 /* hard_off_proved */, &volumeOps);
++            if (volumeStatus != 0) {
++                LOG(ERROR) << "selected Digital PCM Volume restore failed after hard-off: "
++                           << volumeStatus;
++                safeToRestore = false;
++            }
++        }
+         if (safeToRestore) {
+             for (auto it = mSavedValues.rbegin(); it != mSavedValues.rend(); ++it) {
+                 if (!setValueBestEffort(it->name, it->value)) {
+@@ -806,8 +835,12 @@ class PlaybackRoute {
+             !valueMatches("TDM_0_RX Mixer US", 0) || !enumMatches("Ultrasonic Mode", "In Band") ||
+             !enumMatches("R Ultrasonic Mode", "In Band") ||
+             !enumMatches("TDM_0_RX Sample Rate", "SR_192K") ||
+-            !enumMatches("TDM_0_RX Format", "S32_LE") || !enumMatches("TDM_0_RX Chan", "Four") ||
+-            !enumMatches("TDM_0_RX nSlot", "Four") || !enumMatches("TDM_0_RX SlotFmt", "S32_LE")) {
++            !enumMatches("TDM_0_RX Format", "S32_LE") || !enumMatches("TDM_0_RX Chan", "Two") ||
++            !enumMatches("TDM_0_RX nSlot", "Two") || !enumMatches("TDM_0_RX SlotFmt", "S32_LE")) {
++            return false;
++        }
++        powerphone_playback_volume_ops volumeOps = playbackVolumeOps();
++        if (powerphone_playback_volume_verify(&mPlaybackVolume, &volumeOps) != 0) {
+             return false;
+         }
+         for (const char* prefix : {"", "R "}) {
+@@ -822,6 +855,41 @@ class PlaybackRoute {
+         return true;
+     }
+ 
++    static enum powerphone_playback_volume_endpoint playbackVolumeEndpoint(
++            PlaybackEndpoint endpoint) {
++        return endpoint == PlaybackEndpoint::EARPIECE
++                ? POWERPHONE_PLAYBACK_VOLUME_EARPIECE
++                : POWERPHONE_PLAYBACK_VOLUME_BOTTOM;
++    }
++
++    static int playbackVolumeGet(void* context, const char* controlName, int32_t* value) {
++        if (context == nullptr || controlName == nullptr || value == nullptr) return -EINVAL;
++        auto* route = static_cast<PlaybackRoute*>(context);
++        mixer_ctl* ctl = route->control(controlName);
++        if (ctl == nullptr) return -ENOENT;
++        const int actual = mixer_ctl_get_value(ctl, 0);
++        if (actual < 0) return actual;
++        *value = actual;
++        return 0;
++    }
++
++    static int playbackVolumeSet(void* context, const char* controlName, int32_t value) {
++        if (context == nullptr || controlName == nullptr) return -EINVAL;
++        auto* route = static_cast<PlaybackRoute*>(context);
++        mixer_ctl* ctl = route->control(controlName);
++        if (ctl == nullptr) return -ENOENT;
++        const int status = mixer_ctl_set_value(ctl, 0, value);
++        return status > 0 ? -EIO : status;
++    }
++
++    powerphone_playback_volume_ops playbackVolumeOps() const {
++        powerphone_playback_volume_ops ops{};
++        ops.context = const_cast<PlaybackRoute*>(this);
++        ops.get = playbackVolumeGet;
++        ops.set = playbackVolumeSet;
++        return ops;
++    }
++
+     bool save(const std::string& name, mixer_ctl** ctl) {
+         *ctl = control(name);
+         if (*ctl == nullptr) return false;
+@@ -966,6 +1034,7 @@ class PlaybackRoute {
+     }
+ 
+     void closeWithoutPowerCleanup() {
++        powerphone_playback_volume_reset(&mPlaybackVolume);
+         mSavedValues.clear();
+         mOwnedValues.clear();
+         mEndpoint.reset();
+@@ -974,6 +1043,7 @@ class PlaybackRoute {
+     }
+ 
+     void closeMixer() {
++        powerphone_playback_volume_reset(&mPlaybackVolume);
+         mSavedValues.clear();
+         mOwnedValues.clear();
+         mEndpoint.reset();
+@@ -987,6 +1057,7 @@ class PlaybackRoute {
+     mixer* mMixer = nullptr;
+     std::vector<SavedMixerValue> mSavedValues;
+     std::vector<OwnedMixerValue> mOwnedValues;
++    powerphone_playback_volume_state mPlaybackVolume{};
+     std::optional<int> mSavedPcmOpenWait;
+     std::optional<PlaybackEndpoint> mEndpoint;
+     bool mPowerControlsTouched = false;
+@@ -1327,14 +1398,15 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+     }
+ 
+     // The framework/FMQ buffer is decoupled from the fixed AoC frontend ring.
+-    // Open PCM0,D0 at 480x4 immediately after the final EP1 mixer write. The
+-    // isolated facade uses the byte-oriented libtinyalsa-v1 transaction that
+-    // the legacy tinyplay hardware trial qualified. Capture and mixer control
+-    // deliberately remain on libtinyalsav2 in this process.
++    // Open PCM0,D0 at 1920x2 immediately after the final EP1 mixer write. The
++    // isolated facade retains libtinyalsa-v1's open/prepare transaction while
++    // exposing raw WRITEI for the hardware-qualified transfer path. Capture
++    // and mixer control deliberately remain on libtinyalsav2 in this process.
+     powerphone_legacy_pcm_open_result openResult{};
+     powerphone_legacy_pcm* playbackPcm = powerphone_legacy_pcm_open_playback(
+             kPlaybackCard, kPlaybackDevice, 2, kRate, kPlaybackAlsaPeriodFrames,
+             kPlaybackAlsaBufferFrames / kPlaybackAlsaPeriodFrames,
++            kPlaybackAlsaStartThresholdFrames,
+             POWERPHONE_LEGACY_PCM_FORMAT_S32_LE, &openResult);
+     bool pcmOpenWaitRestored = false;
+     {
+@@ -1373,13 +1445,22 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+                     kPlaybackAlsaBufferFrames / kPlaybackAlsaPeriodFrames &&
+             openResult.buffer_size_frames == kPlaybackAlsaBufferFrames &&
+             powerphone_legacy_pcm_get_buffer_size(playbackPcm) == kPlaybackAlsaBufferFrames;
+-    const int initialXruns = powerphone_legacy_pcm_get_xruns(playbackPcm);
+-    if (!exactGeometry || initialXruns != 0) {
+-        LOG(ERROR) << __func__ << ": PCM 0,0 did not retain exact legacy 480x4 geometry: "
++    if (!exactGeometry) {
++        LOG(ERROR) << __func__ << ": PCM 0,0 did not retain exact legacy 1920x2 geometry: "
+                    << "period=" << openResult.period_size_frames
+                    << ", count=" << openResult.period_count
+-                   << ", buffer=" << openResult.buffer_size_frames
+-                   << ", xruns=" << initialXruns;
++                   << ", buffer=" << openResult.buffer_size_frames;
++        powerphone_legacy_pcm_close(playbackPcm);
++        std::lock_guard lock(mLock);
++        cleanupPlaybackRouteLocked();
++        return ::android::NO_INIT;
++    }
++    const int prepareStatus = powerphone_legacy_pcm_prepare(playbackPcm);
++    const int initialXruns = powerphone_legacy_pcm_get_xruns(playbackPcm);
++    if (prepareStatus != 0 || initialXruns != 0) {
++        LOG(ERROR) << __func__ << ": PCM 0,0 initial prepare failed: status="
++                   << prepareStatus << ", xruns=" << initialXruns
++                   << ", pcm_error=" << powerphone_legacy_pcm_get_error(playbackPcm);
+         powerphone_legacy_pcm_close(playbackPcm);
+         std::lock_guard lock(mLock);
+         cleanupPlaybackRouteLocked();
+@@ -1397,6 +1478,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+             playbackPcm = nullptr;
+             mPlaybackOpenPending = false;
+             mPlaybackXrunsBaseline.store(initialXruns, std::memory_order_release);
++            mPlaybackSecondWriteRetryPending.store(true, std::memory_order_release);
+         }
+     }
+     if (!ready || !ownsRoute) {
+@@ -1566,7 +1648,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         return ::android::OK;
+     }
+     // AudioFlinger may issue a zero-frame burst immediately after START. Do
+-    // not bind EP1 until a complete first client ring is actually available.
++    // not bind EP1 until a complete first client transaction is available.
+     if (frameCount == 0) {
+         *actualFrameCount = 0;
+         *latencyMs = kPlaybackLatencyMs;
+@@ -1574,8 +1656,8 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+     }
+     // Reject a partial/overflowing client burst before the deferred route is
+     // bound.  Once EP1 is active, AoC expects the first D0 transaction to be a
+-    // complete 1,920-frame ring; opening on an invalid burst can strand the
+-    // asynchronous sink without a producer.
++    // complete 1,920-frame period; opening on an invalid burst can strand the
++    // asynchronous sink without enough producer headroom.
+     if (buffer == nullptr || mFrameSizeBytes != 2 * sizeof(int32_t) ||
+         frameCount % kPlaybackAlsaBufferFrames != 0 ||
+         frameCount > std::numeric_limits<size_t>::max() / mFrameSizeBytes) {
+@@ -1657,27 +1739,40 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+     }
+     const size_t bytesToTransfer = frameCount * mFrameSizeBytes;
+     alsa::applyGain(buffer, mGain, bytesToTransfer, mConfig.value().format, mConfig->channels);
+-    // Use the isolated libtinyalsa-v1 byte API and match the stable legacy
+-    // tinyplay transaction by feeding one complete 1,920-frame ring per
+-    // blocking write. There is deliberately no generic proxy retry: any
+-    // non-xrun failure is terminal, while a recovered EPIPE remains visible
+-    // through the legacy handle's xrun counter.
++    // Match the physically qualified native-q192 transaction by feeding one
++    // 1,920-frame period per raw blocking WRITEI. The first period reaches the
++    // explicit start threshold and the second can immediately fill the
++    // remaining ring headroom. Hardware observed the transient EFAULT at byte
++    // offset 15,360: the second period after the first was accepted. Give only
++    // that startup write a bounded retry without pcm_prepare(), which would
++    // reset the active AoC stream. The first and every later error remain
++    // terminal, and a recovered EPIPE remains visible through the legacy
++    // handle's xrun counter.
++    const bool secondWriteRetryPending =
++            mPlaybackSecondWriteRetryPending.load(std::memory_order_acquire);
+     size_t transferredFrames = 0;
+     while (transferredFrames < frameCount) {
+         const size_t chunkFrames =
+-                std::min(kPlaybackAlsaBufferFrames, frameCount - transferredFrames);
+-        const size_t chunkBytes = chunkFrames * mFrameSizeBytes;
++                std::min(kPlaybackAlsaPeriodFrames, frameCount - transferredFrames);
+         auto* chunk = static_cast<uint8_t*>(buffer) + transferredFrames * mFrameSizeBytes;
+-        const bool oversized = chunkBytes > std::numeric_limits<uint32_t>::max();
++        const bool oversized = chunkFrames > std::numeric_limits<uint32_t>::max();
++        const bool retryStartupSecondWrite = secondWriteRetryPending &&
++                transferredFrames == kPlaybackAlsaPeriodFrames;
++        uint32_t efaultRetries = 0;
+         const int writeStatus =
+                 oversized ? -1
+-                          : powerphone_legacy_pcm_write(
+-                                    playbackPcm, chunk, static_cast<uint32_t>(chunkBytes));
++                          : powerphone_legacy_pcm_writei_frames(
++                                    playbackPcm, chunk, static_cast<uint32_t>(chunkFrames),
++                                    retryStartupSecondWrite
++                                            ? kPlaybackSecondWriteEfaultRetries
++                                            : 0,
++                                    kPlaybackSecondWriteEfaultRetrySleepUs, &efaultRetries);
+         const int xrunsAfter = powerphone_legacy_pcm_get_xruns(playbackPcm);
+         if (writeStatus != 0 || xrunsAfter != expectedXruns) {
+             const char* error = powerphone_legacy_pcm_get_error(playbackPcm);
+             LOG(ERROR) << __func__ << ": PCM ring write failed after " << transferredFrames
+                        << " frames: status=" << writeStatus << ", oversized=" << oversized
++                       << ", efault_retries=" << efaultRetries
+                        << ", xruns=" << initialXruns << "->" << xrunsAfter
+                        << ", pcm_error=" << (error == nullptr ? "<none>" : error);
+             StreamAlsa::standby();
+@@ -1688,6 +1783,13 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+             *actualFrameCount = transferredFrames;
+             return ::android::INVALID_OPERATION;
+         }
++        if (efaultRetries != 0) {
++            LOG(INFO) << __func__ << ": startup second WRITEI resumed after "
++                      << efaultRetries << " EFAULT retries";
++        }
++        if (retryStartupSecondWrite) {
++            mPlaybackSecondWriteRetryPending.store(false, std::memory_order_release);
++        }
+         transferredFrames += chunkFrames;
+     }
+     *actualFrameCount = transferredFrames;
+@@ -1747,6 +1849,7 @@ void StreamPowerphone::cleanupPlaybackRouteLocked() {
+         mLegacyPlaybackPcm = nullptr;
+     }
+     mPlaybackXrunsBaseline.store(0, std::memory_order_release);
++    mPlaybackSecondWriteRetryPending.store(false, std::memory_order_release);
+     mPlaybackOpenPending = false;
+     if (mPlaybackRoute != nullptr) {
+         mPlaybackRoute->cleanup();
+@@ -1816,9 +1919,9 @@ ndk::ScopedAStatus ModulePowerphone::calculateBufferSizeFrames(const AudioFormat
+         return ndk::ScopedAStatus::ok();
+     }
+     if (sampleRateHz == kRate && exactOutput) {
+-        // Aggregate four 10 ms rings into one 40 ms framework transaction.
++        // Aggregate two 20 ms ALSA rings into one 40 ms framework transaction.
+         // This gives the HAL worker scheduling margin while transfer() still
+-        // submits independently qualified 1920-frame PCM0,D0 ring writes.
++        // submits independently qualified 1,920-frame PCM0,D0 period writes.
+         *bufferSizeFrames = kPlaybackFrameworkBufferFrames;
+         return ndk::ScopedAStatus::ok();
+     }
+diff --git a/audio/aidl/default/powerphone/Powerphone.h b/audio/aidl/default/powerphone/Powerphone.h
+index 249f63200186bb40eb393d52c1af961a05c57fb7..8c0b2a9333bce625341793143b87983c0557d56d 100644
+--- a/audio/aidl/default/powerphone/Powerphone.h
++++ b/audio/aidl/default/powerphone/Powerphone.h
+@@ -80,6 +80,7 @@ class StreamPowerphone : public StreamAlsa {
+     bool mPlaybackOpenPending GUARDED_BY(mLock) = false;
+     struct powerphone_legacy_pcm* mLegacyPlaybackPcm GUARDED_BY(mLock) = nullptr;
+     std::atomic<int> mPlaybackXrunsBaseline{0};
++    std::atomic<bool> mPlaybackSecondWriteRetryPending{false};
+ };
+ 
+ class StreamInPowerphone final : public StreamIn, public StreamPowerphone {
+diff --git a/audio/aidl/default/powerphone/include/powerphone/LegacyTinyalsaV1.h b/audio/aidl/default/powerphone/include/powerphone/LegacyTinyalsaV1.h
+index 0010bae3c90e62b9f36ade278a09a19a53a15581..1dc2d4a7db11966dfcaabc5035c971c42374c29b 100644
+--- a/audio/aidl/default/powerphone/include/powerphone/LegacyTinyalsaV1.h
++++ b/audio/aidl/default/powerphone/include/powerphone/LegacyTinyalsaV1.h
+@@ -41,13 +41,15 @@ struct powerphone_legacy_pcm_open_result {
+ 
+ /*
+  * Opens a blocking RW-interleaved playback PCM with PCM_OUT only.  The
+- * start/stop/silence/avail-min fields use legacy tinyplay's zero defaults.
++ * caller supplies the nonzero ALSA start threshold; stop, silence, and
++ * avail-min retain legacy tinyplay's zero defaults.
+  * Like legacy pcm_open(), a non-null return can still describe a failed open;
+  * callers must check powerphone_legacy_pcm_is_ready() before using it.
+  */
+ struct powerphone_legacy_pcm* powerphone_legacy_pcm_open_playback(
+         uint32_t card, uint32_t device, uint32_t channels, uint32_t rate,
+-        uint32_t period_size_frames, uint32_t period_count, uint32_t format,
++        uint32_t period_size_frames, uint32_t period_count,
++        uint32_t start_threshold_frames, uint32_t format,
+         struct powerphone_legacy_pcm_open_result* result);
+ 
+ int powerphone_legacy_pcm_is_ready(struct powerphone_legacy_pcm* pcm);
+@@ -55,9 +57,25 @@ const char* powerphone_legacy_pcm_get_error(struct powerphone_legacy_pcm* pcm);
+ uint32_t powerphone_legacy_pcm_get_buffer_size(struct powerphone_legacy_pcm* pcm);
+ int powerphone_legacy_pcm_get_xruns(struct powerphone_legacy_pcm* pcm);
+ 
+-/* Byte-oriented, blocking legacy pcm_write() semantics. */
+-int powerphone_legacy_pcm_write(struct powerphone_legacy_pcm* pcm, const void* data,
+-                                uint32_t byte_count);
++/*
++ * Prepare once before the first raw write.  WRITEI EFAULT retries must not
++ * call this again: doing so resets the already-active Frankel AoC stream.
++ */
++int powerphone_legacy_pcm_prepare(struct powerphone_legacy_pcm* pcm);
++
++/*
++ * Issue blocking SNDRV_PCM_IOCTL_WRITEI_FRAMES directly on the legacy PCM
++ * descriptor.  This deliberately bypasses pcm_write(), whose error path
++ * clears tinyalsa's private prepared/running state.  max_efault_retries is a
++ * retry count in addition to the first attempt; each retry waits
++ * efault_retry_sleep_us.  The caller controls which transfer, if any, may use
++ * this bounded exception.
++ */
++int powerphone_legacy_pcm_writei_frames(struct powerphone_legacy_pcm* pcm,
++                                        const void* data, uint32_t frame_count,
++                                        uint32_t max_efault_retries,
++                                        uint32_t efault_retry_sleep_us,
++                                        uint32_t* actual_efault_retries);
+ int powerphone_legacy_pcm_stop(struct powerphone_legacy_pcm* pcm);
+ int powerphone_legacy_pcm_close(struct powerphone_legacy_pcm* pcm);
+ 
+diff --git a/audio/aidl/default/powerphone/include/powerphone/PlaybackRouteVolume.h b/audio/aidl/default/powerphone/include/powerphone/PlaybackRouteVolume.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a5a31c79cefbe20190c3b0d047ed76f587cfbf90
+--- /dev/null
++++ b/audio/aidl/default/powerphone/include/powerphone/PlaybackRouteVolume.h
+@@ -0,0 +1,64 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define POWERPHONE_PLAYBACK_DIGITAL_PCM_VOLUME 817
++
++enum powerphone_playback_volume_endpoint {
++    POWERPHONE_PLAYBACK_VOLUME_EARPIECE = 0,
++    POWERPHONE_PLAYBACK_VOLUME_BOTTOM = 1,
++};
++
++struct powerphone_playback_volume_ops {
++    void* context;
++    int (*get)(void* context, const char* control_name, int32_t* value);
++    int (*set)(void* context, const char* control_name, int32_t value);
++};
++
++struct powerphone_playback_volume_state {
++    const char* control_name;
++    int32_t saved_value;
++    uint32_t restore_required;
++};
++
++/* Snapshot and set only the endpoint-selected scalar control. */
++int powerphone_playback_volume_configure(
++        struct powerphone_playback_volume_state* state,
++        enum powerphone_playback_volume_endpoint endpoint,
++        const struct powerphone_playback_volume_ops* ops);
++
++/* Verify only the selected control while the route is active. */
++int powerphone_playback_volume_verify(
++        const struct powerphone_playback_volume_state* state,
++        const struct powerphone_playback_volume_ops* ops);
++
++/* Restore is forbidden until the caller has proved amplifier and EP1 hard-off. */
++int powerphone_playback_volume_restore(
++        struct powerphone_playback_volume_state* state, int hard_off_proved,
++        const struct powerphone_playback_volume_ops* ops);
++
++void powerphone_playback_volume_reset(struct powerphone_playback_volume_state* state);
++
++#ifdef __cplusplus
++} /* extern "C" */
++#endif
+diff --git a/audio/aidl/default/powerphone/tests/LegacyTinyalsaV1Test.cpp b/audio/aidl/default/powerphone/tests/LegacyTinyalsaV1Test.cpp
+index 1bb64ecd24513f1a55871564a6847a7b885c811c..aae690da2edb932c2209f93f19d43f4f1b86f63f 100644
+--- a/audio/aidl/default/powerphone/tests/LegacyTinyalsaV1Test.cpp
++++ b/audio/aidl/default/powerphone/tests/LegacyTinyalsaV1Test.cpp
+@@ -16,13 +16,19 @@
+ 
+ #include <errno.h>
+ #include <limits.h>
++#include <stddef.h>
++#include <time.h>
++
++#include <sound/asound.h>
+ 
+ #include <array>
++#include <cstring>
+ #include <string>
+ #include <vector>
+ 
+ #include <gtest/gtest.h>
+ #include <powerphone/LegacyTinyalsaV1.h>
++#include <powerphone/PlaybackRouteVolume.h>
+ #include <tinyalsa/asoundlib.h>
+ 
+ namespace {
+@@ -31,7 +37,8 @@ constexpr size_t kParamCount = PCM_PARAM_TICK_TIME + 1;
+ 
+ struct FakePcm {
+     bool ready = true;
+-    unsigned int bufferSize = 1920;
++    unsigned int bufferSize = 3840;
++    int pollFd = 73;
+ };
+ 
+ struct FakeParams {
+@@ -39,6 +46,49 @@ struct FakeParams {
+     std::array<unsigned int, kParamCount> maximum{};
+ };
+ 
++struct FakeIoctlResult {
++    int status;
++    int error;
++};
++
++struct FakeVolumeMixer {
++    int32_t earpieceVolume = 0;
++    int32_t bottomVolume = 0;
++    std::vector<std::string> operations;
++};
++
++int32_t* FakeVolumeSlot(FakeVolumeMixer* mixer, const char* name) {
++    if (std::strcmp(name, "Digital PCM Volume") == 0) return &mixer->earpieceVolume;
++    if (std::strcmp(name, "R Digital PCM Volume") == 0) return &mixer->bottomVolume;
++    return nullptr;
++}
++
++int FakeVolumeGet(void* context, const char* name, int32_t* value) {
++    auto* mixer = static_cast<FakeVolumeMixer*>(context);
++    int32_t* slot = mixer == nullptr || name == nullptr ? nullptr : FakeVolumeSlot(mixer, name);
++    if (slot == nullptr || value == nullptr) return -ENOENT;
++    *value = *slot;
++    mixer->operations.emplace_back("get:" + std::string(name) + "=" + std::to_string(*value));
++    return 0;
++}
++
++int FakeVolumeSet(void* context, const char* name, int32_t value) {
++    auto* mixer = static_cast<FakeVolumeMixer*>(context);
++    int32_t* slot = mixer == nullptr || name == nullptr ? nullptr : FakeVolumeSlot(mixer, name);
++    if (slot == nullptr) return -ENOENT;
++    mixer->operations.emplace_back("set:" + std::string(name) + "=" + std::to_string(value));
++    *slot = value;
++    return 0;
++}
++
++powerphone_playback_volume_ops FakeVolumeOps(FakeVolumeMixer* mixer) {
++    powerphone_playback_volume_ops ops{};
++    ops.context = mixer;
++    ops.get = FakeVolumeGet;
++    ops.set = FakeVolumeSet;
++    return ops;
++}
++
+ FakePcm gPcm;
+ FakeParams gParams;
+ bool gParamsAvailable;
+@@ -50,6 +100,11 @@ unsigned int gOpenCard;
+ unsigned int gOpenDevice;
+ unsigned int gOpenFlags;
+ pcm_config gOpenConfig;
++int gPrepareCalls;
++std::vector<FakeIoctlResult> gIoctlResults;
++size_t gNextIoctlResult;
++std::vector<void*> gWriteBuffers;
++std::vector<snd_pcm_uframes_t> gWriteFrames;
+ 
+ void ResetFakes() {
+     gPcm = {};
+@@ -64,6 +119,11 @@ void ResetFakes() {
+     gOpenDevice = UINT_MAX;
+     gOpenFlags = UINT_MAX;
+     gOpenConfig = {};
++    gPrepareCalls = 0;
++    gIoctlResults.clear();
++    gNextIoctlResult = 0;
++    gWriteBuffers.clear();
++    gWriteFrames.clear();
+     errno = 0;
+ }
+ 
+@@ -86,7 +146,8 @@ TEST_F(LegacyTinyalsaV1Test, PreflightsBeforeConfiguredOpen) {
+     powerphone_legacy_pcm_open_result result{};
+ 
+     powerphone_legacy_pcm* pcm = powerphone_legacy_pcm_open_playback(
+-            0, 0, 2, 192000, 480, 4, POWERPHONE_LEGACY_PCM_FORMAT_S32_LE, &result);
++            0, 0, 2, 192000, 1920, 2, 1920, POWERPHONE_LEGACY_PCM_FORMAT_S32_LE,
++            &result);
+ 
+     ASSERT_NE(nullptr, pcm);
+     EXPECT_EQ((std::vector<std::string>{"params_get", "params_free", "pcm_open"}),
+@@ -98,24 +159,25 @@ TEST_F(LegacyTinyalsaV1Test, PreflightsBeforeConfiguredOpen) {
+     EXPECT_EQ(static_cast<unsigned int>(PCM_OUT), gOpenFlags);
+     EXPECT_EQ(2u, gOpenConfig.channels);
+     EXPECT_EQ(192000u, gOpenConfig.rate);
+-    EXPECT_EQ(480u, gOpenConfig.period_size);
+-    EXPECT_EQ(4u, gOpenConfig.period_count);
++    EXPECT_EQ(1920u, gOpenConfig.period_size);
++    EXPECT_EQ(2u, gOpenConfig.period_count);
+     EXPECT_EQ(PCM_FORMAT_S32_LE, gOpenConfig.format);
+-    EXPECT_EQ(0u, gOpenConfig.start_threshold);
++    EXPECT_EQ(1920u, gOpenConfig.start_threshold);
+     EXPECT_EQ(0u, gOpenConfig.stop_threshold);
+     EXPECT_EQ(0u, gOpenConfig.silence_threshold);
+     EXPECT_EQ(0u, gOpenConfig.silence_size);
+     EXPECT_EQ(0, gOpenConfig.avail_min);
+-    EXPECT_EQ(480u, result.period_size_frames);
+-    EXPECT_EQ(4u, result.period_count);
+-    EXPECT_EQ(1920u, result.buffer_size_frames);
++    EXPECT_EQ(1920u, result.period_size_frames);
++    EXPECT_EQ(2u, result.period_count);
++    EXPECT_EQ(3840u, result.buffer_size_frames);
+ }
+ 
+ TEST_F(LegacyTinyalsaV1Test, RejectsOutOfRangeAfterCompletePreflight) {
+     gParams.maximum[PCM_PARAM_RATE] = 96000;
+ 
+     powerphone_legacy_pcm* pcm = powerphone_legacy_pcm_open_playback(
+-            0, 0, 2, 192000, 480, 4, POWERPHONE_LEGACY_PCM_FORMAT_S32_LE, nullptr);
++            0, 0, 2, 192000, 1920, 2, 1920, POWERPHONE_LEGACY_PCM_FORMAT_S32_LE,
++            nullptr);
+ 
+     EXPECT_EQ(nullptr, pcm);
+     EXPECT_EQ(EINVAL, errno);
+@@ -129,7 +191,8 @@ TEST_F(LegacyTinyalsaV1Test, PreservesParameterOpenFailure) {
+     gParamsFailureErrno = ENODEV;
+ 
+     powerphone_legacy_pcm* pcm = powerphone_legacy_pcm_open_playback(
+-            0, 0, 2, 192000, 480, 4, POWERPHONE_LEGACY_PCM_FORMAT_S32_LE, nullptr);
++            0, 0, 2, 192000, 1920, 2, 1920, POWERPHONE_LEGACY_PCM_FORMAT_S32_LE,
++            nullptr);
+ 
+     EXPECT_EQ(nullptr, pcm);
+     EXPECT_EQ(ENODEV, errno);
+@@ -141,12 +204,120 @@ TEST_F(LegacyTinyalsaV1Test, MapsS16FormatToSixteenSampleBits) {
+     gParams.maximum[PCM_PARAM_SAMPLE_BITS] = 16;
+ 
+     powerphone_legacy_pcm* pcm = powerphone_legacy_pcm_open_playback(
+-            0, 0, 2, 192000, 480, 4, POWERPHONE_LEGACY_PCM_FORMAT_S16_LE, nullptr);
++            0, 0, 2, 192000, 1920, 2, 1920, POWERPHONE_LEGACY_PCM_FORMAT_S16_LE,
++            nullptr);
+ 
+     ASSERT_NE(nullptr, pcm);
+     EXPECT_EQ(PCM_FORMAT_S16_LE, gOpenConfig.format);
+ }
+ 
++TEST_F(LegacyTinyalsaV1Test, RejectsInvalidStartThresholdBeforePreflight) {
++    powerphone_legacy_pcm* pcm = powerphone_legacy_pcm_open_playback(
++            0, 0, 2, 192000, 1920, 2, 3841, POWERPHONE_LEGACY_PCM_FORMAT_S32_LE,
++            nullptr);
++
++    EXPECT_EQ(nullptr, pcm);
++    EXPECT_EQ(EINVAL, errno);
++    EXPECT_TRUE(gOperations.empty());
++}
++
++TEST_F(LegacyTinyalsaV1Test, FirstWriteEfaultIsTerminalWithoutPrepareReset) {
++    powerphone_legacy_pcm* pcm = powerphone_legacy_pcm_open_playback(
++            0, 0, 2, 192000, 1920, 2, 1920, POWERPHONE_LEGACY_PCM_FORMAT_S32_LE,
++            nullptr);
++    ASSERT_NE(nullptr, pcm);
++    ASSERT_EQ(0, powerphone_legacy_pcm_prepare(pcm));
++    std::array<int32_t, 1920 * 2> samples{};
++    gIoctlResults = {{-1, EFAULT}, {0, 0}};
++    uint32_t retries = UINT_MAX;
++
++    EXPECT_EQ(-EFAULT, powerphone_legacy_pcm_writei_frames(
++                               pcm, samples.data(), 1920, 0, 0, &retries));
++
++    EXPECT_EQ(1, gPrepareCalls);
++    EXPECT_EQ(0u, retries);
++    EXPECT_EQ(1u, gNextIoctlResult);
++    EXPECT_EQ((std::vector<snd_pcm_uframes_t>{1920}), gWriteFrames);
++    EXPECT_EQ((std::vector<void*>{samples.data()}), gWriteBuffers);
++}
++
++TEST_F(LegacyTinyalsaV1Test, OnlySecondStartupWriteRetriesThenLaterEfaultIsTerminal) {
++    powerphone_legacy_pcm* pcm = powerphone_legacy_pcm_open_playback(
++            0, 0, 2, 192000, 1920, 2, 1920, POWERPHONE_LEGACY_PCM_FORMAT_S32_LE,
++            nullptr);
++    ASSERT_NE(nullptr, pcm);
++    ASSERT_EQ(0, powerphone_legacy_pcm_prepare(pcm));
++    std::array<int32_t, 1920 * 2 * 3> samples{};
++    int32_t* const first = samples.data();
++    int32_t* const second = first + 1920 * 2;
++    int32_t* const third = second + 1920 * 2;
++    ASSERT_EQ(15360, reinterpret_cast<uint8_t*>(second) -
++                             reinterpret_cast<uint8_t*>(first));
++    gIoctlResults = {
++            {0, 0}, {-1, EFAULT}, {-1, EFAULT}, {0, 0}, {-1, EFAULT}, {0, 0}};
++    uint32_t retries = UINT_MAX;
++
++    ASSERT_EQ(0, powerphone_legacy_pcm_writei_frames(pcm, first, 1920, 0, 0, &retries));
++    EXPECT_EQ(0u, retries);
++    ASSERT_EQ(0, powerphone_legacy_pcm_writei_frames(pcm, second, 1920, 32, 0, &retries));
++    EXPECT_EQ(2u, retries);
++    EXPECT_EQ(-EFAULT,
++              powerphone_legacy_pcm_writei_frames(pcm, third, 1920, 0, 0, &retries));
++
++    EXPECT_EQ(1, gPrepareCalls);
++    EXPECT_EQ(0u, retries);
++    EXPECT_EQ(5u, gNextIoctlResult);
++    EXPECT_EQ((std::vector<snd_pcm_uframes_t>{1920, 1920, 1920, 1920, 1920}),
++              gWriteFrames);
++    EXPECT_EQ((std::vector<void*>{first, second, second, second, third}), gWriteBuffers);
++}
++
++TEST_F(LegacyTinyalsaV1Test, EarpieceVolumeIsEndpointScopedAndHardOffGated) {
++    FakeVolumeMixer mixer{.earpieceVolume = 23, .bottomVolume = 41};
++    powerphone_playback_volume_ops ops = FakeVolumeOps(&mixer);
++    powerphone_playback_volume_state state{};
++
++    ASSERT_EQ(0, powerphone_playback_volume_configure(
++                         &state, POWERPHONE_PLAYBACK_VOLUME_EARPIECE, &ops));
++    EXPECT_EQ(817, mixer.earpieceVolume);
++    EXPECT_EQ(41, mixer.bottomVolume);
++    EXPECT_EQ((std::vector<std::string>{"get:Digital PCM Volume=23",
++                                        "set:Digital PCM Volume=817",
++                                        "get:Digital PCM Volume=817"}),
++              mixer.operations);
++    ASSERT_EQ(0, powerphone_playback_volume_verify(&state, &ops));
++    const size_t operationsBeforeUnsafeRestore = mixer.operations.size();
++    EXPECT_EQ(-EPERM, powerphone_playback_volume_restore(
++                              &state, 0 /* hard_off_proved */, &ops));
++    EXPECT_EQ(operationsBeforeUnsafeRestore, mixer.operations.size());
++
++    ASSERT_EQ(0, powerphone_playback_volume_restore(
++                         &state, 1 /* hard_off_proved */, &ops));
++    EXPECT_EQ(23, mixer.earpieceVolume);
++    EXPECT_EQ(41, mixer.bottomVolume);
++    EXPECT_EQ("set:Digital PCM Volume=23", mixer.operations[mixer.operations.size() - 2]);
++    EXPECT_EQ("get:Digital PCM Volume=23", mixer.operations.back());
++}
++
++TEST_F(LegacyTinyalsaV1Test, BottomVolumeNeverTouchesInactiveEarpieceControl) {
++    FakeVolumeMixer mixer{.earpieceVolume = 67, .bottomVolume = 89};
++    powerphone_playback_volume_ops ops = FakeVolumeOps(&mixer);
++    powerphone_playback_volume_state state{};
++
++    ASSERT_EQ(0, powerphone_playback_volume_configure(
++                         &state, POWERPHONE_PLAYBACK_VOLUME_BOTTOM, &ops));
++    EXPECT_EQ(67, mixer.earpieceVolume);
++    EXPECT_EQ(817, mixer.bottomVolume);
++    ASSERT_EQ(0, powerphone_playback_volume_restore(
++                         &state, 1 /* hard_off_proved */, &ops));
++    EXPECT_EQ(67, mixer.earpieceVolume);
++    EXPECT_EQ(89, mixer.bottomVolume);
++    for (const std::string& operation : mixer.operations) {
++        EXPECT_EQ(std::string::npos, operation.find("get:Digital PCM Volume"));
++        EXPECT_EQ(std::string::npos, operation.find("set:Digital PCM Volume"));
++    }
++}
++
+ }  // namespace
+ 
+ struct pcm {
+@@ -214,10 +385,15 @@ unsigned int pcm_get_buffer_size(struct pcm* pcm) {
+     return pcm->fake->bufferSize;
+ }
+ 
+-int pcm_write(struct pcm*, const void*, unsigned int) {
++int pcm_prepare(struct pcm*) {
++    ++gPrepareCalls;
+     return 0;
+ }
+ 
++int pcm_get_poll_fd(struct pcm* pcm) {
++    return pcm->fake->pollFd;
++}
++
+ int pcm_stop(struct pcm*) {
+     return 0;
+ }
+@@ -227,3 +403,22 @@ int pcm_get_xruns(struct pcm*) {
+ }
+ 
+ }  // extern "C"
++
++extern "C" int powerphone_legacy_writei_ioctl(int fd, struct snd_xferi* transfer) {
++    EXPECT_EQ(gPcm.pollFd, fd);
++    if (transfer == nullptr) {
++        ADD_FAILURE() << "WRITEI ioctl received a null transfer";
++        errno = EINVAL;
++        return -1;
++    }
++    gWriteBuffers.push_back(transfer->buf);
++    gWriteFrames.push_back(transfer->frames);
++    if (gNextIoctlResult >= gIoctlResults.size()) {
++        ADD_FAILURE() << "unexpected WRITEI ioctl";
++        errno = EIO;
++        return -1;
++    }
++    const FakeIoctlResult result = gIoctlResults[gNextIoctlResult++];
++    errno = result.error;
++    return result.status;
++}
+

@@ -1,0 +1,16 @@
+Services : 34
+0 : "com.google.usf.non_wakeup" mbox 1
+ Up Size:8x256B Tx:91 Rx:91
+ Down Size:8x256B Tx:44 Rx:44
+26 : "audio_capture3" mbox 6
+ Up Size:1x49152B Tx:0 Rx:0
+ Down Size:1x256B Tx:19 Rx:19
+27 : "ultrasonic_capture" mbox 6
+ Up Size:1x92160B Tx:512 Rx:4294967040
+ Down Size:1x256B Tx:31 Rx:31
+28 : "ultrasonic_capture_debug" mbox 6
+ Up Size:2x64B Tx:200 Rx:20
+ Down Size:1x32B Tx:3 Rx:3
+33 : "aoc_control" mbox 0
+ Up Size:4x64B Tx:10 Rx:10
+ Down Size:4x64B Tx:11 Rx:11

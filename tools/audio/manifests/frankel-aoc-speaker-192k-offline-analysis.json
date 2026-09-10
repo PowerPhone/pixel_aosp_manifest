@@ -1,0 +1,174 @@
+{
+  "schema": "frankel-aoc-offline-patch/v1",
+  "artifact_class": "unsigned-offline-analysis-copy-only",
+  "target": {
+    "profile": "frankel-cp2a-260805-005-aoc",
+    "codename": "frankel",
+    "firmware_size": 24791040,
+    "input_sha256": "ac6d7d86e6aa78379bfa3db5eaea4dadebf8113dc8f46aab52d55f3987064abd",
+    "firmware_version": "15070001-polygon"
+  },
+  "review": {
+    "status": "reviewed-complete",
+    "scope": "exact-offline-semantic-byte-construction",
+    "reviewer": "independent Sky1 instruction, normal AspSrc sizing, and offline manifest QA reviews",
+    "reviewed_at": "2026-09-05"
+  },
+  "qualification": {
+    "local_instruction_review": "complete-limited-scope",
+    "src_pair_tables": "48-to-192-and-192-to-48-confirmed",
+    "src_private_heap_static_bound": "complete-execution-unverified",
+    "code_cave_required": false,
+    "audio_design": "exact-offline-construction-reviewed-runtime-unverified",
+    "oem_signature_valid_if_applied": false,
+    "loadable": false,
+    "flashable": false,
+    "hardware_qualified_192khz": false,
+    "acoustic_bandwidth_qualified": false
+  },
+  "warnings": [
+    "This manifest is complete only for exact offline semantic byte construction; it is not approved firmware.",
+    "Applying these edits invalidates the OEM signature; no signing or loading path is supplied.",
+    "The source-converter private heaps exceed conservative reconstructed 6240/7424-byte bounds but have not been exercised in firmware.",
+    "The complete 48-to-192 and 192-to-48 execution, deadlines, codec state, physical cadence, and acoustic bandwidth remain unqualified."
+  ],
+  "unresolved": [
+    {
+      "id": "src-up-private-heap-runtime",
+      "conservative_static_bound_bytes": 6240,
+      "candidate_bytes_encode": 7040,
+      "status": "static-bound-reviewed-runtime-unverified",
+      "required_resolution": "Execute the 48-to-192 constructor through a supported firmware build and verify all private-heap allocations and returned status."
+    },
+    {
+      "id": "src-down-private-heap-runtime",
+      "conservative_static_bound_bytes": 7424,
+      "candidate_bytes_encode": 8768,
+      "status": "static-bound-reviewed-runtime-unverified",
+      "required_resolution": "Execute the 192-to-48 constructor through a supported firmware build and verify all private-heap allocations and returned status."
+    },
+    {
+      "id": "complete-mode-qualification",
+      "status": "unqualified",
+      "required_resolution": "Execute through a supported authenticated firmware workflow, then independently qualify clock, DMA, codec, timing, physical cadence, and acoustic bandwidth."
+    }
+  ],
+  "patch_set": {
+    "id": "frankel-speaker-192k-offline-analysis-v1",
+    "summary": "Reviewed seven-edit offline construction of the proposed 192 kHz speaker constructor and ratio-4 SRC mode; unsigned, non-loadable, and hardware-unqualified.",
+    "output_sha256": "c63bce1eda09082a6b2c83231d6581da7b72a22876c27000a03ca58177add94f",
+    "edits": [
+      {
+        "id": "constructor.scratch-init-in-place",
+        "region": "dsp-external",
+        "container_offset": "0x973b86",
+        "analysis_address": "0x78972b86",
+        "expected_hex": "ce522c0300870c3d69024ef2bb032883c9b1424c80deb2a16f23814262a2e262ad4262a3f262aef262af",
+        "replacement_hex": "c2d202f2a6000c3d690242629fc9b1424c80d262a5c2a06b4262a2f262ad4262a3f262aff0ff11f262ae",
+        "semantic_intent": "Rewrite the complete 42-byte scratch initialization in place: preserve all stock non-size member stores and null-DMA assertion arguments, set +0x2b4 to 1536 bytes, +0x2b8 to 3072 bytes, and retain +0x2bc at 1536 bytes. Eliminate the separate a14 size temporary and place both 1536-byte stores before the a15 doubling instruction.",
+        "evidence": [
+          "work/audio-research/frankel/speaker-firmware-decomp-20260905/speaker-constructor.txt at 0x78972b86..0x78972bb0",
+          "tools/audio/asm/frankel_aoc_speaker_192k_analysis.S section scratch_init",
+          "docs/frankel-speaker-constructor-offline-review-20260905.md section Current proposal: in-place initialization with diagnostics preserved",
+          "docs/frankel-speaker-192-design-20260905.md section Fixed scratch allocations and frame counts"
+        ],
+        "review_concern": "Instruction, store-order, diagnostic-argument, and normal-path liveness review passed; firmware execution and complete-mode behavior remain unqualified."
+      },
+      {
+        "id": "constructor.force-high-rate-path",
+        "region": "dsp-external",
+        "container_offset": "0x973c02",
+        "analysis_address": "0x78972c02",
+        "expected_hex": "16ca47",
+        "replacement_hex": "c6ffff",
+        "semantic_intent": "Replace the final board-predicate branch with a jump to 0x78972c05 so construction enters the existing high-rate topology on this board.",
+        "evidence": [
+          "work/audio-research/frankel/speaker-firmware-decomp-20260905/speaker-constructor.txt at 0x78972be3..0x78972c05",
+          "work/audio-research/frankel/speaker-firmware-decomp-20260905/offline-constructor-review/high-rate-entry.hex",
+          "docs/frankel-native-ultrasound-decomp-20260905.md constructor board-predicate analysis"
+        ],
+        "review_concern": "Forcing topology selection does not prove that the selected resources work at 192 kHz."
+      },
+      {
+        "id": "constructor.hardware-rate-192",
+        "region": "dsp-external",
+        "container_offset": "0x973c05",
+        "analysis_address": "0x78972c05",
+        "expected_hex": "fe006802e180",
+        "replacement_hex": "fe104802e180",
+        "semantic_intent": "Change the high-rate constructor value from 96 to 192 frames per millisecond while retaining adjacent value 32; later constructor arithmetic derives the four-slot BCLK and DMA geometry from this rate.",
+        "evidence": [
+          "work/audio-research/frankel/speaker-firmware-decomp-20260905/speaker-constructor.txt at 0x78972c05 and 0x78972e04..0x78972f44",
+          "docs/frankel-speaker-192-design-20260905.md section Derived serial-port geometry",
+          "docs/frankel-speaker-192-coordination-20260905.md section Normal startup chain"
+        ],
+        "review_concern": "The arithmetic geometry is established, but device timing, converter initialization, and physical output are not."
+      },
+      {
+        "id": "src.up-rate-and-private-heap",
+        "region": "dsp-external",
+        "container_offset": "0x973d58",
+        "analysis_address": "0x78972d58",
+        "expected_hex": "8e95495a9b93",
+        "replacement_hex": "7e95455a9b93",
+        "semantic_intent": "Change the source-up output rate from 96000 to 192000 Hz and its private-heap capacity from 3520 to 7040 bytes, exceeding the conservative statically reconstructed 6240-byte bound.",
+        "evidence": [
+          "work/audio-research/frankel/speaker-firmware-decomp-20260905/speaker-constructor.txt at 0x78972d52..0x78972d85",
+          "work/audio-research/frankel/speaker-firmware-decomp-20260905/speaker-srcblock-constructor.dis",
+          "work/audio-research/frankel/speaker-firmware-decomp-20260905/speaker-aspsrc-private-heap.dis",
+          "docs/frankel-aoc-aspsrc-192-analysis-20260905.md sections Explicit 48 ↔ 192 filter plans and Private heaps and normal size queries",
+          "docs/frankel-speaker-192-design-20260905.md section Explicit 48/96 processing boundary"
+        ],
+        "review_concern": "The allocation sequence and conservative bound were independently cross-checked; constructor execution and global-memory availability remain unqualified."
+      },
+      {
+        "id": "src.up-output-frames-192",
+        "region": "dsp-external",
+        "container_offset": "0x973d64",
+        "analysis_address": "0x78972d64",
+        "expected_hex": "ce006c82e180",
+        "replacement_hex": "ce104c82e180",
+        "semantic_intent": "Change the 48-to-high-rate SrcBlock output frame count from 96 to 192 while retaining its 48-frame input block.",
+        "evidence": [
+          "work/audio-research/frankel/speaker-firmware-decomp-20260905/speaker-constructor.txt at 0x78972d64..0x78972d85",
+          "work/audio-research/frankel/speaker-firmware-decomp-20260905/speaker-srcblock-constructor.dis",
+          "docs/frankel-aoc-aspsrc-192-analysis-20260905.md section Explicit 48 ↔ 192 filter plans",
+          "docs/frankel-speaker-192-design-20260905.md section Explicit 48/96 processing boundary"
+        ],
+        "review_concern": "The resident normal AspSrc table contains stages 1 and 23 for this pair, but initialization and deadlines remain unexecuted."
+      },
+      {
+        "id": "src.down-private-heap",
+        "region": "dsp-external",
+        "container_offset": "0x973d94",
+        "analysis_address": "0x78972d94",
+        "expected_hex": "ee276d1aeb92",
+        "replacement_hex": "ee27691aeb92",
+        "semantic_intent": "Increase the source-down private-heap capacity from 4384 to 8768 bytes, exceeding the conservative statically reconstructed 7424-byte bound; retain the adjacent 48000-Hz destination-rate construction.",
+        "evidence": [
+          "work/audio-research/frankel/speaker-firmware-decomp-20260905/speaker-constructor.txt at 0x78972d8e..0x78972db7",
+          "work/audio-research/frankel/speaker-firmware-decomp-20260905/speaker-aspsrc-private-heap.dis",
+          "docs/frankel-aoc-aspsrc-192-analysis-20260905.md sections Explicit 48 ↔ 192 filter plans and Private heaps and normal size queries",
+          "docs/frankel-speaker-192-design-20260905.md section Explicit 48/96 processing boundary"
+        ],
+        "review_concern": "The allocation sequence and conservative bound were independently cross-checked; constructor execution and global-memory availability remain unqualified."
+      },
+      {
+        "id": "src.down-input-frames-192",
+        "region": "dsp-external",
+        "container_offset": "0x973d9a",
+        "analysis_address": "0x78972d9a",
+        "expected_hex": "be006083e180",
+        "replacement_hex": "be104083e180",
+        "semantic_intent": "Change the high-rate-to-48 SrcBlock input frame count from 96 to 192 while retaining its 48-frame output block.",
+        "evidence": [
+          "work/audio-research/frankel/speaker-firmware-decomp-20260905/speaker-constructor.txt at 0x78972d9a..0x78972db7",
+          "work/audio-research/frankel/speaker-firmware-decomp-20260905/speaker-srcblock-constructor.dis",
+          "docs/frankel-aoc-aspsrc-192-analysis-20260905.md section Explicit 48 ↔ 192 filter plans",
+          "docs/frankel-speaker-192-design-20260905.md section Explicit 48/96 processing boundary"
+        ],
+        "review_concern": "The resident normal AspSrc table contains stages 26 and 7 for this pair, but initialization and deadlines remain unexecuted."
+      }
+    ]
+  }
+}

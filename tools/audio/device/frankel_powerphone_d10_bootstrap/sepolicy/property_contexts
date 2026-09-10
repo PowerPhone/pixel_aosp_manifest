@@ -1,0 +1,6 @@
+vendor.powerphone.pdm.ready u:object_r:vendor_powerphone_pdm_prop:s0 exact bool
+vendor.powerphone.aoc_speaker_192k.ready u:object_r:vendor_powerphone_aoc_speaker_prop:s0 exact bool
+vendor.powerphone.aoc_a32_allocator.ready u:object_r:vendor_powerphone_aoc_a32_allocator_prop:s0 exact bool
+vendor.powerphone.bootstrap.attempted u:object_r:vendor_powerphone_bootstrap_attempted_prop:s0 exact bool
+vendor.powerphone.bootstrap.watchdog_expired u:object_r:vendor_powerphone_bootstrap_watchdog_prop:s0 exact bool
+vendor.powerphone.bootstrap.phase u:object_r:vendor_powerphone_bootstrap_phase_prop:s0 exact enum armed a32prep warming attempt1 attempt2 attempt3 finalizing releasing complete

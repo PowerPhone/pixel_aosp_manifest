@@ -12,15 +12,32 @@ with `PIXEL_TARGET`; it is never inferred from an attached USB device.
 | Phone | Codename | Platform | Repository status |
 | --- | --- | --- | --- |
 | Pixel 11 | `cubs` | Malibu | Real-hardware boot qualified; broader functional qualification remains incomplete |
-| Pixel 10 | `frankel` | Laguna | Hardened complete bundle passed two real-hardware boots and two 66-pass/zero-failure runtime audits; broader end-to-end qualification remains partial |
+| Pixel 10 | `frankel` | Laguna | Complete device bundle boot-qualified; PowerPhone image transport-qualified at 192 kHz on all two speaker and three microphone research routes through tinyALSA, Java, and AAudio |
 | Pixel 9 | To be established from its own stock package | To be established | Future target; no build or qualification claim |
 
 Read [`docs/multi-target-layout.md`](docs/multi-target-layout.md) for the target
 boundary and output-isolation rules. Frankel work is documented in
 [`docs/frankel-baseline.md`](docs/frankel-baseline.md) and
 [`docs/frankel-build-and-flash.md`](docs/frankel-build-and-flash.md). The
+192 kHz Android application/HAL qualification boundary is documented in
+[`docs/frankel-audio-api.md`](docs/frankel-audio-api.md), and the permanent
+pre-audioserver D10 boot path is in
+[`docs/frankel-powerphone-image-integration.md`](docs/frankel-powerphone-image-integration.md).
+The final 192 kHz endpoint matrix and evidence boundary are in
+[`docs/frankel-powerphone-final-qualification.md`](docs/frankel-powerphone-final-qualification.md). The
 serial-free qualification record and exact final evidence are in
 [`docs/frankel-validation.md`](docs/frankel-validation.md).
+
+The 192 kHz speaker path is transport-qualified but **not independently
+acoustically qualified**. The selected path uses stock signed AoC firmware,
+guarded reboot-volatile F1/H0 changes, in-place AudioEntrypoint getters,
+PCM0,D0 S32 stereo at 192 kHz/1920x2, and a 12.288 MHz two-slot backend.
+Both individual amplifiers passed direct tinyALSA, Java `AudioTrack`, and
+native AAudio with zero xruns and stable AoC counters. The retained unsigned
+cold-firmware image is explicitly non-loadable/non-flashable. A calibrated
+external wideband receiver is still required to assign physical ultrasonic
+bandwidth to each transducer; see the
+[final qualification record](docs/frankel-powerphone-final-qualification.md).
 
 ### Pixel 10 qualification status
 
@@ -201,12 +218,13 @@ the downloaded binary package.
 The required Ubuntu package set installed by the script is:
 
 ```text
-android-sdk-libsparse-utils bison brotli build-essential ca-certificates ccache
+alsa-utils android-sdk-libsparse-utils binutils bison brotli build-essential ca-certificates ccache
 curl device-tree-compiler diffutils e2fsprogs erofs-utils f2fs-tools flex
-fontconfig git-core git-lfs gnupg gperf lib32z1-dev libc6-dev-i386
+fontconfig git-core git-lfs gnupg gperf kmod lib32z1-dev libc6-dev-i386
 libgl1-mesa-dev libx11-dev libxml2-utils jq lz4 openssh-client openssl pkgconf
-protobuf-compiler python3 python3-protobuf repo rsync shellcheck unzip
-x11proto-core-dev util-linux xsltproc xxd zip zlib1g-dev zstd xz-utils 7zip
+protobuf-compiler python3 python3-numpy python3-protobuf python3-scipy repo rsync
+shellcheck unzip x11proto-core-dev util-linux xsltproc xxd zip
+zlib1g-dev zstd xz-utils 7zip
 ```
 
 Node.js, Yarn, and Google Platform-Tools are installed separately under
@@ -242,10 +260,11 @@ PIXEL_TARGET=frankel scripts/extract-vendor.sh
 PIXEL_TARGET=frankel scripts/build-device.sh
 PIXEL_TARGET=frankel scripts/package-device.sh
 # After flashing and reaching Android over ADB:
+FRANKEL_EXPECT_DISABLED_AVB=true \
 PIXEL_TARGET=frankel scripts/validate-frankel-runtime.sh
 ```
 
-The standalone Frankel bundle is published under
+The default, stock-audio Frankel bundle is published under
 `artifacts/frankel/device/`; its runner is
 `artifacts/frankel/device/flash-all.sh`. The bundle is complete for the
 reviewed Frankel port: 23 donor firmware images, seven source-built physical OS
@@ -263,12 +282,70 @@ uses the authority expected by the extracted Pixel eUICC support app but is
 not a general Google Services Framework implementation; see the runbook for
 its caller and coexistence boundaries.
 
+Frankel acoustic-research builds have three default-off boolean selections and
+two explicit profile selectors. `POWERPHONE_AOC_ALSA_192K=true` selects the exact paired kernel
+closure: the live-qualified AoC ALSA transformation for PCM0,D10 capture and
+PCM0,D0 / EP1 source-0 playback, plus the required `aoc_core.ko`
+zero-write-pointer reset.
+`POWERPHONE_D0_PROGRESS_MODE=mailbox|pure-timer|one-period-lag` chooses the D0
+progress source after that transform; it defaults to `mailbox`, while the
+publishable PowerPhone profile explicitly selects `one-period-lag`. That mode
+combines real mailbox progress with the 1 ms counter poll and conservatively
+reports one physical period behind the real counter. It is the
+hardware-qualified native-q192 path;
+selection alone still is not an acoustic-bandwidth claim.
+`POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock|source0-4s32-allocator-fallback`
+defaults to exact stock firmware; the retained second value is experimental and
+not bootable because GSA rejects the modified signed firmware.
+`POWERPHONE_AUDIO_SIDECAR=true` selects PCM0,D10 input, PCM0,D0 stereo-S32
+output, the bounded raw-WRITEI staged player, and the boot certifier, which
+certifies the F1 speaker profile first and the D10 capture profile last.
+Speaker certification retains stock A32 when its optional early cache-sync
+window is unavailable, warms Android audio, allocates/rebases four F1 speaker
+banks, applies rate/period-guarded
+H0 192/1536 geometry without changing stock DeepBuffer geometry,
+and connects the native-q192 F1 profile while leaving `UsfDefaultWorker` at
+stock priority. Real-device
+boots established this order: installing D10 first can prevent the subsequent
+speaker factory-mailbox transaction from completing. The sidecar gives both
+directions a 1,920-frame framework queue while preserving D10's 1,920-by-four
+ALSA ring and D0's 1,920-by-two ALSA ring. Its companion tinyALSA patch exposes
+the cumulative xrun count, including internally recovered EPIPEs, so the HAL
+can fail client streams closed. `POWERPHONE_CS35L43_192K=true`
+selects the narrow high-rate amplifier transform. Use the same explicit values
+for vendor sanitization, attestation, build, and packaging. Returning the AoC
+flag to `false` with `POWERPHONE_D0_PROGRESS_MODE=mailbox` and
+`POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock` restores both paired modules and
+the signed firmware to their exact stock bytes without rerunning extraction; see
+[`docs/frankel-audio-api.md`](docs/frankel-audio-api.md).
+
+Packaging with all three booleans set to `true`, `one-period-lag`, and stock
+signed firmware publishes the research bundle at
+`artifacts/frankel/powerphone/flash-all.sh`; it never overwrites the
+boot-qualified baseline in `artifacts/frankel/device/`. A deliberately
+partial selection, mailbox progress, or modified cold-firmware experiment is
+isolated under its own
+`artifacts/frankel/experimental-*` directory. `BUNDLE_INFO.txt` records the
+profile and all five selection values so a copied bundle remains
+self-describing. On the exact integrated image, both individual D0 output
+routes and all three D10 logical input routes passed direct 192 kHz transport.
+Java `AudioTrack`/AAudio passed both outputs and Java
+`AudioRecord`/AAudio passed all three UNPROCESSED inputs while the HAL
+reported exact 192 kHz hardware geometry and AoC counters remained stable.
+Independently calibrated acoustic qualification remains separate: a
+characterized external ultrasonic source/receiver is still required to assign
+physical bandwidth to each speaker and enclosure microphone.
+
 Hardware evidence is candidate-specific: a later rebuild or repack is not
 qualified merely because this exact bundle passed. Follow the real slot-A and
 post-boot procedure in
 [`docs/frankel-build-and-flash.md`](docs/frankel-build-and-flash.md), and bind
 each new result to the evidence fields in
 [`docs/frankel-validation.md`](docs/frankel-validation.md).
+The Frankel bundle runner writes root `vbmeta` last with fastboot's
+`--disable-verity --disable-verification` options. Its packaged `vbmeta.img`
+remains the signed flags-0 source image; runtime validation of a runner-flashed
+candidate must explicitly set `FRANKEL_EXPECT_DISABLED_AVB=true`.
 
 For the already boot-qualified Pixel 11 (`cubs`) device product:
 
@@ -476,17 +553,24 @@ archive is itself ignored and is not an input to later builds.
   allowlist and loads exactly one profile.
 - `scripts/`: shared setup/sync orchestration plus target-aware extraction,
   build, packaging, validation, flash, and recovery entry points.
+- [`scripts/audio/frankel/`](scripts/audio/frankel/README.md): guarded,
+  target-scoped tinyALSA speaker/PDM probes and deterministic high-rate WAV
+  generation for Frankel acoustic-sensing work.
 - `docs/`: shared architecture plus explicitly device-scoped baselines,
   flashing runbooks, recovery policy, and validation records.
 - `skills/android-gsi-device-port/`: reusable Codex guidance for bringing AOSP
   to other bootloader-unlocked phones without maintained OEM device support.
+- `skills/powerphone/`: reusable layered workflow for maximizing built-in
+  Android speaker/microphone transport rates and separately qualifying
+  physical acoustic bandwidth.
 - `work/`: ignored source, toolchains, extraction state, and build outputs
   (`work/aosp/out_pixel/gsi/`, `work/aosp/out_pixel/cubs/`, and
   `work/aosp/out_pixel/frankel/`).
 - `downloads/`, `artifacts/`, `logs/`: ignored proprietary inputs, local image
   bundles, and host-specific build/validation logs. Current device bundle roots
   are the legacy `artifacts/cubs/` and the target-scoped
-  `artifacts/frankel/device/`.
+  `artifacts/frankel/device/` (baseline) and
+  `artifacts/frankel/powerphone/` (explicit three-flag research build).
 - `.cache/`: ignored private recovery journals and attestations; never publish
   or copy this state between devices.
 

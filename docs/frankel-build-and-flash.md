@@ -196,6 +196,105 @@ BUILD_JOBS="$(nproc)" \
   scripts/build-device.sh
 ```
 
+Ordinary builds default to the exact stock AoC ALSA module. For the PowerPhone
+research image, use the same explicit opt-ins during extraction (or a later
+sanitizer/attestation refresh) and every build invocation:
+
+```bash
+export PIXEL_TARGET=frankel
+export POWERPHONE_AOC_ALSA_192K=true
+export POWERPHONE_D0_PROGRESS_MODE=one-period-lag
+export POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock
+export POWERPHONE_AUDIO_SIDECAR=true
+export POWERPHONE_CS35L43_192K=true
+
+# Required once after changing a selector or any reviewed sidecar/bootstrap
+# source: materialize the reviewed AOSP patch stack and exact generated-vendor
+# selection, then bind both before the build's fail-closed verification gate.
+scripts/apply-source-patches.sh
+scripts/sanitize-generated-vendor-frankel.sh
+scripts/attest-generated-vendor.sh create
+
+BUILD_JOBS="$(nproc)" scripts/build-device.sh
+```
+
+If the generated-vendor attestation already describes the exact same five
+selection values and reviewed helper sources, omit the two refresh commands.
+Never reuse an attestation from another profile (for example, `mailbox`):
+`build-device.sh` intentionally verifies rather than silently replacing it.
+
+`POWERPHONE_AOC_ALSA_192K=true` selects the pinned PCM0,D10-capture plus
+PCM0,D0 / EP1 source-0-playback binary transformation family for
+`stock-kernel/aoc_alsa_dev_util.ko`: general 192 kHz allowances, the EP3 and
+EP1 masks, and 500 us capture-ring polling. The baseline-compatible default
+`POWERPHONE_D0_PROGRESS_MODE=mailbox` uses real D0 mailbox progress bounded
+to one already-consumed period per notification and has SHA-256
+`fc990edad9b77b2bb96cd222f6a07503dc12247804c498a769d0436b5cb61cd0`;
+the publishable PowerPhone selection `one-period-lag` combines the real mailbox
+counter with the 1 ms real-counter poll and reports
+`max(previous, actual minus one physical period)`. It has SHA-256
+`37cc7ff81bf9804677699d612621ed75a177597e773709ec54924916811818e6`.
+That exact module streamed a complete ten-second native-q192 physical-speaker
+payload with a 1,920-by-two ring and 1,920-frame start threshold, and the same
+geometry remained stable while D10 transport ran concurrently.
+The same selection also changes `stock-kernel/aoc_core.ko` from the stock
+SHA-256
+`23acc08d0539657e72a0bc506abf6cef9950b90b192c51fd0dd9bf2177e4f2ad`
+to
+`f4b7c9daad2fb3cb2ddc9fa8f80381629b3ffe048194348924e9f7a0ead1024c`.
+That one-instruction reset fix tests an already-loaded zero write pointer
+instead of advancing the producer by one complete ring before the first PCM
+copy. `POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE` defaults to `stock`; the
+retained `source0-4s32-allocator-fallback` cold transform is not a boot
+candidate because GSA rejects the modified signed firmware. After stock
+firmware loads, the boot helper retains the stock A32 allocator when its
+optional early cache-sync window is unavailable, warms the Android audio
+control plane, and installs the guarded F1 speaker profile live.
+The two AoC modules are one transport invariant: selecting the ALSA
+module without the paired core fix can manufacture initial data and watchdog
+AoC during D0 startup. Selecting `false`, `mailbox`, and `stock` restores both
+exact stock modules and stock firmware without regenerating the vendor tree.
+
+The sanitizer rejects intermediate, mixed, or unknown module bytes, and the
+generated-vendor attestation binds the selected outputs and pinned helpers.
+The build-completion gate also compares both exact AoC modules with the
+installed vendor-kernel ramdisk and target-files entries before binding the
+final images. Changing any opt-in requires recreating the generated-vendor
+attestation before the build. `POWERPHONE_CS35L43_192K=true`
+selects the exact stock CS35L43 module with its ultrasonic GLOBAL_FS immediate
+changed from 48 to 96 kHz (SHA-256
+`fc631fc227ab2e7e8cfa2d664e97ac7cca4c14324fb2a39479fc8e79aa358a3a`).
+Pass the same five selection values to
+`scripts/package-device.sh`, whose completion-attestation verification
+rechecks the selected generated tree. Neither a successful build nor the
+presence of 192000 in ALSA constraints is physical bandwidth evidence.
+Stock signed firmware is mandatory; readiness is a boot-local signal published
+only after the guarded F1 transaction and complete speaker rebase succeed. The
+VINTF-declared PowerPhone HAL process stays registered
+from boot so audio discovery cannot block. Inert STANDBY construction is
+allowed for policy discovery. With the D10 sidecar selected, a target-local
+one-shot and its system-ext init gate coordinate a paired sidecar/audioserver
+warm-up, establish the strict D10 mixer state and quarantine, retain stock A32
+or certify its optional guarded fallback at stock worker priority, certify the
+F1 speaker profile first, then certify the D10 capture patch
+and PCM0,D10 readback. Hardware
+testing showed that the speaker factory-mailbox transaction can fail after D10
+is resident; D10 therefore runs last and its final whole-F1 cache
+synchronization covers both profiles.
+D8/D9/D12 stay quarantined and the retired card-1 AP-PDM module is absent.
+Speaker start/transfer remains fail-closed on the independent boot-cleared
+`vendor.powerphone.aoc_speaker_192k.ready` flag until that boot-local check
+proves the volatile AoC firmware patch is active.
+The addressed research profile may be visible and AudioPolicyManager may
+construct an inert STANDBY stream while that flag is zero; `StreamAlsa` opens
+no PCM until start, and start/transfer remain blocked.
+
+Do not run extraction, either sanitizer, device builds, or packaging
+concurrently against the same Frankel source tree. The opt-ins are materialized
+in the shared generated-vendor tree, not isolated by `OUT_DIR`; the start/end
+attestation gates reject persistent drift but are not a substitute for a
+cross-process build lock. Finish one selected workflow before changing flags.
+
 `BUILD_JOBS` may be reduced for the host but must remain a positive integer no
 greater than 256. The default target-specific output root is:
 
@@ -224,6 +323,22 @@ Publish the reviewed Frankel device bundle:
 PIXEL_TARGET=frankel scripts/package-device.sh
 ```
 
+For a PowerPhone research build, use the same explicit selections used to
+sanitize, attest, and build it:
+
+```bash
+POWERPHONE_AOC_ALSA_192K=true \
+POWERPHONE_D0_PROGRESS_MODE=one-period-lag \
+POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock \
+POWERPHONE_AUDIO_SIDECAR=true \
+POWERPHONE_CS35L43_192K=true \
+PIXEL_TARGET=frankel \
+  scripts/package-device.sh
+```
+
+The packager never changes selections. Omitting the flags against a research
+tree (or supplying them against a stock tree) fails the attestation check.
+
 The generic entry point dispatches to `package-device-frankel.sh`. A normal
 output tree must contain exactly one Frankel target-files archive. If a
 reviewed workflow intentionally retains more than one, select the desired
@@ -237,11 +352,25 @@ DEVICE_TARGET_FILES="$repo_root/work/aosp/out_pixel/frankel/target/product/frank
   scripts/package-device.sh
 ```
 
-The published bundle is:
+The default stock-audio build is published at:
 
 ```text
 artifacts/frankel/device/
 ```
+
+The all-three-flags PowerPhone build is instead published at:
+
+```text
+artifacts/frankel/powerphone/
+```
+
+A partial-selection research build uses a distinct
+`artifacts/frankel/experimental-*` directory. These destinations are selected
+from the same explicit flags that the attestation verifies, so a research
+package cannot replace the boot-qualified baseline. `BUNDLE_INFO.txt` records
+`bundle_profile`, `powerphone_aoc_alsa_192k`,
+`powerphone_d0_progress_mode`, `powerphone_signed_aoc_firmware_profile`,
+`powerphone_audio_sidecar`, and `powerphone_cs35l43_192k`.
 
 It contains:
 
@@ -296,7 +425,10 @@ listed above. It has zero chain-partition descriptors, uses
 `SHA256_RSA4096`, and has AVB flags `0`; the packager rejects any other
 descriptor set or signing policy. The runner leaves the existing physical
 child-vbmeta partitions unchanged because they are not reachable from this
-root image.
+root image. At flash time only, the runner asks fastboot to set both the
+hashtree-disabled and verification-disabled bits in the slot-A root-vbmeta
+copy. The packaged source image remains the signed flags-0 input recorded by
+`SHA256SUMS`.
 
 `pvmfw.img` has one intentional representation difference between the direct
 product output and the flash bundle. Android releasetools rebuilds the
@@ -358,9 +490,12 @@ real serial in committed logs or documentation.
 repo_root=$(pwd -P)
 fastboot_bin="$repo_root/work/toolchains/platform-tools/fastboot"
 fastboot_serial='<fastboot-serial>'
+bundle_dir=artifacts/frankel/device
+# For the explicitly selected PowerPhone build, use:
+# bundle_dir=artifacts/frankel/powerphone
 
 (
-  cd artifacts/frankel/device
+  cd "$bundle_dir"
   env -u ANDROID_SERIAL \
     FASTBOOT="$fastboot_bin" \
     FRANKEL_FASTBOOT_SERIAL="$fastboot_serial" \
@@ -403,7 +538,10 @@ The standalone runner performs these gates and mutations:
 5. It reboots directly to bootloader fastboot without trying Android, then
    writes `boot`, `dtbo`, `init_boot`, `pvmfw`, `vendor_boot`,
    `vendor_kernel_boot`, and finally root `vbmeta` to literal A. Writing
-   `vbmeta` last avoids authenticating a partially replaced static set.
+   `vbmeta` last avoids authenticating a partially replaced static set. That
+   final command uses both `--disable-verity` and `--disable-verification`,
+   permitting research-time `adb remount` and instrumentation without a
+   second root-vbmeta transaction.
 6. Only after all image writes succeed, it erases unslotted `userdata` and
    `metadata`, selects A, and either reboots Android or remains in bootloader
    fastboot when `FRANKEL_SKIP_REBOOT=1`.
@@ -481,7 +619,7 @@ them:
 | Generated vendor image SPL | `2026-06-05` |
 | Slot suffix | `_a` |
 | Verified boot state on an unlocked phone | `orange` |
-| Verity mode | `enforcing` |
+| Verity mode | `disabled` after this bundle's fastboot transaction |
 | SELinux | `Enforcing` |
 
 The proprietary donor release itself has stock SPL `2026-08-05`, but this
@@ -505,16 +643,23 @@ the other slot:
 Run the target-bound automated gate as well. It uses the pinned workspace ADB,
 redacts the transport identifier, requires root-capable `userdebug`, checks the
 exact device build ID and framework SPL, and proves that all six logical A
-partitions use read-only device-mapper mounts with dm-verity enabled. It also
-checks the Wi-Fi Aware/RTT declarations and services, the eUICC flags provider
-and permission path, and the absence of the known eUICC, Pixel Modem Service,
+partitions use read-only direct linear device-mapper mappings without a verity
+target when the explicit disabled-AVB expectation is selected. It also checks
+the Wi-Fi Aware/RTT declarations and services, the eUICC flags provider and
+permission path, and the absence of the known eUICC, Pixel Modem Service,
 EuiccGoogle, and Pixel Camera Services crash signatures:
 
 ```bash
 FRANKEL_ADB_SERIAL="$adb_serial" \
+FRANKEL_EXPECT_DISABLED_AVB=true \
 PIXEL_TARGET=frankel \
   scripts/validate-frankel-runtime.sh
 ```
+
+The validator deliberately defaults to the historical enforcing-AVB
+contract. Leave `FRANKEL_EXPECT_DISABLED_AVB` unset only when qualifying a
+candidate flashed without the two disable flags; a candidate installed by the
+bundled runner requires the explicit `true` value above.
 
 The report is written under ignored `logs/` state. It establishes boot,
 identity, AVB/verity, SELinux, mount, and core-service evidence; it deliberately

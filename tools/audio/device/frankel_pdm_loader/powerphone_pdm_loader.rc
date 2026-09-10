@@ -1,0 +1,16 @@
+service vendor.powerphone-pdm-loader /vendor/bin/powerphone_pdm_loader
+    class main
+    disabled
+    user root
+    group root audio
+    restart_period 5
+    stdio_to_kmsg
+
+# vendor.all.modules.ready is emitted only after the normal vendor-DLKM load
+# transaction. The research module is installed in that partition but is not
+# listed in modules.load, so this loader remains its sole boot-time owner.
+on early-init
+    setprop vendor.powerphone.pdm.topology_ready 0
+
+on property:vendor.all.modules.ready=1
+    start vendor.powerphone-pdm-loader

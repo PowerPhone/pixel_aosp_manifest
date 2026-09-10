@@ -14,6 +14,55 @@ source "$script_dir/lib/common.sh"
 [[ "$DEVICE_CODENAME" == frankel && "$DEVICE_PLATFORM" == laguna ]] || \
   die "the selected target profile is not Frankel/Laguna"
 
+# Keep the boot-qualified baseline and every explicitly selected research
+# variant in different publication directories.  In particular, packaging a
+# PowerPhone build must never replace artifacts/frankel/device, whose contents
+# may be the operator's recovery/qualification reference.
+powerphone_aoc_alsa_192k=${POWERPHONE_AOC_ALSA_192K:-false}
+powerphone_audio_sidecar=${POWERPHONE_AUDIO_SIDECAR:-false}
+powerphone_cs35l43_192k=${POWERPHONE_CS35L43_192K:-false}
+powerphone_d0_progress_mode=${POWERPHONE_D0_PROGRESS_MODE:-mailbox}
+powerphone_signed_aoc_firmware_profile=${POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE:-stock}
+case "$powerphone_aoc_alsa_192k" in
+  true|false) ;;
+  *) die "POWERPHONE_AOC_ALSA_192K must be true or false" ;;
+esac
+case "$powerphone_audio_sidecar" in
+  true|false) ;;
+  *) die "POWERPHONE_AUDIO_SIDECAR must be true or false" ;;
+esac
+case "$powerphone_cs35l43_192k" in
+  true|false) ;;
+  *) die "POWERPHONE_CS35L43_192K must be true or false" ;;
+esac
+case "$powerphone_d0_progress_mode" in
+  mailbox|pure-timer|one-period-lag) ;;
+  *) die "POWERPHONE_D0_PROGRESS_MODE must be mailbox, pure-timer, or one-period-lag" ;;
+esac
+case "$powerphone_signed_aoc_firmware_profile" in
+  stock|source0-4s32-allocator-fallback) ;;
+  *) die "POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE must be stock or source0-4s32-allocator-fallback" ;;
+esac
+if [[ "$powerphone_aoc_alsa_192k" == false && \
+      ( "$powerphone_d0_progress_mode" != mailbox || \
+        "$powerphone_signed_aoc_firmware_profile" != stock ) ]]; then
+  die "non-default D0 progress and signed AoC firmware require POWERPHONE_AOC_ALSA_192K=true"
+fi
+case "$powerphone_aoc_alsa_192k:$powerphone_audio_sidecar:$powerphone_cs35l43_192k:$powerphone_d0_progress_mode:$powerphone_signed_aoc_firmware_profile" in
+  false:false:false:mailbox:stock)
+    frankel_bundle_profile=baseline
+    frankel_bundle_subdir=device
+    ;;
+  true:true:true:one-period-lag:stock)
+    frankel_bundle_profile=powerphone
+    frankel_bundle_subdir=powerphone
+    ;;
+  *)
+    frankel_bundle_profile="experimental-powerphone-${powerphone_aoc_alsa_192k}-${powerphone_audio_sidecar}-${powerphone_cs35l43_192k}-${powerphone_d0_progress_mode}-${powerphone_signed_aoc_firmware_profile}"
+    frankel_bundle_subdir="$frankel_bundle_profile"
+    ;;
+esac
+
 require_command \
   awk bash cmp find grep install mkdir mktemp realpath rm sed sha256sum sort \
   stat tr unzip
@@ -566,6 +615,7 @@ fastboot_info_sha256=$(
 {
   printf 'bundle_schema=pixel-aosp-flash-bundle-v2\n'
   printf 'bundle_kind=device\n'
+  printf 'bundle_profile=%s\n' "$frankel_bundle_profile"
   printf 'device=frankel\n'
   printf 'platform=laguna\n'
   printf 'marketing_name=Pixel 10\n'
@@ -575,6 +625,12 @@ fastboot_info_sha256=$(
   printf 'output_build_id=%s\n' "$STOCK_BUILD_ID"
   printf 'framework_security_patch=%s\n' "$AOSP_SECURITY_PATCH"
   printf 'build_variant=userdebug\n'
+  printf 'powerphone_aoc_alsa_192k=%s\n' "$powerphone_aoc_alsa_192k"
+  printf 'powerphone_d0_progress_mode=%s\n' "$powerphone_d0_progress_mode"
+  printf 'powerphone_signed_aoc_firmware_profile=%s\n' \
+    "$powerphone_signed_aoc_firmware_profile"
+  printf 'powerphone_audio_sidecar=%s\n' "$powerphone_audio_sidecar"
+  printf 'powerphone_cs35l43_192k=%s\n' "$powerphone_cs35l43_192k"
   printf 'required_platform_tools_fastboot=%s\n' "$PLATFORM_TOOLS_VERSION"
   printf 'required_platform_tools_fastboot_sha256=%s\n' \
     "$PLATFORM_TOOLS_FASTBOOT_SHA256"
@@ -616,7 +672,7 @@ chmod 0644 "$staging_dir/SHA256SUMS"
 
 artifacts_root="$project_root/artifacts"
 frankel_artifacts_root="$artifacts_root/frankel"
-bundle_dir="$frankel_artifacts_root/device"
+bundle_dir="$frankel_artifacts_root/$frankel_bundle_subdir"
 assert_inside_project "$artifacts_root"
 assert_inside_project "$frankel_artifacts_root"
 assert_inside_project "$bundle_dir"
@@ -664,5 +720,5 @@ install -m 0644 "$staging_dir/SHA256SUMS" "$bundle_dir/SHA256SUMS"
   sha256sum --check --strict SHA256SUMS
 )
 
-note "Frankel userdebug device flash bundle: $bundle_dir"
+note "Frankel $frankel_bundle_profile userdebug flash bundle: $bundle_dir"
 note "bundle contains 23 Laguna firmware, 7 physical OS, and 6 logical images"

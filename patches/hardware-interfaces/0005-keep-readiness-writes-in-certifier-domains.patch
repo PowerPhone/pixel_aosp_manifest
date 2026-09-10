@@ -1,0 +1,20 @@
+diff --git a/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc b/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc
+index c86b26cb3a6c..4907c4549481 100644
+--- a/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc
++++ b/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc
+@@ -9,11 +9,7 @@ service vendor.audio-hal-powerphone /vendor/bin/hw/android.hardware.audio.servic
+ 
+ # Audio HAL discovery waits for every VINTF-declared IModule. Keep the binder
+ # process registered from boot, even when neither research path is ready.
+-# AudioPolicyManager may construct inert STANDBY streams, but PCM open/start
+-# and every transfer are independently fail-closed on these volatile flags.
+-# The inert PDM topology loader may not set the first; a future lease broker
+-# must own it. The speaker flag must remain zero until a post-boot helper
+-# validates the volatile AoC patch and PCM0,28.
+-on early-init
+-    setprop vendor.powerphone.pdm.ready 0
+-    setprop vendor.powerphone.aoc_speaker_192k.ready 0
++# AudioPolicyManager may construct inert STANDBY streams, but PCM open/start
++# and every transfer are independently fail-closed unless the confined native
++# certifiers set their volatile readiness properties to one. Vendor init must
++# not write those typed properties on behalf of either certifier.

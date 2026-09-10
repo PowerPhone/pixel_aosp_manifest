@@ -1,0 +1,49 @@
+From 6cc3df7633ad9a860e51c1ee90dde8a4a3bcf47d Mon Sep 17 00:00:00 2001
+From: Pixel AOSP maintainers <pixel-aosp@example.invalid>
+Date: Fri, 4 Sep 2026 09:35:00 -0400
+Subject: [PATCH] init: do not revive a deliberately stopped audioserver
+
+The restart builtin starts a service even when it is stopped and disabled.
+Consequently, a zygote restart can defeat an intentional audioserver stop,
+including a bounded pre-audioserver hardware initialization transaction.
+
+Retain zygote's recovery behavior when audioserver was live, but do not start
+it when another init policy deliberately has it stopped. Match the conditional
+form already used for media.tuner in both zygote service definitions.
+
+Test: Frankel boot log reproduced the unconditional zygote restart edge
+License: Apache-2.0 (system/core)
+---
+ rootdir/init.zygote32.rc | 2 +-
+ rootdir/init.zygote64.rc | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/rootdir/init.zygote32.rc b/rootdir/init.zygote32.rc
+index c22d14e0de..78724a7228 100644
+--- a/rootdir/init.zygote32.rc
++++ b/rootdir/init.zygote32.rc
+@@ -10,7 +10,7 @@ service zygote /system/bin/app_process -Xzygote /system/bin --zygote --start-sys
+     # NOTE: If the wakelock name here is changed, then also
+     # update it in SystemSuspend.cpp
+     onrestart write /sys/power/wake_lock zygote_kwl
+-    onrestart restart audioserver
++    onrestart restart --only-if-running audioserver
+     onrestart restart cameraserver
+     onrestart restart media
+     onrestart restart --only-if-running media.tuner
+diff --git a/rootdir/init.zygote64.rc b/rootdir/init.zygote64.rc
+index 342212123d..a31da37369 100644
+--- a/rootdir/init.zygote64.rc
++++ b/rootdir/init.zygote64.rc
+@@ -10,7 +10,7 @@ service zygote /system/bin/app_process64 -Xzygote /system/bin --zygote --start-s
+     # NOTE: If the wakelock name here is changed, then also
+     # update it in SystemSuspend.cpp
+     onrestart write /sys/power/wake_lock zygote_kwl
+-    onrestart restart audioserver
++    onrestart restart --only-if-running audioserver
+     onrestart restart cameraserver
+     onrestart restart media
+     onrestart restart --only-if-running media.tuner
+-- 
+2.43.0
+

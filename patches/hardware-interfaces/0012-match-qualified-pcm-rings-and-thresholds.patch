@@ -1,0 +1,151 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Thu, 4 Sep 2026 04:40:00 +0000
+Subject: [PATCH] audio: match qualified PowerPhone rings and thresholds
+
+Decouple the ten-millisecond framework queues from both fixed ALSA rings.
+Retain D10's qualified 1920x4 capture geometry while exposing one period per
+framework burst, and open D0 with tinyplay's proven one-period playback start
+threshold. This avoids forty-millisecond client aggregation and prevents the
+AoC output ring from filling before the asynchronous sink starts.
+---
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -63,8 +63,11 @@ constexpr int32_t kCaptureDevice = 10;
+ constexpr int32_t kPlaybackCard = 0;
+ constexpr int32_t kPlaybackDevice = 0;
+ constexpr int32_t kRate = 192000;
++constexpr size_t kCaptureAlsaPeriodFrames = 1920;
++constexpr size_t kCaptureAlsaBufferFrames = 7680;
+ constexpr size_t kPlaybackAlsaPeriodFrames = 480;
+ constexpr size_t kPlaybackAlsaBufferFrames = 1920;
++constexpr size_t kFrameworkBufferFrames = 1920;
+ constexpr char kCaptureReadyProperty[] = "vendor.powerphone.pdm.ready";
+ constexpr char kSpeakerReadyProperty[] = "vendor.powerphone.aoc_speaker_192k.ready";
+ 
+@@ -1057,13 +1060,15 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         bool resumedRoute = false;
+         bool resumedReady = false;
+         bool resumedOwnership = false;
++        std::vector<alsa::DeviceProfile> profiles;
+         {
+             std::lock_guard lock(mLock);
+             if (mCaptureRoute != nullptr) {
+                 resumedRoute = true;
+                 resumedReady = ::android::base::GetBoolProperty(kCaptureReadyProperty, false);
+                 resumedOwnership = mCaptureRoute->isActive();
+-            } else if (!mCaptureEndpoint.has_value() || mDeviceProfiles.size() != 1) {
++            } else if (!mCaptureEndpoint.has_value() || mDeviceProfiles.size() != 1 ||
++                       !mConfig.has_value() || !mAlsaDeviceProxies.empty()) {
+                 LOG(ERROR) << __func__ << ": no unique PowerPhone input is connected";
+                 return ::android::NO_INIT;
+             } else if (!::android::base::GetBoolProperty(kCaptureReadyProperty, false)) {
+@@ -1075,6 +1080,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+                 return ::android::WOULD_BLOCK;
+             } else {
+                 mOwnsCaptureLease = true;
++                profiles = mDeviceProfiles;
+                 mCaptureRoute = std::make_unique<CaptureRoute>();
+                 if (!mCaptureRoute->configure(*mCaptureEndpoint)) {
+                     cleanupCaptureRouteLocked();
+@@ -1091,13 +1097,23 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+             cleanupCaptureRouteLocked();
+             return resumedReady ? ::android::INVALID_OPERATION : ::android::PERMISSION_DENIED;
+         }
+-        const ::android::status_t status = StreamAlsa::start();
++        // Keep the framework queue at one 10 ms hardware period while opening
++        // PCM0,D10 with the independently qualified 1920x4 ALSA geometry.
++        ::android::status_t status = ::android::NO_INIT;
++        alsa::DeviceProxy proxy = alsa::openProxyForAttachedDevice(
++                profiles.front(), const_cast<struct pcm_config*>(&mConfig.value()),
++                kCaptureAlsaBufferFrames);
++        if (proxy.get() != nullptr) {
++            mAlsaDeviceProxies.push_back(std::move(proxy));
++            status = ::android::OK;
++        }
+         const bool exactGeometry =
+                 mAlsaDeviceProxies.size() == 1 && mAlsaDeviceProxies.front().get() != nullptr &&
+                 proxy_get_sample_rate(mAlsaDeviceProxies.front().get()) == kRate &&
+                 proxy_get_format(mAlsaDeviceProxies.front().get()) == PCM_FORMAT_S16_LE &&
+                 proxy_get_channel_count(mAlsaDeviceProxies.front().get()) == 1 &&
+-                proxy_get_period_size(mAlsaDeviceProxies.front().get()) == 1920 &&
++                proxy_get_period_size(mAlsaDeviceProxies.front().get()) ==
++                        kCaptureAlsaPeriodFrames &&
+                 mAlsaDeviceProxies.front().get()->alsa_config.period_count == 4;
+         if (status != ::android::OK || !exactGeometry) {
+             if (status == ::android::OK) {
+@@ -1171,23 +1187,35 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         return resumedReady ? ::android::INVALID_OPERATION : ::android::PERMISSION_DENIED;
+     }
+ 
+-    // The framework/FMQ buffer is deliberately larger than the fixed AoC
+-    // frontend ring. Open PCM0,D0 with the independently qualified 480x4 ALSA
+-    // geometry, then feed it complete rings from transfer().
++    // The framework/FMQ buffer is decoupled from the fixed AoC frontend ring.
++    // Open PCM0,D0 with the independently qualified 480x4 ALSA geometry, then
++    // feed it complete hardware periods from transfer().
+     ::android::status_t status = ::android::NO_INIT;
+-    alsa::DeviceProxy proxy = alsa::openProxyForAttachedDevice(
+-            profiles.front(), const_cast<struct pcm_config*>(&mConfig.value()),
+-            kPlaybackAlsaBufferFrames);
+-    if (proxy.get() != nullptr) {
+-        mAlsaDeviceProxies.push_back(std::move(proxy));
+-        status = ::android::OK;
++    alsa::DeviceProxy proxy(profiles.front());
++    if (profile_fill_builtin_device_info(proxy.getProfile(),
++                                         const_cast<struct pcm_config*>(&mConfig.value()),
++                                         kPlaybackAlsaBufferFrames)) {
++        // These are the exact software thresholds used by the qualified
++        // tinyplay path. Starting after one 480-frame period is essential:
++        // the AoC endpoint consumes the first ring while completing its
++        // asynchronous 192 kHz sink activation.
++        proxy.getProfile()->default_config.start_threshold = kPlaybackAlsaPeriodFrames;
++        proxy.getProfile()->default_config.stop_threshold = kPlaybackAlsaBufferFrames;
++        proxy.getProfile()->default_config.silence_threshold = kPlaybackAlsaBufferFrames;
++        proxy.getProfile()->default_config.silence_size = 0;
++        if (proxy_prepare_from_default_config(proxy.get(), proxy.getProfile()) == 0 &&
++            proxy_open(proxy.get()) == 0) {
++            mAlsaDeviceProxies.push_back(std::move(proxy));
++            status = ::android::OK;
++        }
+     }
+     const bool exactGeometry =
+             mAlsaDeviceProxies.size() == 1 && mAlsaDeviceProxies.front().get() != nullptr &&
+             proxy_get_sample_rate(mAlsaDeviceProxies.front().get()) == kRate &&
+             proxy_get_format(mAlsaDeviceProxies.front().get()) == PCM_FORMAT_S32_LE &&
+             proxy_get_channel_count(mAlsaDeviceProxies.front().get()) == 2 &&
+-            proxy_get_period_size(mAlsaDeviceProxies.front().get()) == 480 &&
++            proxy_get_period_size(mAlsaDeviceProxies.front().get()) ==
++                    kPlaybackAlsaPeriodFrames &&
+             mAlsaDeviceProxies.front().get()->alsa_config.period_count == 4;
+     if (status != ::android::OK || !exactGeometry) {
+         if (status == ::android::OK) {
+@@ -1464,18 +1492,16 @@ ndk::ScopedAStatus ModulePowerphone::calculateBufferSizeFrames(const AudioFormat
+                              format.type == AudioFormatType::PCM &&
+                              format.pcm == PcmType::INT_32_BIT;
+     if (sampleRateHz == kRate && exactInput) {
+-        // The attached-device tinyalsa adapter divides this total by its default
+-        // period_count=4.  7680 therefore yields the live-qualified 1920x4
+-        // ALSA geometry on PCM0,D10 capture. It is a multiple of the
+-        // 96-frame AoC quantum.
+-        *bufferSizeFrames = 7680;
++        // One 10 ms framework burst avoids aggregating four client reads.
++        // start() independently retains PCM0,D10's qualified 1920x4 ring.
++        *bufferSizeFrames = kFrameworkBufferFrames;
+         return ndk::ScopedAStatus::ok();
+     }
+     if (sampleRateHz == kRate && exactOutput) {
+-        // Give AudioFlinger/FMQ 40 ms of scheduling margin. start() decouples
+-        // this queue from the source-unavailable AoC frontend and explicitly
+-        // retains its independently qualified PCM0,D0 480x4 ALSA ring.
+-        *bufferSizeFrames = 7680;
++        // One 10 ms framework queue is decoupled from PCM0,D0's qualified
++        // 480x4 ring. This bounds app callback/write latency without changing
++        // the hardware geometry.
++        *bufferSizeFrames = kFrameworkBufferFrames;
+         return ndk::ScopedAStatus::ok();
+     }
+     return Module::calculateBufferSizeFrames(format, flags, latencyMs, sampleRateHz,
+-- 
+2.43.0

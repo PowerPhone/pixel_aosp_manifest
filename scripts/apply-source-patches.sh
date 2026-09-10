@@ -150,8 +150,43 @@ apply_stack \
   "$project_root/patches/frameworks-native/0001-define-missing-feature-prebuilts.patch"
 
 apply_stack \
+  "$source_dir/external/tinyalsa" \
+  "$project_root/patches/external-tinyalsa/0001-report-tinyplay-progress-and-xruns.patch"
+
+apply_stack \
+  "$source_dir/external/tinyalsa_new" \
+  "$project_root/patches/external-tinyalsa-new/0001-expose-pcm-xrun-counter.patch" \
+  "$project_root/patches/external-tinyalsa-new/0002-honor-explicit-avail-min.patch" \
+  "$project_root/patches/external-tinyalsa-new/0003-report-tinyplay-xruns.patch"
+
+apply_stack \
+  "$source_dir/hardware/interfaces" \
+  "$project_root/patches/hardware-interfaces/0001-add-powerphone-192k-capture-module.patch" \
+  "$project_root/patches/hardware-interfaces/0002-add-powerphone-192k-speaker-output.patch" \
+  "$project_root/patches/hardware-interfaces/0003-use-qualified-frankel-d10-capture.patch" \
+  "$project_root/patches/hardware-interfaces/0004-fix-powerphone-d10-build.patch" \
+  "$project_root/patches/hardware-interfaces/0005-keep-readiness-writes-in-certifier-domains.patch" \
+  "$project_root/patches/hardware-interfaces/0006-use-qualified-d0-single-amp-output.patch" \
+  "$project_root/patches/hardware-interfaces/0007-use-direct-cs35l43-high-rate-route.patch" \
+  "$project_root/patches/hardware-interfaces/0008-do-not-request-undefined-device-gain.patch" \
+  "$project_root/patches/hardware-interfaces/0009-keep-mixer-io-off-realtime-playback.patch" \
+  "$project_root/patches/hardware-interfaces/0010-expand-powerphone-playback-ring.patch" \
+  "$project_root/patches/hardware-interfaces/0011-make-powerphone-pcm-activation-xrun-strict.patch" \
+  "$project_root/patches/hardware-interfaces/0012-match-qualified-pcm-rings-and-thresholds.patch" \
+  "$project_root/patches/hardware-interfaces/0013-prime-asynchronous-speaker-sink.patch" \
+  "$project_root/patches/hardware-interfaces/0014-reopen-startup-eio-before-client-audio.patch" \
+  "$project_root/patches/hardware-interfaces/0015-require-clocked-speaker-prime.patch" \
+  "$project_root/patches/hardware-interfaces/0016-isolate-and-defer-legacy-d0-transport.patch" \
+  "$project_root/patches/hardware-interfaces/0017-split-powerphone-output-probe-ports.patch" \
+  "$project_root/patches/hardware-interfaces/0018-require-qualified-fifo90-playback.patch" \
+  "$project_root/patches/hardware-interfaces/0019-match-tinyplay-params-preflight.patch" \
+  "$project_root/patches/hardware-interfaces/0020-scope-d0-pcm-open-wait.patch" \
+  "$project_root/patches/hardware-interfaces/0021-use-qualified-native-q192-speaker-path.patch"
+
+apply_stack \
   "$source_dir/system/core" \
-  "$project_root/patches/system-core/0001-preserve-devnode-description-modes.patch"
+  "$project_root/patches/system-core/0001-preserve-devnode-description-modes.patch" \
+  "$project_root/patches/system-core/0002-do-not-revive-stopped-audioserver-from-zygote.patch"
 
 sepolicy_patches=(
   "$project_root/patches/system-sepolicy/0001-support-extending-sepolicy-cils.patch"

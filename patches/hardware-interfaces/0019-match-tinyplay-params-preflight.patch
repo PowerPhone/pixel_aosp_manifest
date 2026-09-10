@@ -1,0 +1,359 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Fri, 4 Sep 2026 12:20:00 +0000
+Subject: [PATCH] audio: match tinyplay PCM parameter preflight
+
+The qualified legacy tinyplay transaction does more than open its configured
+PCM: sample_is_playable() first calls pcm_params_get(), which opens PCM0,D0,
+issues HW_REFINE, and closes it. Frankel's AoC PCM open and close paths allocate
+and release the service, workqueue, ring snapshot, and interrupt handler, so
+omitting this preflight changes the hardware-visible lifecycle.
+
+Reproduce tinyplay's temporary PCM_OUT parameters transaction and all five of
+its range checks before the facade's real configured open. Preserve the
+original errno when the parameter open itself fails, and report EINVAL when
+the requested geometry is outside the refined bounds.
+
+Add a focused facade test that proves params-get/free precedes the configured
+open, every tinyplay bound is queried, unsupported geometry never reaches the
+real open, parameter-open errno is preserved, and S16 maps to 16 sample bits.
+---
+ audio/aidl/default/Android.bp                      |  18 ++
+ audio/aidl/default/powerphone/LegacyTinyalsaV1.c   |  32 +++
+ .../powerphone/tests/LegacyTinyalsaV1Test.cpp      | 229 +++++++++++++++++++++
+ 3 files changed, 279 insertions(+)
+
+diff --git a/audio/aidl/default/Android.bp b/audio/aidl/default/Android.bp
+index 0f72e37812..2f3e88a71e 100644
+--- a/audio/aidl/default/Android.bp
++++ b/audio/aidl/default/Android.bp
+@@ -238,6 +238,24 @@ cc_library_shared {
+     stl: "none",
+ }
+ 
++cc_test {
++    name: "powerphone_legacy_tinyalsa_v1_tests",
++    host_supported: true,
++    vendor_available: true,
++    srcs: [
++        "powerphone/LegacyTinyalsaV1.c",
++        "powerphone/tests/LegacyTinyalsaV1Test.cpp",
++    ],
++    include_dirs: ["external/tinyalsa/include"],
++    local_include_dirs: ["powerphone/include"],
++    cflags: [
++        "-Wall",
++        "-Wextra",
++        "-Werror",
++    ],
++    test_suites: ["general-tests"],
++}
++
+ cc_binary {
+     name: "android.hardware.audio.service-aidl.powerphone",
+     relative_install_path: "hw",
+diff --git a/audio/aidl/default/powerphone/LegacyTinyalsaV1.c b/audio/aidl/default/powerphone/LegacyTinyalsaV1.c
+index c23be8f756..fe994cb2fa 100644
+--- a/audio/aidl/default/powerphone/LegacyTinyalsaV1.c
++++ b/audio/aidl/default/powerphone/LegacyTinyalsaV1.c
+@@ -41,12 +41,20 @@ static struct pcm* unwrap(struct powerphone_legacy_pcm* pcm) {
+     return (struct pcm*)pcm;
+ }
+ 
++static int parameter_in_range(const struct pcm_params* params, enum pcm_param param,
++                              uint32_t value) {
++    return value >= pcm_params_get_min(params, param) &&
++           value <= pcm_params_get_max(params, param);
++}
++
+ struct powerphone_legacy_pcm* powerphone_legacy_pcm_open_playback(
+         uint32_t card, uint32_t device, uint32_t channels, uint32_t rate,
+         uint32_t period_size_frames, uint32_t period_count, uint32_t format,
+         struct powerphone_legacy_pcm_open_result* result) {
+     struct pcm_config config;
+     enum pcm_format legacy_format;
++    uint32_t sample_bits;
++    struct pcm_params* params;
+     struct pcm* pcm;
+ 
+     if (result != NULL) {
+@@ -59,9 +67,11 @@ struct powerphone_legacy_pcm* powerphone_legacy_pcm_open_playback(
+     switch (format) {
+         case POWERPHONE_LEGACY_PCM_FORMAT_S16_LE:
+             legacy_format = PCM_FORMAT_S16_LE;
++            sample_bits = 16;
+             break;
+         case POWERPHONE_LEGACY_PCM_FORMAT_S32_LE:
+             legacy_format = PCM_FORMAT_S32_LE;
++            sample_bits = 32;
+             break;
+         default:
+             errno = EINVAL;
+@@ -81,6 +91,28 @@ struct powerphone_legacy_pcm* powerphone_legacy_pcm_open_playback(
+      * avail_min of one frame.
+      */
+ 
++    /*
++     * Match tinyplay's complete device transaction, including its
++     * sample_is_playable() preflight. pcm_params_get() performs a temporary
++     * PCM_OUT open, HW_REFINE, and close before the real configured open.
++     * That lifecycle is observable by Frankel's AoC driver, so this must not
++     * be reduced to a cached/static capability check.
++     */
++    params = pcm_params_get(card, device, PCM_OUT);
++    if (params == NULL) {
++        return NULL;
++    }
++    int playable = parameter_in_range(params, PCM_PARAM_RATE, rate);
++    playable &= parameter_in_range(params, PCM_PARAM_CHANNELS, channels);
++    playable &= parameter_in_range(params, PCM_PARAM_SAMPLE_BITS, sample_bits);
++    playable &= parameter_in_range(params, PCM_PARAM_PERIOD_SIZE, period_size_frames);
++    playable &= parameter_in_range(params, PCM_PARAM_PERIODS, period_count);
++    pcm_params_free(params);
++    if (!playable) {
++        errno = EINVAL;
++        return NULL;
++    }
++
+     pcm = pcm_open(card, device, PCM_OUT, &config);
+     if (pcm != NULL && pcm_is_ready(pcm) && result != NULL) {
+         result->period_size_frames = config.period_size;
+diff --git a/audio/aidl/default/powerphone/tests/LegacyTinyalsaV1Test.cpp b/audio/aidl/default/powerphone/tests/LegacyTinyalsaV1Test.cpp
+new file mode 100644
+index 0000000000..1bb64ecd24
+--- /dev/null
++++ b/audio/aidl/default/powerphone/tests/LegacyTinyalsaV1Test.cpp
+@@ -0,0 +1,229 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <errno.h>
++#include <limits.h>
++
++#include <array>
++#include <string>
++#include <vector>
++
++#include <gtest/gtest.h>
++#include <powerphone/LegacyTinyalsaV1.h>
++#include <tinyalsa/asoundlib.h>
++
++namespace {
++
++constexpr size_t kParamCount = PCM_PARAM_TICK_TIME + 1;
++
++struct FakePcm {
++    bool ready = true;
++    unsigned int bufferSize = 1920;
++};
++
++struct FakeParams {
++    std::array<unsigned int, kParamCount> minimum{};
++    std::array<unsigned int, kParamCount> maximum{};
++};
++
++FakePcm gPcm;
++FakeParams gParams;
++bool gParamsAvailable;
++int gParamsFailureErrno;
++std::vector<std::string> gOperations;
++std::vector<pcm_param> gMinimumQueries;
++std::vector<pcm_param> gMaximumQueries;
++unsigned int gOpenCard;
++unsigned int gOpenDevice;
++unsigned int gOpenFlags;
++pcm_config gOpenConfig;
++
++void ResetFakes() {
++    gPcm = {};
++    gParams = {};
++    gParams.maximum.fill(UINT_MAX);
++    gParamsAvailable = true;
++    gParamsFailureErrno = EBUSY;
++    gOperations.clear();
++    gMinimumQueries.clear();
++    gMaximumQueries.clear();
++    gOpenCard = UINT_MAX;
++    gOpenDevice = UINT_MAX;
++    gOpenFlags = UINT_MAX;
++    gOpenConfig = {};
++    errno = 0;
++}
++
++std::vector<pcm_param> ExpectedQueries() {
++    return {
++            PCM_PARAM_RATE,
++            PCM_PARAM_CHANNELS,
++            PCM_PARAM_SAMPLE_BITS,
++            PCM_PARAM_PERIOD_SIZE,
++            PCM_PARAM_PERIODS,
++    };
++}
++
++class LegacyTinyalsaV1Test : public ::testing::Test {
++  protected:
++    void SetUp() override { ResetFakes(); }
++};
++
++TEST_F(LegacyTinyalsaV1Test, PreflightsBeforeConfiguredOpen) {
++    powerphone_legacy_pcm_open_result result{};
++
++    powerphone_legacy_pcm* pcm = powerphone_legacy_pcm_open_playback(
++            0, 0, 2, 192000, 480, 4, POWERPHONE_LEGACY_PCM_FORMAT_S32_LE, &result);
++
++    ASSERT_NE(nullptr, pcm);
++    EXPECT_EQ((std::vector<std::string>{"params_get", "params_free", "pcm_open"}),
++              gOperations);
++    EXPECT_EQ(ExpectedQueries(), gMinimumQueries);
++    EXPECT_EQ(ExpectedQueries(), gMaximumQueries);
++    EXPECT_EQ(0u, gOpenCard);
++    EXPECT_EQ(0u, gOpenDevice);
++    EXPECT_EQ(static_cast<unsigned int>(PCM_OUT), gOpenFlags);
++    EXPECT_EQ(2u, gOpenConfig.channels);
++    EXPECT_EQ(192000u, gOpenConfig.rate);
++    EXPECT_EQ(480u, gOpenConfig.period_size);
++    EXPECT_EQ(4u, gOpenConfig.period_count);
++    EXPECT_EQ(PCM_FORMAT_S32_LE, gOpenConfig.format);
++    EXPECT_EQ(0u, gOpenConfig.start_threshold);
++    EXPECT_EQ(0u, gOpenConfig.stop_threshold);
++    EXPECT_EQ(0u, gOpenConfig.silence_threshold);
++    EXPECT_EQ(0u, gOpenConfig.silence_size);
++    EXPECT_EQ(0, gOpenConfig.avail_min);
++    EXPECT_EQ(480u, result.period_size_frames);
++    EXPECT_EQ(4u, result.period_count);
++    EXPECT_EQ(1920u, result.buffer_size_frames);
++}
++
++TEST_F(LegacyTinyalsaV1Test, RejectsOutOfRangeAfterCompletePreflight) {
++    gParams.maximum[PCM_PARAM_RATE] = 96000;
++
++    powerphone_legacy_pcm* pcm = powerphone_legacy_pcm_open_playback(
++            0, 0, 2, 192000, 480, 4, POWERPHONE_LEGACY_PCM_FORMAT_S32_LE, nullptr);
++
++    EXPECT_EQ(nullptr, pcm);
++    EXPECT_EQ(EINVAL, errno);
++    EXPECT_EQ((std::vector<std::string>{"params_get", "params_free"}), gOperations);
++    EXPECT_EQ(ExpectedQueries(), gMinimumQueries);
++    EXPECT_EQ(ExpectedQueries(), gMaximumQueries);
++}
++
++TEST_F(LegacyTinyalsaV1Test, PreservesParameterOpenFailure) {
++    gParamsAvailable = false;
++    gParamsFailureErrno = ENODEV;
++
++    powerphone_legacy_pcm* pcm = powerphone_legacy_pcm_open_playback(
++            0, 0, 2, 192000, 480, 4, POWERPHONE_LEGACY_PCM_FORMAT_S32_LE, nullptr);
++
++    EXPECT_EQ(nullptr, pcm);
++    EXPECT_EQ(ENODEV, errno);
++    EXPECT_EQ((std::vector<std::string>{"params_get"}), gOperations);
++}
++
++TEST_F(LegacyTinyalsaV1Test, MapsS16FormatToSixteenSampleBits) {
++    gParams.minimum[PCM_PARAM_SAMPLE_BITS] = 16;
++    gParams.maximum[PCM_PARAM_SAMPLE_BITS] = 16;
++
++    powerphone_legacy_pcm* pcm = powerphone_legacy_pcm_open_playback(
++            0, 0, 2, 192000, 480, 4, POWERPHONE_LEGACY_PCM_FORMAT_S16_LE, nullptr);
++
++    ASSERT_NE(nullptr, pcm);
++    EXPECT_EQ(PCM_FORMAT_S16_LE, gOpenConfig.format);
++}
++
++}  // namespace
++
++struct pcm {
++    FakePcm* fake;
++};
++
++struct pcm_params {
++    FakeParams* fake;
++};
++
++extern "C" {
++
++struct pcm_params* pcm_params_get(unsigned int card, unsigned int device, unsigned int flags) {
++    gOperations.emplace_back("params_get");
++    EXPECT_EQ(0u, card);
++    EXPECT_EQ(0u, device);
++    EXPECT_EQ(static_cast<unsigned int>(PCM_OUT), flags);
++    if (!gParamsAvailable) {
++        errno = gParamsFailureErrno;
++        return nullptr;
++    }
++    static pcm_params params{&gParams};
++    return &params;
++}
++
++void pcm_params_free(struct pcm_params* params) {
++    gOperations.emplace_back("params_free");
++    EXPECT_NE(nullptr, params);
++}
++
++unsigned int pcm_params_get_min(const struct pcm_params* params, enum pcm_param param) {
++    gMinimumQueries.push_back(param);
++    return params->fake->minimum[param];
++}
++
++unsigned int pcm_params_get_max(const struct pcm_params* params, enum pcm_param param) {
++    gMaximumQueries.push_back(param);
++    return params->fake->maximum[param];
++}
++
++struct pcm* pcm_open(unsigned int card, unsigned int device, unsigned int flags,
++                     struct pcm_config* config) {
++    gOperations.emplace_back("pcm_open");
++    gOpenCard = card;
++    gOpenDevice = device;
++    gOpenFlags = flags;
++    gOpenConfig = *config;
++    static pcm pcm{&gPcm};
++    return &pcm;
++}
++
++int pcm_close(struct pcm*) {
++    return 0;
++}
++
++int pcm_is_ready(struct pcm* pcm) {
++    return pcm->fake->ready;
++}
++
++const char* pcm_get_error(struct pcm*) {
++    return "fake pcm error";
++}
++
++unsigned int pcm_get_buffer_size(struct pcm* pcm) {
++    return pcm->fake->bufferSize;
++}
++
++int pcm_write(struct pcm*, const void*, unsigned int) {
++    return 0;
++}
++
++int pcm_stop(struct pcm*) {
++    return 0;
++}
++
++int pcm_get_xruns(struct pcm*) {
++    return 0;
++}
++
++}  // extern "C"
+
+-- 
+2.43.0
+

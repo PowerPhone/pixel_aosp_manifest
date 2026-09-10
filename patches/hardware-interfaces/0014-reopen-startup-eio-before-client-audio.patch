@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Thu, 4 Sep 2026 05:20:00 +0000
+Subject: [PATCH] audio: reopen D0 startup EIO before client audio
+
+Frankel's AoC D0 frontend can return EIO, rather than EPIPE, while its speaker
+sink locks, and PREPARE is then rejected with EBUSY. Keep EP1 bound while
+reopening only the silent startup PCM, allow enough time for the asynchronous
+sink, and still require a clean-period gate before accepting client audio.
+---
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -69,7 +69,7 @@ constexpr size_t kCaptureAlsaBufferFrames = 7680;
+ constexpr size_t kPlaybackAlsaPeriodFrames = 480;
+ constexpr size_t kPlaybackAlsaBufferFrames = 1920;
+ constexpr size_t kPlaybackPrimeStablePeriods = 32;
+-constexpr std::chrono::milliseconds kPlaybackPrimeTimeout{2500};
++constexpr std::chrono::milliseconds kPlaybackPrimeTimeout{6000};
+ constexpr size_t kFrameworkBufferFrames = 1920;
+ constexpr char kCaptureReadyProperty[] = "vendor.powerphone.pdm.ready";
+ constexpr char kSpeakerReadyProperty[] = "vendor.powerphone.aoc_speaker_192k.ready";
+@@ -1252,6 +1252,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+     alsa_device_proxy* playbackProxy = mAlsaDeviceProxies.front().get();
+     std::array<int32_t, kPlaybackAlsaPeriodFrames * 2> silence{};
+     size_t stablePeriods = 0;
++    size_t startupReopens = 0;
+     const auto primeDeadline = std::chrono::steady_clock::now() + kPlaybackPrimeTimeout;
+     while (stablePeriods < kPlaybackPrimeStablePeriods &&
+            std::chrono::steady_clock::now() < primeDeadline) {
+@@ -1264,13 +1265,27 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+             ++stablePeriods;
+         } else {
+             stablePeriods = 0;
++            // AoC may report EIO, rather than EPIPE, while the sink is still
++            // locking. Once the sink is active, PREPARE is rejected with
++            // EBUSY; close and reopen only the silent startup PCM while keeping
++            // EP1 bound so the fresh ring attaches to the running sink. This
++            // recovery is never used for client audio.
++            if (writtenFrames < 0) {
++                ++startupReopens;
++                proxy_close(playbackProxy);
++                if (proxy_open(playbackProxy) != 0) break;
++            }
+         }
+     }
+     if (stablePeriods != kPlaybackPrimeStablePeriods) {
+-        const char* error = pcm_get_error(playbackProxy->pcm);
++        const char* error =
++                playbackProxy->pcm == nullptr ? nullptr : pcm_get_error(playbackProxy->pcm);
++        const int xruns =
++                playbackProxy->pcm == nullptr ? -1 : pcm_get_xruns(playbackProxy->pcm);
+         LOG(ERROR) << __func__ << ": speaker PCM did not stabilize during silent priming: "
+                    << "stable_periods=" << stablePeriods
+-                   << ", xruns=" << pcm_get_xruns(playbackProxy->pcm)
++                   << ", reopens=" << startupReopens
++                   << ", xruns=" << xruns
+                    << ", pcm_error=" << (error == nullptr ? "<none>" : error);
+         StreamAlsa::standby();
+         std::lock_guard lock(mLock);
+@@ -1280,6 +1295,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+     const int startupXruns = pcm_get_xruns(playbackProxy->pcm);
+     mPlaybackXrunsBaseline.store(startupXruns, std::memory_order_release);
+     LOG(INFO) << __func__ << ": speaker PCM primed with " << startupXruns
+-              << " startup xrun(s); steady-state transfers are now strict";
++              << " startup xrun(s) and " << startupReopens
++              << " EIO reopen(s); steady-state transfers are now strict";
+     return ::android::OK;
+ }
+-- 
+2.43.0

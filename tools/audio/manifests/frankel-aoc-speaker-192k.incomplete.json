@@ -1,0 +1,21 @@
+{
+  "schema": "frankel-aoc-offline-patch/v1",
+  "target": {
+    "profile": "frankel-cp2a-260805-005-aoc",
+    "codename": "frankel",
+    "firmware_size": 24791040,
+    "input_sha256": "ac6d7d86e6aa78379bfa3db5eaea4dadebf8113dc8f46aab52d55f3987064abd",
+    "firmware_version": "15070001-polygon"
+  },
+  "review": {
+    "status": "incomplete-design",
+    "reviewer": "unassigned",
+    "reviewed_at": "unassigned"
+  },
+  "patch_set": {
+    "id": "frankel-speaker-192k-incomplete",
+    "summary": "Design placeholder only; coordinated SRC, buffer, clock, DMA, and codec behavior is unresolved.",
+    "output_sha256": null,
+    "edits": []
+  }
+}

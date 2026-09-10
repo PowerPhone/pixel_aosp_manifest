@@ -55,8 +55,11 @@ if [[ "$allow_patches" == true ]]; then
   allowed_dirty=(
     build/make
     build/soong
+    external/tinyalsa
+    external/tinyalsa_new
     frameworks/base
     frameworks/native
+    hardware/interfaces
     packages/apps/CarrierConfig2
     system/core
     system/sepolicy

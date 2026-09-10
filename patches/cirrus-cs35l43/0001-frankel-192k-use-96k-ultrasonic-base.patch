@@ -1,0 +1,20 @@
+diff --git a/sound/soc/codecs/cs35l43.c b/sound/soc/codecs/cs35l43.c
+--- a/sound/soc/codecs/cs35l43.c
++++ b/sound/soc/codecs/cs35l43.c
+@@ -2040,9 +2040,14 @@ static int cs35l43_pcm_hw_params(struct snd_pcm_substream *substream,
+ 		regmap_update_bits(cs35l43->regmap, CS35L43_GLOBAL_SAMPLE_RATE,
+ 			CS35L43_GLOBAL_FS_MASK, cs35l43_fs_rates[i].fs_cfg);
+ 	else if (cs35l43->ultrasonic_mode != CS35L43_ULTRASONIC_MODE_DISABLED)
+-		/* Assume 48k base rate */
++		/*
++		 * The high-rate amplifier input runs at twice GLOBAL_FS. Keep
++		 * Cirrus's legacy 48 kHz base for existing ultrasonic streams,
++		 * but use a 96 kHz base for an actual 192 kHz ASP stream so the
++		 * FSX2 path does not discard the upper half of its bandwidth.
++		 */
+ 		regmap_update_bits(cs35l43->regmap, CS35L43_GLOBAL_SAMPLE_RATE,
+-			CS35L43_GLOBAL_FS_MASK, 0x03);
++			CS35L43_GLOBAL_FS_MASK, rate == 192000 ? 0x04 : 0x03);
+ 	else {
+ 		dev_err(cs35l43->dev, "%s: Unsupported rate\n", __func__);
+ 		return -EINVAL;

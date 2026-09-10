@@ -1,0 +1,77 @@
+type frankel_powerphone_d10_bootstrap, domain;
+type frankel_powerphone_d10_bootstrap_exec, exec_type, vendor_file_type, file_type;
+type powerphone_vendor_data_file, file_type, data_file_type;
+vendor_internal_prop(vendor_powerphone_pdm_prop)
+vendor_internal_prop(vendor_powerphone_aoc_speaker_prop)
+vendor_internal_prop(vendor_powerphone_aoc_a32_allocator_prop)
+vendor_internal_prop(vendor_powerphone_bootstrap_attempted_prop)
+vendor_internal_prop(vendor_powerphone_bootstrap_watchdog_prop)
+vendor_internal_prop(vendor_powerphone_bootstrap_phase_prop)
+
+# The independently gated AIDL sidecar reads these boot-volatile certificates.
+get_prop(hal_audio_default, vendor_powerphone_pdm_prop)
+get_prop(hal_audio_default, vendor_powerphone_aoc_speaker_prop)
+
+init_daemon_domain(frankel_powerphone_d10_bootstrap)
+
+# The userdebug service deliberately sends its libc-only diagnostics through
+# init's stdio_to_kmsg descriptor.
+allow frankel_powerphone_d10_bootstrap kmsg_debug_device:chr_file {
+  w_file_perms getattr ioctl
+};
+
+# The orchestrator executes the same reviewed binary type for the guarded F1
+# transaction. Both binaries use libtinyalsa directly.
+allow frankel_powerphone_d10_bootstrap frankel_powerphone_d10_bootstrap_exec:file rx_file_perms;
+allow frankel_powerphone_d10_bootstrap frankel_powerphone_d10_bootstrap_exec:file execute_no_trans;
+
+# Mixer setup, temporary transaction quarantine, and persistent
+# D8/D9/D12/D31p quarantine all operate on the fixed card-0 audio family.
+allow frankel_powerphone_d10_bootstrap audio_device:dir r_dir_perms;
+allow frankel_powerphone_d10_bootstrap audio_device:chr_file rw_file_perms;
+# Both the transaction-local guard and resident D8/D9/D12/D31p quarantine
+# change PCM modes; CAP_FOWNER does not bypass the SELinux setattr check.
+allow frankel_powerphone_d10_bootstrap audio_device:chr_file setattr;
+allow frankel_powerphone_d10_bootstrap self:global_capability_class_set fowner;
+
+# The exact root-owned vendor-data object serializes all AoC factory/debug
+# transactions. Do not substitute shell_data_file or a generally writable
+# directory: the lock is part of the mutation guard.
+allow frankel_powerphone_d10_bootstrap powerphone_vendor_data_file:dir {
+  search write add_name
+};
+allow frankel_powerphone_d10_bootstrap powerphone_vendor_data_file:file {
+  create getattr open read write lock
+};
+
+# The reviewed helper uses the AoC factory command and debug reply channels and
+# scans procfs only to prove that D8/D9/D10/D12 have no existing fd owners.
+allow frankel_powerphone_d10_bootstrap aoc_device:chr_file rw_file_perms;
+# The speaker helper treats the stock AoC restart and coredump counters as a
+# read-only generation guard around every F1 transaction. Stock Frankel policy
+# labels the AoC directory sysfs_aoc and both counters sysfs_aoc_dumpstate.
+allow frankel_powerphone_d10_bootstrap sysfs_aoc:dir search;
+allow frankel_powerphone_d10_bootstrap sysfs_aoc_dumpstate:file { open read };
+r_dir_file(frankel_powerphone_d10_bootstrap, proc)
+# `/proc/asound/card0/id` is separately labeled from generic procfs and is an
+# identity guard before any F1 transport transaction.
+r_dir_file(frankel_powerphone_d10_bootstrap, proc_asound)
+allow frankel_powerphone_d10_bootstrap proc:lnk_file read;
+
+# The reviewed D10 helper executes in this domain and owns the fail-closed
+# readiness transition around its guarded mutation and final readback.
+set_prop(frankel_powerphone_d10_bootstrap, vendor_powerphone_pdm_prop)
+set_prop(frankel_powerphone_d10_bootstrap, vendor_powerphone_aoc_speaker_prop)
+set_prop(frankel_powerphone_d10_bootstrap, vendor_powerphone_aoc_a32_allocator_prop)
+set_prop(frankel_powerphone_d10_bootstrap, vendor_powerphone_bootstrap_watchdog_prop)
+# The watchdog treats only an exact value of one as claimed. Give its confined
+# domain explicit read access to the vendor-internal latch; a denied property
+# read must never silently disable the boot fail-open deadline.
+get_prop(frankel_powerphone_d10_bootstrap, vendor_powerphone_bootstrap_attempted_prop)
+# Vendor init clears watchdog expiration and arms this boot-local latch at
+# post-fs-data. Platform init is already permitted to set typed properties and
+# claims the latch as the first command in either gate path, preventing later
+# audio-service stops from replaying either action.
+set_prop(vendor_init, vendor_powerphone_bootstrap_attempted_prop)
+set_prop(vendor_init, vendor_powerphone_bootstrap_watchdog_prop)
+set_prop(vendor_init, vendor_powerphone_bootstrap_phase_prop)

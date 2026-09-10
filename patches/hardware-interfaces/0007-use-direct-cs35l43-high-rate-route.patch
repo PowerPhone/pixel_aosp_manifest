@@ -1,0 +1,109 @@
+diff --git a/audio/aidl/default/Android.bp b/audio/aidl/default/Android.bp
+--- a/audio/aidl/default/Android.bp
++++ b/audio/aidl/default/Android.bp
+@@ -209,7 +209,7 @@ cc_binary {
+     installable: false, //installed in apex com.android.hardware.audio
+ }
+ 
+-// Opt-in research module for direct, exact-rate Frankel capture and PCM0,28
++// Opt-in research module for direct, exact-rate Frankel capture and PCM0,D0
+ // speaker output. This is intentionally a separate IModule: it does not
+ // replace the vendor primary module or register IConfig/effects.
+ cc_binary {
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -188,8 +188,7 @@ void releasePlaybackLease(const StreamPowerphone* owner) {
+     if (gPlaybackLeaseOwner == owner) gPlaybackLeaseOwner = nullptr;
+ }
+ 
+-constexpr std::array<const char*, 12> kConflictingTdmRoutes{{
+-        "TDM_0_RX Mixer EP1",
++constexpr std::array<const char*, 11> kConflictingTdmRoutes{{
+         "TDM_0_RX Mixer EP2",
+         "TDM_0_RX Mixer EP3",
+         "TDM_0_RX Mixer EP4",
+@@ -507,7 +506,9 @@ class PlaybackRoute {
+         // A stock/proprietary stream owns these controls whenever any one is
+         // active. Never steal its TDM bus or power down its amplifier.
+         if (!requireValue("Main AMP Enable Switch", 0) ||
+-            !requireValue("R Main AMP Enable Switch", 0) || !requireValue("TDM_0_RX Mixer US", 0) ||
++            !requireValue("R Main AMP Enable Switch", 0) ||
++            !requireValue("TDM_0_RX Mixer EP1", 0) ||
++            !requireValue("TDM_0_RX Mixer US", 0) ||
+             !requireEnum("Ultrasonic Mode", "Disabled") ||
+             !requireEnum("R Ultrasonic Mode", "Disabled")) {
+             closeWithoutPowerCleanup();
+@@ -531,7 +532,10 @@ class PlaybackRoute {
+         for (const char* prefix : {"", "R "}) {
+             if (!snapshotAndSetEnum(std::string(prefix) + "DSP RX1 Source", "ASPRX1") ||
+                 !snapshotAndSetEnum(std::string(prefix) + "DSP RX2 Source", "ASPRX1") ||
+-                !snapshotAndSetEnum(std::string(prefix) + "PCM Source", "ASPRX1") ||
++                // The patched CS35L43 derives its 192 kHz DAC input only from
++                // the high-rate selector. Keep the normal-rate path silent so
++                // a legacy 48/96 kHz copy is not mixed into the transducer.
++                !snapshotAndSetEnum(std::string(prefix) + "PCM Source", "Zero") ||
+                 !snapshotAndSetEnum(std::string(prefix) + "High Rate PCM Source", "ASPRX1") ||
+                 !snapshotAndSetValue(std::string(prefix) + "Amp Gain", 0)) {
+                 cleanup();
+@@ -541,10 +545,10 @@ class PlaybackRoute {
+ 
+         // From this point onward an error path must force the route and both
+         // amplifiers off. Enable the amplifier(s) only after every bus/codec
+-        // setting and the dedicated US source route have succeeded.
++        // setting and the proven PCM0,D0 EP1/source-0 route have succeeded.
+         mPowerControlsTouched = true;
+         if (!setEnum("Ultrasonic Mode", "In Band") || !setEnum("R Ultrasonic Mode", "In Band") ||
+-            !setValue("TDM_0_RX Mixer US", 1)) {
++            !setValue("TDM_0_RX Mixer EP1", 1)) {
+             cleanup();
+             return false;
+         }
+@@ -586,6 +590,9 @@ class PlaybackRoute {
+                 bool poweredDown = true;
+                 if (!setValueBestEffort("Main AMP Enable Switch", 0)) poweredDown = false;
+                 if (!setValueBestEffort("R Main AMP Enable Switch", 0)) poweredDown = false;
++                if (!setValueBestEffort("TDM_0_RX Mixer EP1", 0)) poweredDown = false;
++                // US is not part of the qualified route, but force it off
++                // defensively while exclusive ownership is still proved.
+                 if (!setValueBestEffort("TDM_0_RX Mixer US", 0)) poweredDown = false;
+                 if (!setEnumBestEffort("Ultrasonic Mode", "Disabled")) poweredDown = false;
+                 if (!setEnumBestEffort("R Ultrasonic Mode", "Disabled")) poweredDown = false;
+@@ -709,6 +716,7 @@ class PlaybackRoute {
+     bool idlePowerAndRoutes() const {
+         return conflictingRoutesAreIdle() && valueMatches("Main AMP Enable Switch", 0) &&
+                valueMatches("R Main AMP Enable Switch", 0) &&
++               valueMatches("TDM_0_RX Mixer EP1", 0) &&
+                valueMatches("TDM_0_RX Mixer US", 0) && enumMatches("Ultrasonic Mode", "Disabled") &&
+                enumMatches("R Ultrasonic Mode", "Disabled");
+     }
+@@ -719,7 +727,8 @@ class PlaybackRoute {
+         const bool right = *mEndpoint == PlaybackEndpoint::BOTTOM_CANDIDATE;
+         if (!valueMatches("Main AMP Enable Switch", main ? 1 : 0) ||
+             !valueMatches("R Main AMP Enable Switch", right ? 1 : 0) ||
+-            !valueMatches("TDM_0_RX Mixer US", 1) || !enumMatches("Ultrasonic Mode", "In Band") ||
++            !valueMatches("TDM_0_RX Mixer EP1", 1) ||
++            !valueMatches("TDM_0_RX Mixer US", 0) || !enumMatches("Ultrasonic Mode", "In Band") ||
+             !enumMatches("R Ultrasonic Mode", "In Band") ||
+             !enumMatches("TDM_0_RX Sample Rate", "SR_192K") ||
+             !enumMatches("TDM_0_RX Format", "S32_LE") || !enumMatches("TDM_0_RX Chan", "Four") ||
+@@ -731,7 +740,7 @@ class PlaybackRoute {
+         for (const char* prefix : {"", "R "}) {
+             if (!enumMatches(std::string(prefix) + "DSP RX1 Source", "ASPRX1") ||
+                 !enumMatches(std::string(prefix) + "DSP RX2 Source", "ASPRX1") ||
+-                !enumMatches(std::string(prefix) + "PCM Source", "ASPRX1") ||
++                !enumMatches(std::string(prefix) + "PCM Source", "Zero") ||
+                 !enumMatches(std::string(prefix) + "High Rate PCM Source", "ASPRX1") ||
+                 !valueMatches(std::string(prefix) + "Amp Gain", 0)) {
+                 return false;
+diff --git a/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc b/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc
+--- a/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc
++++ b/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc
+@@ -6,7 +6,6 @@ service vendor.audio-hal-powerphone /vendor/bin/hw/android.hardware.audio.servic
+     rlimit rtprio 10 10
+     ioprio rt 4
+     task_profiles ProcessCapacityHigh HighPerformance
+-    onrestart restart audioserver
+ 
+ # Audio HAL discovery waits for every VINTF-declared IModule. Keep the binder
+ # process registered from boot, even when neither research path is ready.
