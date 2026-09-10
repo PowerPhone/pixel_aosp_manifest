@@ -55,10 +55,34 @@ speaker-to-phone-microphone spectra are only combined-path evidence; calibrated
 external wideband source and receiver measurements remain necessary for
 per-endpoint acoustic-bandwidth claims.
 
+### Ordinary playback at fixed hardware rate
+
+Frankel's proprietary primary AIDL HAL originally exposed its primary and
+deep-buffer built-in speaker use cases at 48 kHz and selected separate D1/D5
+frontends. A guarded, exact-build patch now exposes those stream configurations
+to AudioFlinger as stereo S32_LE at 192 kHz with 1,920-by-two geometry, maps
+their PCM opens onto the already-qualified D0 frontend, and routes their mixer
+paths into the same source-0/EP1 chain. The configuration is changed before
+AudioFlinger creates its playback thread, not after a stream has opened.
+
+This makes the conversion boundary explicit: ordinary 48 kHz AudioTrack input
+is resampled by AudioFlinger, while the HAL and physical AoC transport stay at
+192 kHz. A live-pushed eight-second AudioTrack trial completed all 384,000
+client frames with zero framework underruns and an observed 192 kHz HAL thread.
+The same behavior was then reproduced after flashing the exact packaged image:
+384,000 client frames completed in 8.254 seconds with zero underruns while the
+active deep-buffer stream reported 192 kHz and AoC restart/coredump counters
+remained 0/0.
+Treat this as a compatibility layer, not an exact-rate research measurement;
+the address-selected PowerPhone BUS routes remain the evidence path for exact
+192 kHz Java and AAudio clients.
+
 ## Required target-specific closure
 
 The D0 frontend depends on a paired kernel state. The retained selected
 `aoc_alsa_dev_util.ko` digest is
+`398eaca28da2d97431b1398b5df93e34e594389fa691616416354b4705bde4e3`;
+with the orthogonal EP6 admission word normalized, the D0 profile digest is
 `37cc7ff81bf9804677699d612621ed75a177597e773709ec54924916811818e6`;
 the paired zero-write-pointer-reset `aoc_core.ko` digest is
 `f4b7c9daad2fb3cb2ddc9fa8f80381629b3ffe048194348924e9f7a0ead1024c`.

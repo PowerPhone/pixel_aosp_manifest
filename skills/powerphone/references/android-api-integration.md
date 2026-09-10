@@ -30,6 +30,18 @@ Modify the primary HAL/configuration when its source and route contract are
 available and a high-rate profile will not change ordinary media, calls,
 alarms, hotword, camera, or telephony behavior.
 
+For a dedicated research image, another valid design is to keep a physical
+speaker or microphone transport fixed at its qualified maximum rate while
+allowing AudioFlinger to convert ordinary application rates at the framework
+boundary. This preserves normal application compatibility without repeatedly
+reconfiguring a fragile DSP/backend path. Make the conversion boundary
+intentional and observable: the HAL must publish the fixed hardware profile
+before AudioFlinger chooses its thread geometry, open the same rate at ALSA,
+and report positions/timestamps in hardware frames. Test both exact-rate
+research clients and ordinary 44.1/48 kHz clients. Do not extend this policy to
+calls, hotword, or capture paths whose processing contract has not been
+qualified.
+
 First identify whether the device actually uses AIDL, HIDL, or a legacy audio
 HAL. On an AIDL device whose proprietary primary module hard-codes a legacy
 rate, a target-scoped additive module with explicit `TYPE_BUS` devices can
@@ -64,9 +76,13 @@ counter; a nominally successful read/write must not hide an underrun or
 overrun. Any bounded startup exception must end before client audio is
 consumed, establish an explicit baseline, and keep subsequent xruns fatal.
 
-Refuse implicit resampling and format conversion. If conversion between an API
-container and the proven ALSA container is necessary, make it explicit and
-prove that it does not change the sample rate or spectral content.
+For exact research routes, refuse implicit resampling and format conversion.
+If conversion between an API container and the proven ALSA container is
+necessary, make it explicit and prove that it does not change the research
+sample rate or spectral content. For an explicitly fixed-rate ordinary route,
+instead prove that conversion occurs only on the intended client side of the
+HAL boundary and that the ALSA/backend transport remains fixed at the qualified
+rate.
 
 ## 3. Handle boot-volatile hardware state
 

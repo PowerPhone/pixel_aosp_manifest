@@ -80,14 +80,58 @@ STATE_SHA256 = {
     "one-period-lag": ONE_PERIOD_LAG_SHA256,
 }
 SELECTABLE_STATES = ("mailbox", "pure-timer", "one-period-lag")
+EP6_RATE_OFFSET = 0x3F728
+EP6_RATE_STOCK = bytes.fromhex("fe000000")
+EP6_RATE_PATCHED = bytes.fromhex("fe1f0000")
+D5_TIMER_PATCHES = (
+    (0x1A46C, bytes.fromhex("1f0800f9"), bytes.fromhex("360b43f9")),
+    (0x1A5C8, bytes.fromhex("2a0b43f9"), bytes.fromhex("c80208aa")),
+    (0x1A5CC, bytes.fromhex("480108aa"), bytes.fromhex("895e01b9")),
+    (0x1A5DC, bytes.fromhex("895e01b9"), bytes.fromhex("bf160071")),
+    (0x1A5E4, bytes.fromhex("5f110071"), bytes.fromhex("4019447a")),
+)
 
 
 def digest(data: bytes | bytearray) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def progress_digest(data: bytes | bytearray) -> str:
+    """Hash D0 independently of the orthogonal EP6 and D5 selectors."""
+    normalized = bytearray(data)
+    actual = bytes(
+        normalized[EP6_RATE_OFFSET : EP6_RATE_OFFSET + len(EP6_RATE_STOCK)]
+    )
+    if actual not in (EP6_RATE_STOCK, EP6_RATE_PATCHED):
+        raise ValueError(
+            f"unexpected EP6 rate word at 0x{EP6_RATE_OFFSET:x}: {actual.hex()}"
+        )
+    normalized[
+        EP6_RATE_OFFSET : EP6_RATE_OFFSET + len(EP6_RATE_STOCK)
+    ] = EP6_RATE_STOCK
+    d5_states = []
+    for offset, before, after in D5_TIMER_PATCHES:
+        actual = bytes(normalized[offset : offset + len(before)])
+        if actual == before:
+            d5_states.append("disabled")
+        elif actual == after:
+            d5_states.append("enabled")
+        else:
+            # Other D0 implementations intentionally use overlapping bytes;
+            # they are not a partial D5 selection and remain untouched.
+            d5_states = []
+            break
+    if d5_states:
+        if len(set(d5_states)) != 1:
+            raise ValueError("partially selected D5 timer transform")
+        if d5_states[0] == "enabled":
+            for offset, before, _after in D5_TIMER_PATCHES:
+                normalized[offset : offset + len(before)] = before
+    return digest(normalized)
+
+
 def classify(data: bytes | bytearray) -> str:
-    observed = digest(data)
+    observed = progress_digest(data)
     for state, expected in STATE_SHA256.items():
         if observed == expected:
             return state
@@ -123,7 +167,7 @@ def normalize_clean(data: bytearray, state: str) -> None:
     if state == "hybrid":
         apply_patch_set(data, HYBRID_PATCHES, False)
         state = "clean"
-    if state != "clean" or digest(data) != CLEAN_SHA256:
+    if state != "clean" or progress_digest(data) != CLEAN_SHA256:
         raise AssertionError("failed to normalize exact clean D0 state")
 
 

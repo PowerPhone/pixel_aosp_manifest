@@ -180,7 +180,9 @@ default.
 
 The D0 kernel transport is also a paired-module contract. The selected
 `aoc_alsa_dev_util.ko`
-(`37cc7ff81bf9804677699d612621ed75a177597e773709ec54924916811818e6`)
+(`398eaca28da2d97431b1398b5df93e34e594389fa691616416354b4705bde4e3`,
+including EP6 192 kHz admission; normalized D0 profile
+`37cc7ff81bf9804677699d612621ed75a177597e773709ec54924916811818e6`)
 must be installed with the zero-write-pointer-reset `aoc_core.ko`
 (`f4b7c9daad2fb3cb2ddc9fa8f80381629b3ffe048194348924e9f7a0ead1024c`).
 Stock `aoc_core.ko` advances an already-zero producer write pointer by a full

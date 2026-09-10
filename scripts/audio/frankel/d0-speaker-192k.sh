@@ -150,8 +150,10 @@ mode. The transport-tested kernel retains real mailbox progress plus the 1 ms
 real-counter poll and reports max(previous, actual minus one physical period).
 It has no prefill, availability bypass, or synthetic counter. A bounded
 transient EFAULT is permitted only while the second period waits at the first
-15,360-byte boundary; any later-offset retry is terminal. Its exact module
-SHA-256 is
+15,360-byte boundary; any later-offset retry is terminal. The final combined
+module, including EP6 192 kHz admission for ordinary playback, has SHA-256
+398eaca28da2d97431b1398b5df93e34e594389fa691616416354b4705bde4e3;
+its EP6-normalized D0 profile SHA-256 is
 37cc7ff81bf9804677699d612621ed75a177597e773709ec54924916811818e6.
 This wrapper cannot prove those image bytes. A physical-speaker run also
 requires the

@@ -30,6 +30,15 @@ The speaker side uses only the independently proven PCM0,D0 earpiece and
 R/bottom-candidate routes. The simultaneous-amplifier route is absent because
 it watchdogs FF1. Acoustic ultrasonic bandwidth remains a separate gate.
 
+For ordinary Android media, the selected image also applies guarded transforms
+to the extracted primary HAL and its mixer routes. Primary and deep-buffer
+built-in-speaker configurations are published as stereo S32 at 192 kHz with
+1,920-by-two geometry; their D1/D5 opens are mapped onto D0 and their routes
+join source 0 / EP1. AudioFlinger therefore resamples ordinary client rates to
+the fixed high-rate physical transport. Exact-rate qualification continues to
+use the separately addressed PowerPhone BUS routes. Calls, capture, Bluetooth,
+raw, and MMAP configurations are not changed by this compatibility transform.
+
 ## Required boot order
 
 The F1/H0 profiles, A32 allocator fallback, and dynamically rebased speaker
@@ -289,13 +298,15 @@ compile result, not a boot or acoustic-bandwidth qualification.
 
 After the generated-vendor boot helper, init policy, and SELinux policy have
 been selected, build and package the native-q192 one-period-lag/stock-firmware
-profile with all three feature opt-ins and both explicit profiles:
+profile with all five feature selections and both explicit profiles:
 
 ```bash
 cd pixel_aosp_manifest
 export PIXEL_TARGET=frankel
 export POWERPHONE_AOC_ALSA_192K=true
 export POWERPHONE_D0_PROGRESS_MODE=one-period-lag
+export POWERPHONE_D5_TIMER=false
+export POWERPHONE_PRIMARY_HAL_192K=true
 export POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock
 export POWERPHONE_AUDIO_SIDECAR=true
 export POWERPHONE_CS35L43_192K=true
@@ -318,8 +329,11 @@ ISR and has SHA-256
 `fc990edad9b77b2bb96cd222f6a07503dc12247804c498a769d0436b5cb61cd0`.
 The publishable PowerPhone profile explicitly selects `one-period-lag`: real
 mailbox progress plus the 1 ms real-counter poll, conservatively reported as
-`max(previous, actual minus one physical period)`, SHA-256
-`37cc7ff81bf9804677699d612621ed75a177597e773709ec54924916811818e6`.
+`max(previous, actual minus one physical period)`. Its normalized base
+SHA-256, before the orthogonal EP6 admission word, is
+`37cc7ff81bf9804677699d612621ed75a177597e773709ec54924916811818e6`;
+the exact final combined module SHA-256 is
+`398eaca28da2d97431b1398b5df93e34e594389fa691616416354b4705bde4e3`.
 It passed a complete ten-second native-q192 physical-speaker stream at
 `1920x2`, start threshold 1920, and remained stable with simultaneous D10
 transport.
@@ -350,7 +364,12 @@ must require all helper binaries and RC, the PowerPhone HAL binary/RC/VINTF
 fragment, both selected AoC kernel modules, and must reject the obsolete
 `frankel_pdm_alsa.ko`/card-1 loader payload.
 
-The three-boolean selection with `one-period-lag`/`stock` profiles selects the
+`POWERPHONE_D5_TIMER=false` retains D5's real-mailbox behavior.
+`POWERPHONE_PRIMARY_HAL_192K=true` selects the exact primary-service and
+primary-speaker-route binary transforms. Attestation pins both stock and
+selected digests, and packaging refuses a selector mismatch.
+
+The exact seven-selector combination selects the
 dedicated Frankel research-audio bundle. Other profiles are
 published under a profile-specific `artifacts/frankel/experimental-*`
 directory, kept separate from both that bundle and the normal device bundle.

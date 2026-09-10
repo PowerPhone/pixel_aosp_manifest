@@ -22,6 +22,8 @@ powerphone_aoc_alsa_192k=${POWERPHONE_AOC_ALSA_192K:-false}
 powerphone_audio_sidecar=${POWERPHONE_AUDIO_SIDECAR:-false}
 powerphone_cs35l43_192k=${POWERPHONE_CS35L43_192K:-false}
 powerphone_d0_progress_mode=${POWERPHONE_D0_PROGRESS_MODE:-mailbox}
+powerphone_d5_timer=${POWERPHONE_D5_TIMER:-false}
+powerphone_primary_hal_192k=${POWERPHONE_PRIMARY_HAL_192K:-$powerphone_aoc_alsa_192k}
 powerphone_signed_aoc_firmware_profile=${POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE:-stock}
 case "$powerphone_aoc_alsa_192k" in
   true|false) ;;
@@ -39,26 +41,39 @@ case "$powerphone_d0_progress_mode" in
   mailbox|pure-timer|one-period-lag) ;;
   *) die "POWERPHONE_D0_PROGRESS_MODE must be mailbox, pure-timer, or one-period-lag" ;;
 esac
+case "$powerphone_d5_timer" in
+  true|false) ;;
+  *) die "POWERPHONE_D5_TIMER must be true or false" ;;
+esac
+case "$powerphone_primary_hal_192k" in
+  true|false) ;;
+  *) die "POWERPHONE_PRIMARY_HAL_192K must be true or false" ;;
+esac
 case "$powerphone_signed_aoc_firmware_profile" in
   stock|source0-4s32-allocator-fallback) ;;
   *) die "POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE must be stock or source0-4s32-allocator-fallback" ;;
 esac
 if [[ "$powerphone_aoc_alsa_192k" == false && \
       ( "$powerphone_d0_progress_mode" != mailbox || \
-        "$powerphone_signed_aoc_firmware_profile" != stock ) ]]; then
-  die "non-default D0 progress and signed AoC firmware require POWERPHONE_AOC_ALSA_192K=true"
+        "$powerphone_signed_aoc_firmware_profile" != stock || \
+        "$powerphone_d5_timer" == true || \
+        "$powerphone_primary_hal_192k" == true ) ]]; then
+  die "non-default AoC selections require POWERPHONE_AOC_ALSA_192K=true"
 fi
-case "$powerphone_aoc_alsa_192k:$powerphone_audio_sidecar:$powerphone_cs35l43_192k:$powerphone_d0_progress_mode:$powerphone_signed_aoc_firmware_profile" in
-  false:false:false:mailbox:stock)
+[[ "$powerphone_d5_timer" != true || \
+   "$powerphone_d0_progress_mode" == one-period-lag ]] || \
+  die "POWERPHONE_D5_TIMER=true requires POWERPHONE_D0_PROGRESS_MODE=one-period-lag"
+case "$powerphone_aoc_alsa_192k:$powerphone_audio_sidecar:$powerphone_cs35l43_192k:$powerphone_d0_progress_mode:$powerphone_d5_timer:$powerphone_primary_hal_192k:$powerphone_signed_aoc_firmware_profile" in
+  false:false:false:mailbox:false:false:stock)
     frankel_bundle_profile=baseline
     frankel_bundle_subdir=device
     ;;
-  true:true:true:one-period-lag:stock)
+  true:true:true:one-period-lag:false:true:stock)
     frankel_bundle_profile=powerphone
     frankel_bundle_subdir=powerphone
     ;;
   *)
-    frankel_bundle_profile="experimental-powerphone-${powerphone_aoc_alsa_192k}-${powerphone_audio_sidecar}-${powerphone_cs35l43_192k}-${powerphone_d0_progress_mode}-${powerphone_signed_aoc_firmware_profile}"
+    frankel_bundle_profile="experimental-powerphone-${powerphone_aoc_alsa_192k}-${powerphone_audio_sidecar}-${powerphone_cs35l43_192k}-${powerphone_d0_progress_mode}-d5timer-${powerphone_d5_timer}-primary192-${powerphone_primary_hal_192k}-${powerphone_signed_aoc_firmware_profile}"
     frankel_bundle_subdir="$frankel_bundle_profile"
     ;;
 esac
@@ -627,6 +642,8 @@ fastboot_info_sha256=$(
   printf 'build_variant=userdebug\n'
   printf 'powerphone_aoc_alsa_192k=%s\n' "$powerphone_aoc_alsa_192k"
   printf 'powerphone_d0_progress_mode=%s\n' "$powerphone_d0_progress_mode"
+  printf 'powerphone_d5_timer=%s\n' "$powerphone_d5_timer"
+  printf 'powerphone_primary_hal_192k=%s\n' "$powerphone_primary_hal_192k"
   printf 'powerphone_signed_aoc_firmware_profile=%s\n' \
     "$powerphone_signed_aoc_firmware_profile"
   printf 'powerphone_audio_sidecar=%s\n' "$powerphone_audio_sidecar"

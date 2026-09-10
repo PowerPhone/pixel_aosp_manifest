@@ -50,12 +50,16 @@ use the authorization and recovery boundary of the current task.
 5. Prefer a reboot-volatile, expected-bytes-guarded experiment before making a
    persistent image change. Apply only from a uniform known state, activate
    last, read back every mutation, and make reboot the fallback rollback.
-6. Once direct ALSA is stable, expose explicit research routes through the
-   platform's existing AIDL, HIDL, or legacy HAL/configuration boundary. An
-   additive AIDL `TYPE_BUS` module is one option on an AIDL device, but policy
-   isolation is not hardware exclusion: coordinate or quarantine every shared
-   PCM, mixer route, and DSP service. Avoid AudioFlinger source changes unless
-   the HAL/configuration contract cannot express the path.
+6. Once direct ALSA is stable, expose it through the platform's existing AIDL,
+   HIDL, or legacy HAL/configuration boundary. Use exact non-default research
+   routes when clients need bit-preserving high-rate samples. A research image
+   may additionally hold the ordinary physical transport at that rate and let
+   AudioFlinger convert ordinary client rates, provided the HAL advertises and
+   opens the fixed hardware geometry before framework negotiation. An additive
+   AIDL `TYPE_BUS` module is one option on an AIDL device, but policy isolation
+   is not hardware exclusion: coordinate or quarantine every shared PCM,
+   mixer route, and DSP service. Avoid AudioFlinger source changes unless the
+   HAL/configuration contract cannot express the path.
 7. Test Java `AudioTrack`, Java `AudioRecord` using `UNPROCESSED`, native
    AAudio playback, and native AAudio capture while independently observing
    the actual ALSA route and geometry.

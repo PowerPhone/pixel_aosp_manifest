@@ -65,9 +65,11 @@ experiment has established native 192 kHz physical playback.
   `R Digital PCM Volume` for bottom). The inactive codec volume is untouched;
   cleanup forces EP1 and both amps off before restoring the selected value.
   Its
-  normal mode assumes the EP1 rate mask, global zero-write-pointer reset, and
-  D0 one-period-lag kernel SHA
-  `37cc7ff81bf9804677699d612621ed75a177597e773709ec54924916811818e6`
+  normal mode assumes the EP1/EP6 rate masks, global zero-write-pointer reset,
+  and final combined D0 one-period-lag kernel SHA
+  `398eaca28da2d97431b1398b5df93e34e594389fa691616416354b4705bde4e3`
+  (EP6-normalized D0 profile
+  `37cc7ff81bf9804677699d612621ed75a177597e773709ec54924916811818e6`)
   are already booted. The driver retains real mailbox progress plus a 1 ms
   real-counter poll and conservatively reports one physical period behind the
   real counter; there is no prefill, availability bypass, or synthetic

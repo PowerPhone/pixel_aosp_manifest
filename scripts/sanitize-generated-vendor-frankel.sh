@@ -655,6 +655,11 @@ case "$powerphone_d0_progress_mode" in
   mailbox|pure-timer|one-period-lag) ;;
   *) die "POWERPHONE_D0_PROGRESS_MODE must be mailbox, pure-timer, or one-period-lag" ;;
 esac
+powerphone_d5_timer=${POWERPHONE_D5_TIMER:-false}
+case "$powerphone_d5_timer" in
+  true|false) ;;
+  *) die "POWERPHONE_D5_TIMER must be true or false" ;;
+esac
 powerphone_signed_aoc_firmware_profile=${POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE:-stock}
 case "$powerphone_signed_aoc_firmware_profile" in
   stock|source0-4s32-allocator-fallback) ;;
@@ -662,8 +667,23 @@ case "$powerphone_signed_aoc_firmware_profile" in
 esac
 if [[ "$powerphone_aoc_alsa_192k" == false && \
       ( "$powerphone_d0_progress_mode" != mailbox || \
-        "$powerphone_signed_aoc_firmware_profile" != stock ) ]]; then
-  die "non-default D0 progress and signed AoC firmware require POWERPHONE_AOC_ALSA_192K=true"
+        "$powerphone_signed_aoc_firmware_profile" != stock || \
+        "$powerphone_d5_timer" == true ) ]]; then
+  die "non-default AoC selections require POWERPHONE_AOC_ALSA_192K=true"
+fi
+if [[ "$powerphone_d5_timer" == true && \
+      "$powerphone_d0_progress_mode" != one-period-lag ]]; then
+  die "POWERPHONE_D5_TIMER=true requires POWERPHONE_D0_PROGRESS_MODE=one-period-lag"
+fi
+powerphone_primary_hal_192k=${POWERPHONE_PRIMARY_HAL_192K:-$powerphone_aoc_alsa_192k}
+case "$powerphone_primary_hal_192k" in
+  true) powerphone_primary_hal_state=patched ;;
+  false) powerphone_primary_hal_state=stock ;;
+  *) die "POWERPHONE_PRIMARY_HAL_192K must be true or false" ;;
+esac
+if [[ "$powerphone_primary_hal_192k" == true && \
+      "$powerphone_aoc_alsa_192k" != true ]]; then
+  die "POWERPHONE_PRIMARY_HAL_192K=true requires POWERPHONE_AOC_ALSA_192K=true"
 fi
 powerphone_audio_sidecar=${POWERPHONE_AUDIO_SIDECAR:-false}
 case "$powerphone_audio_sidecar" in
@@ -776,31 +796,62 @@ unset -f select_powerphone_audioserver_restart_policy
 # both the transformation logic and its output.
 powerphone_aoc_patcher="$project_root/tools/audio/patch_frankel_aoc_192k.py"
 powerphone_d0_progress_patcher="$project_root/tools/audio/patch_frankel_aoc_d0_progress_mode.py"
+powerphone_ep6_patcher="$project_root/tools/audio/patch_frankel_aoc_ep6_speaker_192k.py"
+powerphone_d5_timer_patcher="$project_root/tools/audio/patch_frankel_aoc_pcm_d5_timer_mode.py"
 powerphone_aoc_module="$generated_dir/stock-kernel/aoc_alsa_dev_util.ko"
 require_file "$powerphone_aoc_patcher"
 require_file "$powerphone_d0_progress_patcher"
+require_file "$powerphone_ep6_patcher"
+require_file "$powerphone_d5_timer_patcher"
 require_file "$powerphone_aoc_module"
 [[ ! -L "$powerphone_aoc_patcher" && -x "$powerphone_aoc_patcher" ]] || \
   die "Frankel AoC 192 kHz patch helper is unsafe or not executable"
 [[ ! -L "$powerphone_d0_progress_patcher" && \
    -x "$powerphone_d0_progress_patcher" ]] || \
   die "Frankel D0 progress patch helper is unsafe or not executable"
+[[ ! -L "$powerphone_ep6_patcher" && -x "$powerphone_ep6_patcher" ]] || \
+  die "Frankel EP6 192 kHz patch helper is unsafe or not executable"
+[[ ! -L "$powerphone_d5_timer_patcher" && -x "$powerphone_d5_timer_patcher" ]] || \
+  die "Frankel D5 timer patch helper is unsafe or not executable"
 [[ ! -L "$powerphone_aoc_module" ]] || \
   die "generated Frankel AoC ALSA module must not be a symlink"
 verify_sha256 \
   1c96487c0cfa3505f881824adbb084126bbf30eaafc7e8346d8818f2625b5e1d \
   "$powerphone_aoc_patcher"
 verify_sha256 \
-  fad4debd25f63466511109da5dce014cc6ef9be35b15e4812ce589e578f0facd \
+  3deb57c943d0015b410aac8fdf2611b8569f0af378b0e1cb22e059f82115198a \
   "$powerphone_d0_progress_patcher"
+verify_sha256 \
+  c5bf1fc07decf7f9c9c94d55b7f12c80253eafb18a6e9b884efc9337b670020d \
+  "$powerphone_ep6_patcher"
+verify_sha256 \
+  1ed1d9507155587b554ca3031a6882e5f4bcb9beaf1923dec93ea0496b32a987 \
+  "$powerphone_d5_timer_patcher"
 if [[ "$check_only" == true ]]; then
   if [[ "$powerphone_aoc_module_state" == stock ]]; then
     "$powerphone_aoc_patcher" --check stock "$powerphone_aoc_module"
   else
     "$powerphone_d0_progress_patcher" \
       --check "$powerphone_d0_progress_mode" "$powerphone_aoc_module"
+    if [[ "$powerphone_d5_timer" == true ]]; then
+      "$powerphone_d5_timer_patcher" --check enabled "$powerphone_aoc_module"
+    elif [[ "$powerphone_d0_progress_mode" == one-period-lag ]]; then
+      "$powerphone_d5_timer_patcher" --check disabled "$powerphone_aoc_module"
+    fi
   fi
 else
+  # The D5 timer selector overlaps the D0 open routine. Normalize it before
+  # changing the base D0 state, then restore the requested selection below.
+  if "$powerphone_d5_timer_patcher" --check enabled \
+      "$powerphone_aoc_module" >/dev/null 2>&1; then
+    "$powerphone_d5_timer_patcher" --set-state disabled --in-place \
+      "$powerphone_aoc_module"
+  fi
+  # EP6 is orthogonal to the complete AoC transform, but the primary helper's
+  # whole-file identities predate it. Normalize that one DAI word while the
+  # base state is selected, then restore the requested EP6 state below.
+  "$powerphone_ep6_patcher" --set-state stock --in-place \
+    "$powerphone_aoc_module"
   # The primary helper knows stock and the complete mailbox state. Normalize
   # any selectable 192 kHz progress implementation back to mailbox before
   # asking it to restore stock, then select the requested implementation only
@@ -834,7 +885,21 @@ else
     "$powerphone_aoc_patcher" --check stock "$powerphone_aoc_module"
   fi
 fi
-note "verified Frankel AoC ALSA module selection: $powerphone_aoc_module_state/$powerphone_d0_progress_mode"
+"$powerphone_ep6_patcher" --set-state "$powerphone_aoc_module_state" \
+  --in-place "$powerphone_aoc_module"
+"$powerphone_ep6_patcher" --check "$powerphone_aoc_module_state" \
+  "$powerphone_aoc_module"
+if [[ "$powerphone_aoc_module_state" == patched && \
+      "$powerphone_d0_progress_mode" == one-period-lag ]]; then
+  if [[ "$powerphone_d5_timer" == true ]]; then
+    "$powerphone_d5_timer_patcher" --set-state enabled --in-place \
+      "$powerphone_aoc_module"
+    "$powerphone_d5_timer_patcher" --check enabled "$powerphone_aoc_module"
+  else
+    "$powerphone_d5_timer_patcher" --check disabled "$powerphone_aoc_module"
+  fi
+fi
+note "verified Frankel AoC ALSA module selection: $powerphone_aoc_module_state/$powerphone_d0_progress_mode/d5-timer-$powerphone_d5_timer"
 
 # The selected D0 mailbox transport also requires the paired core ring reset:
 # stock advances Tx by a complete ring when the write pointer is already zero,
@@ -934,6 +999,57 @@ else
     "$powerphone_cs35l43_module"
 fi
 note "verified Frankel CS35L43 192 kHz selection: $powerphone_cs35l43_module_state"
+
+# Keep every physical output below AudioFlinger at a fixed 192 kHz. The
+# proprietary HAL's guarded transform changes the primary/deep mix profiles
+# and all built-in output interfaces; ordinary app rates are then converted by
+# AudioFlinger before the guarded D1/D5-to-D0 redirect reaches EP1/source 0.
+powerphone_primary_hal_patcher="$project_root/tools/audio/patch_frankel_primary_hal_192k.py"
+powerphone_primary_hal="$generated_dir/proprietary/vendor/bin/hw/android.hardware.audio.service-aidl.aoc"
+require_file "$powerphone_primary_hal_patcher"
+require_file "$powerphone_primary_hal"
+[[ ! -L "$powerphone_primary_hal_patcher" && -x "$powerphone_primary_hal_patcher" ]] || \
+  die "Frankel primary HAL patch helper is unsafe or not executable"
+[[ ! -L "$powerphone_primary_hal" ]] || \
+  die "generated Frankel primary audio HAL must not be a symlink"
+verify_sha256 \
+  80bc0d37677c05e89d8ec7a413da6c6f64447743c8922b6bf50f2b55b6fab8af \
+  "$powerphone_primary_hal_patcher"
+if [[ "$check_only" == true ]]; then
+  "$powerphone_primary_hal_patcher" --check "$powerphone_primary_hal_state" \
+    "$powerphone_primary_hal"
+else
+  "$powerphone_primary_hal_patcher" --set-state "$powerphone_primary_hal_state" \
+    --in-place "$powerphone_primary_hal"
+  "$powerphone_primary_hal_patcher" --check "$powerphone_primary_hal_state" \
+    "$powerphone_primary_hal"
+fi
+note "verified Frankel fixed-192 kHz primary HAL selection: $powerphone_primary_hal_state"
+
+# Match the proprietary HAL's guarded D1/D5-to-D0 PCM redirect at the mixer
+# layer.  Both ordinary speaker mix paths must connect TDM RX to EP1/source 0;
+# Bluetooth, USB, raw, haptic, and capture routes remain stock.
+powerphone_primary_route_patcher="$project_root/tools/audio/patch_frankel_primary_speaker_route.py"
+powerphone_mixer_paths="$generated_dir/proprietary/vendor/etc/audio/config/mixer_paths.xml"
+require_file "$powerphone_primary_route_patcher"
+require_file "$powerphone_mixer_paths"
+[[ ! -L "$powerphone_primary_route_patcher" && -x "$powerphone_primary_route_patcher" ]] || \
+  die "Frankel primary speaker route patch helper is unsafe or not executable"
+[[ ! -L "$powerphone_mixer_paths" ]] || \
+  die "generated Frankel mixer paths must not be a symlink"
+verify_sha256 \
+  2580f36e75ffdef0a4818a0b8d6bd0a8a6ec5d97317ec553c6d9e607f6ad2712 \
+  "$powerphone_primary_route_patcher"
+if [[ "$check_only" == true ]]; then
+  "$powerphone_primary_route_patcher" --check "$powerphone_primary_hal_state" \
+    "$powerphone_mixer_paths"
+else
+  "$powerphone_primary_route_patcher" --set-state "$powerphone_primary_hal_state" \
+    --in-place "$powerphone_mixer_paths"
+  "$powerphone_primary_route_patcher" --check "$powerphone_primary_hal_state" \
+    "$powerphone_mixer_paths"
+fi
+note "verified Frankel EP1/source-0 primary speaker route: $powerphone_primary_hal_state"
 
 # PowerPhone's framework experiment is deliberately opt-in and additive. The
 # service registers only IModule/powerphone; Google's extracted default module

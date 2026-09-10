@@ -282,8 +282,8 @@ uses the authority expected by the extracted Pixel eUICC support app but is
 not a general Google Services Framework implementation; see the runbook for
 its caller and coexistence boundaries.
 
-Frankel acoustic-research builds have three default-off boolean selections and
-two explicit profile selectors. `POWERPHONE_AOC_ALSA_192K=true` selects the exact paired kernel
+Frankel acoustic-research builds have five boolean selections and two explicit
+profile selectors. `POWERPHONE_AOC_ALSA_192K=true` selects the exact paired kernel
 closure: the live-qualified AoC ALSA transformation for PCM0,D10 capture and
 PCM0,D0 / EP1 source-0 playback, plus the required `aoc_core.ko`
 zero-write-pointer reset.
@@ -312,26 +312,34 @@ directions a 1,920-frame framework queue while preserving D10's 1,920-by-four
 ALSA ring and D0's 1,920-by-two ALSA ring. Its companion tinyALSA patch exposes
 the cumulative xrun count, including internally recovered EPIPEs, so the HAL
 can fail client streams closed. `POWERPHONE_CS35L43_192K=true`
-selects the narrow high-rate amplifier transform. Use the same explicit values
+selects the narrow high-rate amplifier transform.
+`POWERPHONE_D5_TIMER=false` retains the real-mailbox D5 implementation, and
+`POWERPHONE_PRIMARY_HAL_192K=true` fixes ordinary primary/deep physical output
+at 192 kHz, maps D1/D5 onto qualified D0/source 0, and leaves AudioFlinger to
+resample ordinary client rates. Use the same explicit values
 for vendor sanitization, attestation, build, and packaging. Returning the AoC
 flag to `false` with `POWERPHONE_D0_PROGRESS_MODE=mailbox` and
 `POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock` restores both paired modules and
 the signed firmware to their exact stock bytes without rerunning extraction; see
 [`docs/frankel-audio-api.md`](docs/frankel-audio-api.md).
 
-Packaging with all three booleans set to `true`, `one-period-lag`, and stock
-signed firmware publishes the research bundle at
+Packaging with the exact seven-selector profile publishes the research bundle at
 `artifacts/frankel/powerphone/flash-all.sh`; it never overwrites the
 boot-qualified baseline in `artifacts/frankel/device/`. A deliberately
 partial selection, mailbox progress, or modified cold-firmware experiment is
 isolated under its own
 `artifacts/frankel/experimental-*` directory. `BUNDLE_INFO.txt` records the
-profile and all five selection values so a copied bundle remains
+profile and all seven selection values so a copied bundle remains
 self-describing. On the exact integrated image, both individual D0 output
 routes and all three D10 logical input routes passed direct 192 kHz transport.
 Java `AudioTrack`/AAudio passed both outputs and Java
 `AudioRecord`/AAudio passed all three UNPROCESSED inputs while the HAL
 reported exact 192 kHz hardware geometry and AoC counters remained stable.
+The exact packaged image also passed ordinary 48 kHz `AudioTrack` playback:
+AudioFlinger converted 384,000 client frames into the active 192 kHz
+deep-buffer physical stream in 8.254 seconds with zero underruns and stable AoC
+counters. This preserves normal UI/media audio while the underlying built-in
+speaker transport remains fixed at 192 kHz.
 Independently calibrated acoustic qualification remains separate: a
 characterized external ultrasonic source/receiver is still required to assign
 physical bandwidth to each speaker and enclosure microphone.
@@ -570,7 +578,7 @@ archive is itself ignored and is not an input to later builds.
   bundles, and host-specific build/validation logs. Current device bundle roots
   are the legacy `artifacts/cubs/` and the target-scoped
   `artifacts/frankel/device/` (baseline) and
-  `artifacts/frankel/powerphone/` (explicit three-flag research build).
+  `artifacts/frankel/powerphone/` (exact-profile research build).
 - `.cache/`: ignored private recovery journals and attestations; never publish
   or copy this state between devices.
 

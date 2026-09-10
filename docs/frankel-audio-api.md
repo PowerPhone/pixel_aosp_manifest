@@ -16,11 +16,13 @@ android.hardware.audio.core.IModule/default
 ```
 
 It does not use the example default implementation in
-`hardware/interfaces/audio/aidl/default`. PowerPhone therefore adds the
-independent `IModule/powerphone` instance and never replaces the primary HAL,
-AudioFlinger, AudioPolicyManager, effects, Bluetooth, or telephony modules.
-All research routes are explicitly addressed `TYPE_BUS` ports so ordinary
-media, call, ring, and record strategies cannot select them.
+`hardware/interfaces/audio/aidl/default`. PowerPhone adds an independent
+`IModule/powerphone` instance for rate-exact research routes and applies a
+target/build-guarded binary transform to the extracted primary HAL for normal
+built-in-speaker compatibility. It does not patch AudioFlinger,
+AudioPolicyManager, effects, Bluetooth, or telephony framework sources. All
+rate-exact research routes are explicitly addressed `TYPE_BUS` ports so
+ordinary media, call, ring, and record strategies cannot select them.
 
 Every address is at most 31 characters. AudioFlinger converts the AIDL
 `AudioDevice` into the legacy fixed `AUDIO_DEVICE_MAX_ADDRESS_LEN=32` buffer,
@@ -89,9 +91,19 @@ explicitly includes 192000 in `cs35l43_fs_rates` and
 `cs35l43_src_rates`, and its DAI uses that constrained rate list. The codec
 driver is therefore not the present 192 kHz limitation.
 
-The proprietary primary HAL still hard-codes built-in primary/deep/raw/MMAP
-use cases to 48000 Hz. The additive research HAL instead owns PCM0,D0 stereo
-S32 at 192 kHz. The qualified physical transport uses
+The stock proprietary primary HAL hard-coded built-in primary and deep-buffer
+speaker use cases to 48000 Hz and separate D1/D5 frontends. In the selected
+PowerPhone image, an exact-binary guarded patch advertises those two use cases
+as stereo S32 at 192 kHz with 1,920-by-two geometry before AudioFlinger creates
+its playback threads, maps D1/D5 `pcm_open` calls to D0, and a paired guarded
+mixer-route patch sends them through source 0 / EP1. Ordinary client streams
+remain free to use common rates such as 48 kHz; AudioFlinger performs the
+explicit resampling into the fixed 192 kHz HAL stream. Other primary-HAL use
+cases, including calls, capture, Bluetooth, raw, and MMAP, retain their stock
+configuration.
+
+The additive research HAL also owns PCM0,D0 stereo S32 at 192 kHz. The
+qualified physical transport uses
 `experimental-enum7-q192-tdm12288-192-2xs32-dma-source0`: native 192-frame
 AoC jobs, two S32 slots at 12.288 MHz, and a 1,920-by-two ALSA buffer whose
 15,360-byte periods match the observed D0 physical ring. Its boot helper must
@@ -113,8 +125,12 @@ measurement is still required.
 
 The native-q192 transport passed the stricter wall-time gate on 2026-09-04.
 The final kernel/geometry pair completed a ten-second physical-speaker stream
-and concurrent D10 transport at native cadence. The exact kernel is the
-one-period-lag profile SHA-256
+and concurrent D10 transport at native cadence. The exact final
+`aoc_alsa_dev_util.ko`, including the orthogonal EP6 192 kHz admission word,
+has SHA-256
+`398eaca28da2d97431b1398b5df93e34e594389fa691616416354b4705bde4e3`.
+With that EP6 word normalized to stock, the underlying one-period-lag profile
+has SHA-256
 `37cc7ff81bf9804677699d612621ed75a177597e773709ec54924916811818e6`.
 An independently calibrated Nyquist-domain acoustic measurement remains
 required before claiming usable 96 kHz acoustic bandwidth.
@@ -224,8 +240,8 @@ semantics.
 
 ## Build selection
 
-The three feature selections are strict booleans, while D0 progress and signed
-AoC firmware are explicit enum profiles. All five values must remain identical
+Five feature selections are strict booleans, while D0 progress and signed AoC
+firmware are explicit enum profiles. All seven values must remain identical
 across vendor sanitization, attestation, build, and packaging:
 
 - `POWERPHONE_AOC_ALSA_192K=true` selects the complete D10-capture plus
@@ -238,8 +254,11 @@ across vendor sanitization, attestation, build, and packaging:
   `fc990edad9b77b2bb96cd222f6a07503dc12247804c498a769d0436b5cb61cd0`.
   `POWERPHONE_D0_PROGRESS_MODE=one-period-lag` is the publishable PowerPhone
   selection. It retains the real mailbox plus 1 ms hardware-counter poll and
-  reports `max(previous, actual minus one physical period)`, SHA-256
+  reports `max(previous, actual minus one physical period)`. Its normalized
+  base SHA-256 (before the orthogonal EP6 admission bit) is
   `37cc7ff81bf9804677699d612621ed75a177597e773709ec54924916811818e6`.
+  The exact combined module selected by the final image has SHA-256
+  `398eaca28da2d97431b1398b5df93e34e594389fa691616416354b4705bde4e3`.
   That exact profile passed native-q192 physical-speaker and simultaneous D10
   transport at nominal cadence; selecting it is still not acoustic qualification.
   The same flag selects the required paired `aoc_core.ko`
@@ -258,6 +277,11 @@ across vendor sanitization, attestation, build, and packaging:
 - `POWERPHONE_CS35L43_192K=true` changes only the exact stock CS35L43
   ultrasonic GLOBAL_FS immediate from 48 to 96 kHz; its exact SHA-256 is
   `fc631fc227ab2e7e8cfa2d664e97ac7cca4c14324fb2a39479fc8e79aa358a3a`.
+- `POWERPHONE_D5_TIMER=false` retains the qualified real-mailbox D5 behavior;
+  the timer variant is an experiment, not part of the published profile.
+- `POWERPHONE_PRIMARY_HAL_192K=true` selects the guarded proprietary-primary
+  HAL and mixer-route transforms which keep ordinary primary/deep physical
+  playback at a fixed 192 kHz hardware rate.
 
 Example:
 
@@ -265,6 +289,8 @@ Example:
 export PIXEL_TARGET=frankel
 export POWERPHONE_AOC_ALSA_192K=true
 export POWERPHONE_D0_PROGRESS_MODE=one-period-lag
+export POWERPHONE_D5_TIMER=false
+export POWERPHONE_PRIMARY_HAL_192K=true
 export POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock
 export POWERPHONE_AUDIO_SIDECAR=true
 export POWERPHONE_CS35L43_192K=true

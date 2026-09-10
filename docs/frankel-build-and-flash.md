@@ -204,6 +204,8 @@ sanitizer/attestation refresh) and every build invocation:
 export PIXEL_TARGET=frankel
 export POWERPHONE_AOC_ALSA_192K=true
 export POWERPHONE_D0_PROGRESS_MODE=one-period-lag
+export POWERPHONE_D5_TIMER=false
+export POWERPHONE_PRIMARY_HAL_192K=true
 export POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock
 export POWERPHONE_AUDIO_SIDECAR=true
 export POWERPHONE_CS35L43_192K=true
@@ -218,7 +220,7 @@ scripts/attest-generated-vendor.sh create
 BUILD_JOBS="$(nproc)" scripts/build-device.sh
 ```
 
-If the generated-vendor attestation already describes the exact same five
+If the generated-vendor attestation already describes the exact same seven
 selection values and reviewed helper sources, omit the two refresh commands.
 Never reuse an attestation from another profile (for example, `mailbox`):
 `build-device.sh` intentionally verifies rather than silently replacing it.
@@ -232,8 +234,11 @@ to one already-consumed period per notification and has SHA-256
 `fc990edad9b77b2bb96cd222f6a07503dc12247804c498a769d0436b5cb61cd0`;
 the publishable PowerPhone selection `one-period-lag` combines the real mailbox
 counter with the 1 ms real-counter poll and reports
-`max(previous, actual minus one physical period)`. It has SHA-256
-`37cc7ff81bf9804677699d612621ed75a177597e773709ec54924916811818e6`.
+`max(previous, actual minus one physical period)`. With the orthogonal EP6
+rate-admission word normalized to stock, it has SHA-256
+`37cc7ff81bf9804677699d612621ed75a177597e773709ec54924916811818e6`;
+the final combined module with EP6 192 kHz admission has SHA-256
+`398eaca28da2d97431b1398b5df93e34e594389fa691616416354b4705bde4e3`.
 That exact module streamed a complete ten-second native-q192 physical-speaker
 payload with a 1,920-by-two ring and 1,920-frame start threshold, and the same
 geometry remained stable while D10 transport ran concurrently.
@@ -264,7 +269,11 @@ attestation before the build. `POWERPHONE_CS35L43_192K=true`
 selects the exact stock CS35L43 module with its ultrasonic GLOBAL_FS immediate
 changed from 48 to 96 kHz (SHA-256
 `fc631fc227ab2e7e8cfa2d664e97ac7cca4c14324fb2a39479fc8e79aa358a3a`).
-Pass the same five selection values to
+`POWERPHONE_D5_TIMER=false` retains the real-mailbox D5 implementation used by
+the published profile. `POWERPHONE_PRIMARY_HAL_192K=true` selects the guarded
+primary-HAL and mixer-route transforms: primary/deep speaker streams are
+advertised at 192 kHz with 1,920-by-two geometry and D1/D5 opens are redirected
+to the qualified D0/source-0 path. Pass the same seven selection values to
 `scripts/package-device.sh`, whose completion-attestation verification
 rechecks the selected generated tree. Neither a successful build nor the
 presence of 192000 in ALSA constraints is physical bandwidth evidence.
@@ -329,6 +338,8 @@ sanitize, attest, and build it:
 ```bash
 POWERPHONE_AOC_ALSA_192K=true \
 POWERPHONE_D0_PROGRESS_MODE=one-period-lag \
+POWERPHONE_D5_TIMER=false \
+POWERPHONE_PRIMARY_HAL_192K=true \
 POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock \
 POWERPHONE_AUDIO_SIDECAR=true \
 POWERPHONE_CS35L43_192K=true \
@@ -358,7 +369,7 @@ The default stock-audio build is published at:
 artifacts/frankel/device/
 ```
 
-The all-three-flags PowerPhone build is instead published at:
+The exact PowerPhone profile is instead published at:
 
 ```text
 artifacts/frankel/powerphone/
@@ -369,7 +380,8 @@ A partial-selection research build uses a distinct
 from the same explicit flags that the attestation verifies, so a research
 package cannot replace the boot-qualified baseline. `BUNDLE_INFO.txt` records
 `bundle_profile`, `powerphone_aoc_alsa_192k`,
-`powerphone_d0_progress_mode`, `powerphone_signed_aoc_firmware_profile`,
+`powerphone_d0_progress_mode`, `powerphone_d5_timer`,
+`powerphone_primary_hal_192k`, `powerphone_signed_aoc_firmware_profile`,
 `powerphone_audio_sidecar`, and `powerphone_cs35l43_192k`.
 
 It contains:

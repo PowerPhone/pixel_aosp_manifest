@@ -16,6 +16,39 @@ external-instrument qualification.
   `0 -> 0`
 - AoC firmware: exact OEM-signed stock image; the retained unsigned cold image
   is an offline decompilation artifact and is not installed or packaged
+- AoC ALSA module SHA-256:
+  `398eaca28da2d97431b1398b5df93e34e594389fa691616416354b4705bde4e3`
+
+## Exact packaged-image reflash
+
+The final profile was built, attested, packaged at
+`artifacts/frankel/powerphone/`, and flashed to physical slot A with the bundled
+`flash-all.sh`. Root `vbmeta` was written with verity and verification disabled.
+The cold boot reached `phase=complete` on certification attempt 1 with PDM and
+speaker readiness both `1`; primary HAL, PowerPhone HAL, and audioserver were
+running under enforcing SELinux. The installed proprietary primary HAL SHA-256
+was `30d91d73f466f01be26794d917910304bcdc943f2a77b2e203a8be9e63a40342`.
+
+The post-flash API suite under
+`../csr460-powerphone/device-test-results/flashed-fixed-primary192-20260910T1554Z/`
+passed nine of ten runs in one continuous matrix. The remaining AAudio MIC2
+run transferred all 960,000 frames at reported mono S16/192 kHz with zero
+xruns, but missed the suite's strict timestamp-derived-rate threshold. An
+immediate eight-second isolated retry under
+`../csr460-powerphone/device-test-results/flashed-fixed-primary192-mic2-retry-20260910T1557Z/`
+passed: 1,536,000 of 1,536,000 frames, mono S16/192 kHz, zero xruns, derived
+191144.132 Hz, and stable AoC restart/coredump counters at 0/0. Thus every one
+of the ten endpoint/API combinations has passing evidence on the exact flashed
+image, while the evidence is transparently split across the matrix and retry.
+
+Normal Android playback was separately verified under
+`../csr460-powerphone/device-test-results/flashed-stock48-to-primary192-retry-20260910T1559Z/`.
+An ordinary 48 kHz stereo PCM16 `AudioTrack` played all 384,000 frames in
+8.254 seconds with zero underruns. During the run, the selected deep-buffer HAL
+stream reported stereo 192 kHz with 1,920-frame periods and the route was the
+physical built-in speaker; AudioFlinger supplied the rate conversion. AoC
+restart/coredump counters remained 0/0. This verifies that the fixed high-rate
+physical transport does not require ordinary apps to request 192 kHz.
 
 The selected F1 speaker table has 46 words: 24 code-cave words followed by 22
 hook words. The two existing AudioEntrypoint getters at `0x403f03ac` and
@@ -60,7 +93,9 @@ The exact retained WAV files are under
 
 ## Android API matrix
 
-All ten runs passed:
+All ten endpoint/API combinations passed on the exact flashed image as
+described above. An earlier integrated-system run also completed the matrix in
+one contiguous suite:
 
 | Physical/logical route | Java API | Native API | Observed hardware format |
 | --- | --- | --- | --- |
@@ -70,10 +105,11 @@ All ten runs passed:
 | logical microphone 1 | AudioRecord UNPROCESSED | AAudio input | S16 mono, 192000 Hz |
 | logical microphone 2 | AudioRecord UNPROCESSED | AAudio input | S16 mono, 192000 Hz |
 
-Each run required the exact BUS address and device ID, full frame transfer,
+Each pass required the exact BUS address and device ID, full frame transfer,
 live 192 kHz HAL/hardware geometry, zero framework underrun or HAL xrun, and
 stable AoC generation. Evidence is retained in
-`work/audio-research/frankel/final-inplace-getters-stock-a32-20260905/api-suite-paired-restart/`.
+`work/audio-research/frankel/final-inplace-getters-stock-a32-20260905/api-suite-paired-restart/`;
+the final flashed-image evidence paths are listed in the packaged-image section.
 
 After host-owned direct tinyALSA, restart the sidecar and audioserver as a pair:
 

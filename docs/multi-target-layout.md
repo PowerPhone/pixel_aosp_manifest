@@ -127,7 +127,7 @@ logs/build-frankel.log
 artifacts/gsi/                                  legacy Cubs-bound GSI bundle
 artifacts/cubs/                                 Cubs complete-device bundle
 artifacts/frankel/device/                       Frankel baseline device bundle
-artifacts/frankel/powerphone/                   Frankel three-flag research bundle
+artifacts/frankel/powerphone/                   Frankel exact-profile research bundle
 artifacts/frankel/experimental-*/               Frankel partial-selection experiments
 
 .cache/recovery-anchor/                        legacy Cubs-only private state
@@ -142,7 +142,9 @@ selections: packaging publishes `powerphone` only when
 `POWERPHONE_AOC_ALSA_192K=true`, `POWERPHONE_AUDIO_SIDECAR=true`, and
 `POWERPHONE_CS35L43_192K=true` are all selected with the hardware-qualified
 `POWERPHONE_D0_PROGRESS_MODE=one-period-lag` and
-`POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock`. Any nonempty partial selection
+`POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock`, plus
+`POWERPHONE_D5_TIMER=false` and `POWERPHONE_PRIMARY_HAL_192K=true`. Any
+nonempty partial selection
 or other D0/firmware profile
 uses a distinct `experimental-powerphone-*` directory. None of those paths can
 replace the baseline `device` bundle. The download and attestation roots are

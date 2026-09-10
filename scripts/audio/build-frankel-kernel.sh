@@ -23,6 +23,8 @@ module="$source_dir/vendor/google_devices/frankel/stock-kernel/aoc_alsa_dev_util
 patcher="$project_root/tools/audio/patch_frankel_aoc_192k.py"
 d0_progress_patcher="$project_root/tools/audio/patch_frankel_aoc_d0_progress_mode.py"
 d0_progress_mode=${POWERPHONE_D0_PROGRESS_MODE:-${AUDIO_D0_PROGRESS_MODE:-mailbox}}
+d5_timer_patcher="$project_root/tools/audio/patch_frankel_aoc_pcm_d5_timer_mode.py"
+d5_timer=${POWERPHONE_D5_TIMER:-false}
 firmware="$source_dir/vendor/google_devices/frankel/proprietary/vendor/firmware/aoc.bin"
 firmware_patcher="$project_root/tools/audio/patch_frankel_aoc_firmware_speaker_192k.py"
 case ${AUDIO_PATCH_SIGNED_AOC_FIRMWARE:-false} in
@@ -60,6 +62,13 @@ case "$d0_progress_mode" in
   mailbox|pure-timer|one-period-lag) ;;
   *) die "POWERPHONE_D0_PROGRESS_MODE must be mailbox, pure-timer, or one-period-lag" ;;
 esac
+case "$d5_timer" in
+  true|false) ;;
+  *) die "POWERPHONE_D5_TIMER must be true or false" ;;
+esac
+if [[ "$d5_timer" == true && "$d0_progress_mode" != one-period-lag ]]; then
+  die "POWERPHONE_D5_TIMER=true currently requires POWERPHONE_D0_PROGRESS_MODE=one-period-lag"
+fi
 if [[ -n ${AUDIO_KERNEL_RESULT_DIR:-} ]]; then
   result_dir=$AUDIO_KERNEL_RESULT_DIR
 elif [[ "$patch_signed_firmware" == true && "$d0_progress_mode" != mailbox ]]; then
@@ -79,17 +88,22 @@ assert_inside_work "$result_dir"
 require_file "$module"
 require_file "$patcher"
 require_file "$d0_progress_patcher"
+require_file "$d5_timer_patcher"
 require_file "$vbmeta_anchor"
 require_file "$avb_key"
 [[ -x "$patcher" && ! -L "$patcher" && \
-   -x "$d0_progress_patcher" && ! -L "$d0_progress_patcher" ]] || \
+   -x "$d0_progress_patcher" && ! -L "$d0_progress_patcher" && \
+   -x "$d5_timer_patcher" && ! -L "$d5_timer_patcher" ]] || \
   die "audio module patch helpers must be safe executable files"
 verify_sha256 \
   1c96487c0cfa3505f881824adbb084126bbf30eaafc7e8346d8818f2625b5e1d \
   "$patcher"
 verify_sha256 \
-  fad4debd25f63466511109da5dce014cc6ef9be35b15e4812ce589e578f0facd \
+  3deb57c943d0015b410aac8fdf2611b8569f0af378b0e1cb22e059f82115198a \
   "$d0_progress_patcher"
+verify_sha256 \
+  1ed1d9507155587b554ca3031a6882e5f4bcb9beaf1923dec93ea0496b32a987 \
+  "$d5_timer_patcher"
 if [[ "$patch_signed_firmware" == true ]]; then
   require_file "$firmware"
   require_file "$firmware_patcher"
@@ -103,6 +117,12 @@ fi
 temporary_dir=$(mktemp -d "$project_root/work/audio-research/frankel/.kernel-build.XXXXXX")
 backup="$temporary_dir/aoc_alsa_dev_util.ko.input"
 cp -a -- "$module" "$backup"
+# Normalize the optional D5 selector before changing the overlapping D0
+# implementation. Stock and non-one-period-lag inputs are expected to be
+# unrecognized by this deliberately narrow helper.
+if "$d5_timer_patcher" --check enabled "$module" >/dev/null 2>&1; then
+  "$d5_timer_patcher" --set-state disabled --in-place "$module"
+fi
 module_input_state=
 if "$patcher" --check stock "$module" >/dev/null 2>&1; then
   module_input_state=stock
@@ -141,6 +161,12 @@ if [[ "$module_input_state" != "$d0_progress_mode" ]]; then
   "$d0_progress_patcher" --set-state "$d0_progress_mode" --in-place "$module"
 fi
 "$d0_progress_patcher" --check "$d0_progress_mode" "$module"
+if [[ "$d5_timer" == true ]]; then
+  "$d5_timer_patcher" --set-state enabled --in-place "$module"
+  "$d5_timer_patcher" --check enabled "$module"
+elif [[ "$d0_progress_mode" == one-period-lag ]]; then
+  "$d5_timer_patcher" --check disabled "$module"
+fi
 if [[ "$patch_signed_firmware" == true ]]; then
   "$firmware_patcher" --profile "$firmware_profile" --check stock "$firmware"
   cp -a -- "$firmware" "$firmware_backup"
@@ -179,6 +205,11 @@ m -j"$jobs" "${build_targets[@]}"
 installed_module="$product_out/vendor_kernel_ramdisk/lib/modules/aoc_alsa_dev_util.ko"
 require_file "$installed_module"
 "$d0_progress_patcher" --check "$d0_progress_mode" "$installed_module"
+if [[ "$d5_timer" == true ]]; then
+  "$d5_timer_patcher" --check enabled "$installed_module"
+elif [[ "$d0_progress_mode" == one-period-lag ]]; then
+  "$d5_timer_patcher" --check disabled "$installed_module"
+fi
 require_file "$product_out/vendor_kernel_boot.img"
 require_file "$avbtool"
 
@@ -236,6 +267,10 @@ fi
   printf 'd0_progress_patcher=%s\n' "$d0_progress_patcher"
   printf 'd0_progress_patcher_sha256=%s\n' \
     "$(sha256sum "$d0_progress_patcher" | awk '{print $1}')"
+  printf 'd5_timer=%s\n' "$d5_timer"
+  printf 'd5_timer_patcher=%s\n' "$d5_timer_patcher"
+  printf 'd5_timer_patcher_sha256=%s\n' \
+    "$(sha256sum "$d5_timer_patcher" | awk '{print $1}')"
   printf 'signed_aoc_firmware_patch=%s\n' "$patch_signed_firmware"
   printf 'signed_aoc_firmware_profile=%s\n' "$firmware_profile"
   if [[ "$patch_signed_firmware" == true ]]; then
