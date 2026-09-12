@@ -11,7 +11,8 @@ readonly d5_frontend_channels=2
 readonly d5_frontend_sample_bytes=4
 readonly d5_ring_bytes=32768
 readonly d5_vendor_build_id=CP2A.260805.005
-readonly d5_live_profile=experimental-enum7-early-q48-tdm12288-192-4xs16-dma-source5
+readonly d5_live_profile=experimental-enum7-q192-tdm12288-192-2xs32-dma-source5
+readonly d5_staged_player=/vendor/bin/frankel_aoc_staged_play
 # shellcheck disable=SC2154 # Defined by sourced common.sh.
 readonly d5_live_patcher="$frankel_audio_project_root/tools/audio/patch_frankel_aoc_live_speaker_192k.py"
 
@@ -39,8 +40,8 @@ Required:
   --endpoint ENDPOINT        earpiece or bottom (one amplifier only).
 
 Optional:
-  --period-size FRAMES       Frames per period (default: 512).
-  --period-count N           Periods in the ALSA buffer (default: 8).
+  --period-size FRAMES       Frames per period (default: 192).
+  --period-count N           Periods in the ALSA buffer (default: 20).
   --amp-gain RAW             Both CS35L43 raw Amp Gain controls, 0..20
                              (default: 0).
   --skip-live-patch-check    Deliberately skip the guarded AoC profile
@@ -52,8 +53,10 @@ Optional:
 
 This is a Frankel-only direct tinyALSA research wrapper. It opens PCM 0,5
 (EP6/source 5) as 192000 Hz, two-channel S32_LE and configures TDM_0_RX as a
-four-channel/four-slot S16_LE backend. The default 512x8 frontend buffer is
-exactly 32768 bytes. Use 480x8 as the 48-frame-AoC-quantum-aligned alternative.
+two-channel/two-slot S32_LE backend. The default 192x20 frontend buffer is
+30,720 bytes, below the observed 32,768-byte audio_playback5 ring. Playback
+uses FIFO/90 and prefills the entire ring; 1 ms mailbox periods replenish it
+without the intermittent xruns observed with 10 ms periods.
 
 The wrapper records the initial state of audioserver, vendor.audio-hal-aidl,
 and vendor.audio-hal-powerphone, stops all three before touching the route,
@@ -64,14 +67,14 @@ Unless --skip-live-patch-check is given, the named live speaker profile must
 already be uniformly patched. That profile's configureMixer guard must target
 source bitmap bit 5; a source-14/PCM0,D28 profile is not sufficient. The
 running kernel must also expose 192 kHz on EP6 and provide working D5 period
-progress (the D5-specific timer experiment).
+real-mailbox progress.
 USAGE
 }
 
 file=
 endpoint=
-period_size=512
-period_count=8
+period_size=192
+period_count=20
 amp_gain=0
 skip_live_patch_check=false
 
@@ -126,9 +129,9 @@ d5_buffer_bytes=$((period_size * period_count *
 (( d5_buffer_bytes <= d5_ring_bytes )) || \
   frankel_audio_die \
     "D5 buffer is ${d5_buffer_bytes}B; the observed audio_playback5 ring is ${d5_ring_bytes}B"
-if (( period_size % 48 != 0 )); then
+if (( period_size % 192 != 0 )); then
   frankel_audio_note \
-    "period-size $period_size is not aligned to the live profile's 48-frame AoC quantum (480x8 is the aligned alternative)"
+    "period-size $period_size is not aligned to the live profile's 192-frame AoC quantum"
 fi
 [[ "$amp_gain" =~ ^[0-9]+$ ]] || \
   frankel_audio_die "raw amp gain must be a non-negative integer"
@@ -363,24 +366,29 @@ frankel_audio_adb push "$file" "$remote_file" >/dev/null
 frankel_audio_remote_exec chmod 0644 "$remote_file"
 
 # Keep the route and amps off until every bus and codec setting is complete.
-# D5 remains stereo/S32 at the ALSA frontend; these controls describe the
-# four-channel, four-S16-slot physical backend proven by the live log.
+# D5 remains stereo/S32 at the ALSA frontend. The native-q192 AoC profile
+# drives the physical backend as two S32 slots at 12.288 MHz.
+frankel_audio_snapshot_and_set_scalar 'AoC Speaker Mixer ASP Mode' ASP_BYPASS
 frankel_audio_snapshot_and_set_scalar 'TDM_0_RX Sample Rate' SR_192K
-frankel_audio_snapshot_and_set_scalar 'TDM_0_RX Format' S16_LE
-frankel_audio_snapshot_and_set_scalar 'TDM_0_RX Chan' Four
-frankel_audio_snapshot_and_set_scalar 'TDM_0_RX nSlot' Four
-frankel_audio_snapshot_and_set_scalar 'TDM_0_RX SlotFmt' S16_LE
+frankel_audio_snapshot_and_set_scalar 'TDM_0_RX Format' S32_LE
+frankel_audio_snapshot_and_set_scalar 'TDM_0_RX Chan' Two
+frankel_audio_snapshot_and_set_scalar 'TDM_0_RX nSlot' Two
+frankel_audio_snapshot_and_set_scalar 'TDM_0_RX SlotFmt' S32_LE
 for prefix in '' 'R '; do
   frankel_audio_snapshot_and_set_scalar "${prefix}DSP RX1 Source" ASPRX1
   frankel_audio_snapshot_and_set_scalar "${prefix}DSP RX2 Source" ASPRX1
   frankel_audio_snapshot_and_set_scalar "${prefix}PCM Source" ASPRX1
   frankel_audio_snapshot_and_set_scalar \
-    "${prefix}High Rate PCM Source" ASPRX1
+    "${prefix}High Rate PCM Source" Zero
   frankel_audio_snapshot_and_set_scalar "${prefix}Amp Gain" "$amp_gain"
 done
+case "$endpoint" in
+  earpiece) frankel_audio_snapshot_and_set_scalar 'Digital PCM Volume' 817 ;;
+  bottom) frankel_audio_snapshot_and_set_scalar 'R Digital PCM Volume' 817 ;;
+esac
 
-frankel_audio_tinymix_set 'Ultrasonic Mode' 'In Band'
-frankel_audio_tinymix_set 'R Ultrasonic Mode' 'In Band'
+frankel_audio_tinymix_set 'Ultrasonic Mode' Disabled
+frankel_audio_tinymix_set 'R Ultrasonic Mode' Disabled
 frankel_audio_tinymix_set 'TDM_0_RX Mixer EP6' 1
 case "$endpoint" in
   earpiece)
@@ -394,21 +402,22 @@ esac
 # Read back every value that distinguishes this route from D28/US and from the
 # stock four-S32-slot speaker backend before exposing a powered transducer to
 # PCM data.
+frankel_audio_require_control_value 'AoC Speaker Mixer ASP Mode' ASP_BYPASS
 frankel_audio_require_control_value 'TDM_0_RX Sample Rate' SR_192K
-frankel_audio_require_control_value 'TDM_0_RX Format' S16_LE
-frankel_audio_require_control_value 'TDM_0_RX Chan' Four
-frankel_audio_require_control_value 'TDM_0_RX nSlot' Four
-frankel_audio_require_control_value 'TDM_0_RX SlotFmt' S16_LE
+frankel_audio_require_control_value 'TDM_0_RX Format' S32_LE
+frankel_audio_require_control_value 'TDM_0_RX Chan' Two
+frankel_audio_require_control_value 'TDM_0_RX nSlot' Two
+frankel_audio_require_control_value 'TDM_0_RX SlotFmt' S32_LE
 d5_require_control_one 'TDM_0_RX Mixer EP6'
 frankel_audio_require_control_zero 'TDM_0_RX Mixer US'
-frankel_audio_require_control_value 'Ultrasonic Mode' 'In Band'
-frankel_audio_require_control_value 'R Ultrasonic Mode' 'In Band'
+frankel_audio_require_control_value 'Ultrasonic Mode' Disabled
+frankel_audio_require_control_value 'R Ultrasonic Mode' Disabled
 for prefix in '' 'R '; do
   frankel_audio_require_control_value "${prefix}DSP RX1 Source" ASPRX1
   frankel_audio_require_control_value "${prefix}DSP RX2 Source" ASPRX1
   frankel_audio_require_control_value "${prefix}PCM Source" ASPRX1
   frankel_audio_require_control_value \
-    "${prefix}High Rate PCM Source" ASPRX1
+    "${prefix}High Rate PCM Source" Zero
   frankel_audio_require_control_value "${prefix}Amp Gain" "$amp_gain"
 done
 case "$endpoint" in
@@ -427,18 +436,26 @@ esac
 d5_services_are_stopped || \
   frankel_audio_die "an audio service restarted during D5 route setup"
 frankel_audio_note \
-  "playing PCM 0,5: endpoint=$endpoint frontend=192000/s32/2ch backend=192000/s16/4ch/4slot periods=${period_size}x${period_count}"
+  "playing PCM 0,5: endpoint=$endpoint frontend=192000/s32/2ch backend=192000/s32/2ch/2slot periods=${period_size}x${period_count}"
 set +e
-playback_output=$(frankel_audio_run_guarded /system/bin/tinyplay "$remote_file" \
-  -D "$FRANKEL_AUDIO_CARD" -d "$d5_playback_device" \
-  -p "$period_size" -n "$period_count" 2>&1)
+d5_playback_started_ns=$(date +%s%N)
+playback_output=$(frankel_audio_run_guarded /system/bin/chrt -f 90 "$d5_staged_player" \
+  --card "$FRANKEL_AUDIO_CARD" --device "$d5_playback_device" \
+  --rate 192000 --channels "$d5_frontend_channels" --format s32 \
+  --period-size "$period_size" --period-count "$period_count" \
+  --start-threshold "$((period_size * period_count))" --rw-efault-retries 32 \
+  --rw-efault-sleep-us 1000 --route-control 'TDM_0_RX Mixer EP6' \
+  --access rw "$remote_file" 2>&1)
 playback_status=$?
+d5_playback_finished_ns=$(date +%s%N)
 set -e
 printf '%s\n' "$playback_output"
+frankel_audio_note \
+  "staged playback wall time: $((d5_playback_finished_ns - d5_playback_started_ns)) ns"
 (( playback_status == 0 )) || \
-  frankel_audio_die "tinyplay/ADB exited with status $playback_status"
+  frankel_audio_die "staged player/ADB exited with status $playback_status"
 if [[ "$playback_output" =~ [Uu]nable|[Ee]rror|only[[:space:]]supports ]]; then
-  frankel_audio_die "tinyplay reported a PCM error"
+  frankel_audio_die "staged player reported a PCM error"
 fi
 d5_services_are_stopped || \
   frankel_audio_die "an audio service restarted during D5 playback"

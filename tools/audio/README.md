@@ -7,10 +7,16 @@ dumps, and live-run logs belong below ignored `work/` paths, normally
 
 ## Current speaker qualification and offline inspection
 
-192 kHz physical speaker output is not qualified. The later real-device
-rate-only trials and complete firmware inspection supersede any older
-transport-only interpretation below. See
-[the current findings](../../docs/frankel-speaker-firmware-findings-20260905.md).
+For the September 11 primary Android playback profile, migration commands,
+and its actual hardware qualification boundary, see
+[primary 192-kHz playback](frankel_primary_playback_192k.md). It includes
+independent 960-frame framework / 192-frame ALSA geometry, the scoped FIFO/90
+writer, and the optional research-image idle-residency policy.
+
+The older firmware-analysis and intermediate profiles below are historical;
+they are not a declaration that every path or final packaged image has passed.
+The September 5 source inspection is retained in
+[the earlier findings](../../docs/frankel-speaker-firmware-findings-20260905.md).
 
 `extract_frankel_aoc_analysis.py` extracts the reviewed stock container's
 shared and external code regions into local analysis files. It performs no

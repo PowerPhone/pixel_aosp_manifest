@@ -4,9 +4,9 @@
 translation of
 [`patch_frankel_aoc_live_speaker_192k.py`](../../patch_frankel_aoc_live_speaker_192k.py).
 The native model selects Python profile
-`experimental-enum7-q192-tdm12288-192-2xs32-dma-source0`, then replaces both
+`experimental-enum7-q192-tdm12288-192-2xs32-dma-source5`, then replaces both
 existing `AudioEntrypoint` quantum getters in place. It selects
-EP1/source bitmap bit 0, 192-frame firmware jobs, a 12.288 MHz two-slot S32 TDM
+EP6/source bitmap bit 5, 192-frame firmware jobs, a 12.288 MHz two-slot S32 TDM
 bus, and 1920-frame source pulls. Before connecting those F1 hooks, it creates
 one aligned 0x3000-byte live allocation, splits it into four guarded 0xc00-byte
 speaker banks, and installs a conditional H0 AMixSPKR geometry hook. The hook
@@ -28,16 +28,16 @@ prebuilt binary is authoritative.
 ## Safety contract
 
 The executable requires real and effective UID 0 and proves the exact ALSA
-identity `00-00: EP1 playback (*) :  : playback 1` in
-`/proc/asound/pcm`. `/dev/snd/pcmC0D0p` must be a direct character-device
-node with the reviewed dynamic device number `116:2`. It then walks every numeric
+identity `00-05: EP6 playback (*) :  : playback 1` in
+`/proc/asound/pcm`. `/dev/snd/pcmC0D5p` must be a direct character-device
+node with the reviewed dynamic device number `116:7`. It then walks every numeric
 `/proc/<pid>/fd` directory as root, follows every numeric fd with `fstatat`,
 and refuses any fd whose `st_rdev` equals that playback node. A vanished PID
 or fd is accepted only when the operation reports `ENOENT`; permission,
 directory-read, stat, unexpected-entry, and close errors are fatal because
 they make the ownership scan incomplete.
 
-Frankel removes `/proc/asound/card0/pcm0p/sub0/status` while PCM0 is closed.
+Frankel removes `/proc/asound/card0/pcm5p/sub0/status` while PCM5 is closed.
 If the status file exists, its trimmed content must be exactly `closed`; an
 `ENOENT` is accepted only together with the exact inventory/node checks and
 the complete root fd scan. Those checks are repeated across the 250 ms
@@ -215,7 +215,7 @@ clang++ -std=c++20 -Wall -Wextra -Werror -fsyntax-only \
 ## Manual use
 
 Restart adbd as root on the reviewed userdebug build, push the target binary
-to a transient path, and invoke it directly while all PCM 0,0/EP1 speaker
+to a transient path, and invoke it directly while all PCM 0,5/EP6 speaker
 playback is stopped. `apply` additionally requires the installed firmware to
 be the exact stock CP2A.260805.005 image; it installs the F1 profile and any
 eligible guarded allocator change only in reboot-volatile SRAM. This workflow does not

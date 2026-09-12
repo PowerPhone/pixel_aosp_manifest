@@ -12,12 +12,12 @@
 
 namespace frankel_aoc_speaker_patch {
 
-constexpr std::size_t kPatchCount = 46;
-// The native-q192 SOURCE0 profile begins with every unreachable code-cave
-// word. All reachable hooks follow and the source-0 activation hook is last.
-constexpr std::size_t kCavePatchCount = 24;
-constexpr std::size_t kHookPatchCount = 22;
-constexpr std::size_t kUnselectedStockWordCount = 32;
+constexpr std::size_t kPatchCount = 75;
+// The native-q192 SOURCE5 profile begins with every unreachable code-cave
+// word. All reachable hooks follow and the source-5 activation hook is last.
+constexpr std::size_t kCavePatchCount = 44;
+constexpr std::size_t kHookPatchCount = 31;
+constexpr std::size_t kUnselectedStockWordCount = 37;
 constexpr uint16_t kCommandMemorySet = 0x25;
 constexpr uint16_t kCommandMemoryDump = 0x26;
 constexpr int32_t kF1Core = 2;
@@ -136,8 +136,8 @@ bool ParseMemoryDump(std::string_view debug_output, uint32_t address,
 bool ParseUnsignedDecimal(std::string_view value, uint64_t* result,
                           std::string* error);
 
-// Require the one exact ALSA inventory entry reviewed for Frankel's EP1
-// source-0 playback PCM. A same-numbered entry with a different name,
+// Require the one exact ALSA inventory entry reviewed for Frankel's EP6
+// source-5 playback PCM. A same-numbered entry with a different name,
 // direction, or substream count is not an acceptable ownership target.
 bool ValidatePlaybackPcmInventory(std::string_view inventory,
                                   std::string* error);

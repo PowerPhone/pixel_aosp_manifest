@@ -14,9 +14,9 @@ namespace {
 
 constexpr uint8_t kDataTypeCommand = 0;
 constexpr std::size_t kHeaderSize = 8;
-constexpr std::string_view kPlaybackPcmPrefix = "00-00:";
+constexpr std::string_view kPlaybackPcmPrefix = "00-05:";
 constexpr std::string_view kExpectedPlaybackPcm =
-    "00-00: EP1 playback (*) :  : playback 1";
+    "00-05: EP6 playback (*) :  : playback 1";
 
 void AppendLe16(std::vector<uint8_t>* output, uint16_t value) {
   output->push_back(static_cast<uint8_t>(value));
@@ -69,9 +69,9 @@ bool IsHorizontalSpace(char character) {
 const std::array<Patch, kPatchCount>& Patches() {
   // These are the complete aligned words reviewed for exactly
   // ro.vendor.build.id=CP2A.260805.005. Their order is part of the safety
-  // contract: every cave precedes every live hook. This is exactly Python's
-  // hardware-proven native-q192, source-0, two-S32-slot profile, including
-  // both in-place AudioEntrypoint getter replacements. Do not add the retired
+  // contract: every cave precedes every live hook. This is the native-q192,
+  // source-5, two-S32-slot, one-millisecond profile, including both in-place AudioEntrypoint
+  // getter replacements. Do not add the retired
   // getter vtable redirects: real boot integration reached their zero-filled
   // cave as an illegal instruction during D0 PREPARE.
   static constexpr std::array<Patch, kPatchCount> kPatches = {{
@@ -105,40 +105,45 @@ const std::array<Patch, kPatchCount>& Patches() {
        {0x00, 0x00, 0x00, 0x00},
        {0xe1, 0x02, 0x00, 0x00},
        PatchKind::kCave},
-      {"speaker source-0 q192 guard cave B word 0",
+      {"speaker source-5 q192 guard cave B word 0",
        0x4039d520,
        {0x6b, 0x00, 0x00, 0x00},
        {0x6b, 0x82, 0x14, 0x32},
        PatchKind::kCave},
-      {"speaker source-0 q192 guard cave B word 1",
+      {"speaker source-5 q192 guard cave B word 1",
        0x4039d524,
        {0x00, 0x00, 0x00, 0x00},
        {0x72, 0x23, 0xda, 0x28},
        PatchKind::kCave},
-      {"speaker source-0 q192 guard cave B word 2",
+      {"speaker source-5 q192 guard cave B word 2",
        0x4039d528,
        {0x00, 0x00, 0x00, 0x00},
-       {0x41, 0xcc, 0xb2, 0x0c},
+       {0x41, 0xdc, 0x02, 0x0c},
        PatchKind::kCave},
-      {"speaker source-0 q192 guard cave B word 3",
+      {"speaker source-5 q192 guard cave B word 3",
        0x4039d52c,
        {0x00, 0x00, 0x00, 0x00},
-       {0x52, 0x07, 0x67, 0x04},
+       {0x52, 0x57, 0x67, 0x09},
        PatchKind::kCave},
-      {"speaker source-0 q192 guard cave B word 4",
+      {"speaker source-5 q192 guard cave B word 4",
        0x4039d530,
        {0x00, 0x00, 0x00, 0x00},
        {0x62, 0xa0, 0xc0, 0x0c},
        PatchKind::kCave},
-      {"speaker source-0 q192 guard cave B word 5",
+      {"speaker source-5 q192 guard cave B word 5",
        0x4039d534,
        {0x00, 0x00, 0x00, 0x00},
-       {0x72, 0x22, 0x44, 0x8a},
+       {0x12, 0x22, 0x44, 0x88},
        PatchKind::kCave},
-      {"speaker source-0 q192 guard cave B word 6",
+      {"speaker source-5 q192 guard cave B word 6",
        0x4039d538,
        {0x00, 0x00, 0x00, 0x00},
-       {0x86, 0x45, 0xb9, 0x00},
+       {0x0c, 0x72, 0x22, 0x44},
+       PatchKind::kCave},
+      {"speaker source-5 q192 period1 guard cave B word 7",
+       0x4039d53c,
+       {0x00, 0x00, 0x00, 0x00},
+       {0x8a, 0x46, 0x44, 0xb9},
        PatchKind::kCave},
       {"speaker two-slot TDM cave C word 0",
        0x403d36f0,
@@ -195,6 +200,65 @@ const std::array<Patch, kPatchCount>& Patches() {
        {0x00, 0x00, 0x00, 0x00},
        {0xc6, 0x97, 0x00, 0x00},
        PatchKind::kCave},
+      // The enclosing source-copy wrapper must retain 192 frames for both
+      // its copy and read-pointer advance, not only its nested SRAM read.
+      {"speaker source-copy q192 cave word 0", 0x403d3878,
+       {0x00, 0x00, 0x00, 0x00}, {0xa2, 0x21, 0x04, 0x16}, PatchKind::kCave},
+      {"speaker source-copy q192 cave word 1", 0x403d387c,
+       {0x00, 0x00, 0x00, 0x00}, {0xa3, 0x0c, 0xc2, 0xa0}, PatchKind::kCave},
+      {"speaker source-copy q192 cave word 2", 0x403d3880,
+       {0x00, 0x00, 0x00, 0x00}, {0xc0, 0xc6, 0x2e, 0x00}, PatchKind::kCave},
+      // Scoped source-5/sink-0/enum-7 accounting accompanies period1 mode.
+      {"period1 expected block cave word 0", 0x40371500,
+       {0x00, 0x00, 0x00, 0x00}, {0x5e, 0x15, 0xb0, 0x02}, PatchKind::kCave},
+      {"period1 expected block cave word 1", 0x40371504,
+       {0x00, 0x00, 0x00, 0x00}, {0x2c, 0x81, 0x56, 0x13}, PatchKind::kCave},
+      {"period1 expected block cave word 2", 0x40371508,
+       {0x00, 0x00, 0x00, 0x00}, {0x01, 0x92, 0xd4, 0x03}, PatchKind::kCave},
+      {"period1 expected block cave word 3", 0x4037150c,
+       {0x00, 0x00, 0x00, 0x00}, {0x92, 0x09, 0x8a, 0x66}, PatchKind::kCave},
+      {"period1 expected block cave word 4", 0x40371510,
+       {0x00, 0x00, 0x00, 0x00}, {0x79, 0x08, 0x92, 0x24}, PatchKind::kCave},
+      {"period1 expected block cave word 5", 0x40371514,
+       {0x00, 0x00, 0x00, 0x00}, {0xda, 0x57, 0x69, 0x02}, PatchKind::kCave},
+      {"period1 expected block cave word 6", 0x40371518,
+       {0x00, 0x00, 0x00, 0x00}, {0x82, 0xa6, 0x00, 0xc6}, PatchKind::kCave},
+      {"period1 expected block cave word 7", 0x4037151c,
+       {0x00, 0x00, 0x00, 0x00}, {0x56, 0x6d, 0x00, 0x00}, PatchKind::kCave},
+      {"period1 accounting block cave word 0", 0x40371540,
+       {0x00, 0x00, 0x00, 0x00}, {0x8e, 0x05, 0xa4, 0x02}, PatchKind::kCave},
+      {"period1 accounting block cave word 1", 0x40371544,
+       {0x00, 0x00, 0x00, 0x00}, {0x0c, 0x81, 0xb8, 0x31}, PatchKind::kCave},
+      {"period1 accounting block cave word 2", 0x40371548,
+       {0x00, 0x00, 0x00, 0x00}, {0x56, 0x1b, 0x01, 0xb2}, PatchKind::kCave},
+      {"period1 accounting block cave word 3", 0x4037154c,
+       {0x00, 0x00, 0x00, 0x00}, {0xd3, 0x03, 0xb2, 0x0b}, PatchKind::kCave},
+      {"period1 accounting block cave word 4", 0x40371550,
+       {0x00, 0x00, 0x00, 0x00}, {0x8a, 0x66, 0x7b, 0x08}, PatchKind::kCave},
+      {"period1 accounting block cave word 5", 0x40371554,
+       {0x00, 0x00, 0x00, 0x00}, {0xb2, 0x23, 0xda, 0x57}, PatchKind::kCave},
+      {"period1 accounting block cave word 6", 0x40371558,
+       {0x00, 0x00, 0x00, 0x00}, {0x6b, 0x02, 0x92, 0xa6}, PatchKind::kCave},
+      {"period1 accounting block cave word 7", 0x4037155c,
+       {0x00, 0x00, 0x00, 0x00}, {0x00, 0x86, 0x78, 0x6d}, PatchKind::kCave},
+      {"speaker primary mixer frames 48 -> 192 low word", 0x403d3a78,
+       {0xfe, 0x91, 0xb5, 0x83}, {0xfe, 0x91, 0xb5, 0x03}, PatchKind::kHook},
+      {"speaker primary mixer frames 48 -> 192 high word", 0x403d3a7c,
+       {0x01, 0x81, 0xbf, 0x0a}, {0x06, 0x81, 0xbf, 0x0a}, PatchKind::kHook},
+      {"speaker primary mixer stereo stride 16 -> 8", 0x403d3b08,
+       {0xae, 0x0a, 0x26, 0x39}, {0xae, 0x0a, 0x34, 0x39}, PatchKind::kHook},
+      {"speaker source-copy caller 48 -> 192", 0x403d3938,
+       {0xde, 0x03, 0x08, 0x46}, {0x06, 0xcf, 0xff, 0x46}, PatchKind::kHook},
+      {"speaker two-slot DMA memory burst width 16 -> 8 bytes", 0x403aa510,
+       {0xa1, 0x13, 0x00, 0x81}, {0xa1, 0x0f, 0x00, 0x81}, PatchKind::kHook},
+      {"period1 expected-block hook word 0", 0x4038ca74,
+       {0x5e, 0x15, 0xb0, 0x02}, {0x06, 0xa2, 0x92, 0xf0}, PatchKind::kHook},
+      {"period1 expected-block hook word 1", 0x4038ca78,
+       {0x2c, 0x81, 0xde, 0xfb}, {0x20, 0x00, 0xde, 0xfb}, PatchKind::kHook},
+      {"period1 accounting-block hook word 0", 0x4038cb3c,
+       {0x00, 0x8e, 0x05, 0xa4}, {0x00, 0xc6, 0x7f, 0x92}, PatchKind::kHook},
+      {"period1 accounting-block hook word 1", 0x4038cb40,
+       {0x02, 0x0c, 0x81, 0x3f}, {0xf0, 0x20, 0x00, 0x3f}, PatchKind::kHook},
       {"speaker two-slot primary format-copy words x4 -> x2",
        0x403d3c84,
        {0x1b, 0x22, 0xe0, 0x66},
@@ -342,6 +406,20 @@ UnselectedStockWords() {
   // requirements, never members of the selected mutation transaction.
   static constexpr std::array<StockWordRequirement, kUnselectedStockWordCount>
       kRequirements = {{
+          {"stock cache extent word 0; TX block field supplies 0x600",
+           0x403d3de8, {0x55, 0x2d, 0xc9, 0x81}},
+          {"stock cache extent word 1", 0x403d3dec,
+           {0x5f, 0x9a, 0xe0, 0x08}},
+          {"stock cache extent word 2", 0x403d3df0,
+           {0x00, 0x68, 0x41, 0xc0}},
+          {"literal immediately after source-5 period1 guard cave",
+           0x4039d540, {0x48, 0x47, 0x00, 0x41}},
+          {"stock interrupt-context cache path word 0",
+           0x403d3e44,
+           {0x9c, 0x81, 0x81, 0x48}},
+          {"stock interrupt-context cache path word 1",
+           0x403d3e48,
+           {0x9a, 0xe0, 0x08, 0x00}},
           {"generic enum-7 block-frame mapper",
            0x403c8978,
            {0x18, 0x80, 0x14, 0x46}},
@@ -411,9 +489,6 @@ UnselectedStockWords() {
           {"speaker S16 DMA effective-slot byte stride",
            0x403aa868,
            {0x7e, 0x41, 0xa8, 0x1b}},
-          {"speaker S16 DMA TX source burst width",
-           0x403aa510,
-           {0xa1, 0x13, 0x00, 0x81}},
           {"speaker S16 DMA TX destination slot width",
            0x403aa520,
            {0xf9, 0x21, 0x39, 0x11}},
@@ -590,7 +665,7 @@ bool PlanTransition(Action action, std::span<const PatchState> states,
     }
   } else {
     // Disconnect all live hooks before erasing any cave. Reverse order
-    // disconnects the source-0 activation hook before every data-path hook.
+    // disconnects the source-5 activation hook before every data-path hook.
     for (std::size_t index = kPatchCount; index > kCavePatchCount; --index) {
       order->push_back(index - 1);
     }
@@ -792,7 +867,7 @@ bool ValidatePlaybackPcmInventory(std::string_view inventory,
     const std::string_view line = inventory.substr(offset, end - offset);
     if (line.starts_with(kPlaybackPcmPrefix)) {
       if (line != kExpectedPlaybackPcm) {
-        *error = "unexpected ALSA PCM 0,0 inventory entry: '" +
+        *error = "unexpected ALSA PCM 0,5 inventory entry: '" +
                  std::string(line) + "'";
         return false;
       }

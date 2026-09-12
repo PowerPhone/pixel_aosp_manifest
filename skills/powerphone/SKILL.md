@@ -28,6 +28,8 @@ use the authorization and recovery boundary of the current task.
   [references/frankel-lessons.md](references/frankel-lessons.md). Exact offsets,
   digests, PCM numbers, and mixer controls are target/build-specific and must
   never be copied to another phone.
+- For wrong pitch, repeated fragments, or a DSP path widened from a lower
+  rate, read [references/playback-frame-accounting.md](references/playback-frame-accounting.md).
 
 ## Work in evidence gates
 
@@ -58,7 +60,10 @@ use the authorization and recovery boundary of the current task.
    opens the fixed hardware geometry before framework negotiation. An additive
    AIDL `TYPE_BUS` module is one option on an AIDL device, but policy isolation
    is not hardware exclusion: coordinate or quarantine every shared PCM,
-   mixer route, and DSP service. Avoid AudioFlinger source changes unless the
+   mixer route, and DSP service. If multiple policy mix ports converge on one
+   non-shareable DSP ring or PCM, leave only one persistent mixer eligible for
+   ordinary clients; matching rates and routes do not make two HAL handles safe.
+   Avoid AudioFlinger source changes unless the
    HAL/configuration contract cannot express the path.
 7. Test Java `AudioTrack`, Java `AudioRecord` using `UNPROCESSED`, native
    AAudio playback, and native AAudio capture while independently observing
@@ -66,7 +71,7 @@ use the authorization and recovery boundary of the current task.
 8. Prove physical bandwidth and transport continuity; call sample-clock jitter
    only when an appropriate clock or phase-noise measurement supports it. Then
    integrate guarded boot-time activation, lifecycle handling, build
-   attestation, endpoint scripts, API tests, documentation, images, and a flash
+   provenance, endpoint scripts, API tests, documentation, images, and a flash
    runner. Test the exact packaged image on hardware.
 
 ## Non-negotiable interpretation rules
@@ -79,8 +84,10 @@ use the authorization and recovery boundary of the current task.
 - PDM clock, oversampling ratio, decimator output rate, PCM rate, DSP block
   cadence, and Android client rate are related but distinct quantities.
 - When changing ring geometry or reset code, prove empty/full semantics at zero
-  and wrap, first-write behavior, and producer/consumer ownership. Attest every
-  coupled binary module needed for that behavior as one state.
+  and wrap, first-write behavior, and producer/consumer ownership. Track every
+  coupled binary module needed for that behavior as one state. Respect the
+  user's choice to skip hashes or attestation during direct hardware work;
+  neither substitutes for waveform, timing, and reboot evidence.
 - Do not label `MIC0`, `PDM0`, `front`, `top`, or `camera` as aliases without a
   controlled mapping experiment. Do not treat a two-amplifier combination as
   another required endpoint when each transducer is independently addressable.

@@ -1,10 +1,16 @@
-# Frankel direct tinyALSA audio probes
+# Frankel physical-audio playback and capture
+
+For the separate build-only incremental path, see
+[BUILD_PLAYBACK192.md](BUILD_PLAYBACK192.md). It rebuilds vendor audio and
+stages a fresh RT-worker kernel image without accessing a phone or changing
+the release bundle. The operational scripts below do access hardware.
 
 This directory contains target-scoped host wrappers for exercising Pixel 10
-(`frankel`) physical microphones and speakers without AudioFlinger. They use the
-project's existing root ADB connection (server port 5038 by default), set the
-AoC and codec mixer controls explicitly, invoke Android's `tinyplay`/`tinycap`,
-and restore every non-power control they changed.
+(`frankel`) physical microphones and speakers. Direct tests bypass
+AudioFlinger; framework tests use real AudioTrack or AAudio playback with an
+independent raw D10 tinycap reference. The wrappers use the project's root ADB
+connection (server port 5038 by default) and restore the routes and service
+states they own.
 
 These are hardware test tools, not evidence by themselves that the signal chain
 is truly wideband. A 192 kHz WAV header or frame count can still conceal sample
@@ -16,12 +22,165 @@ evidence-backed speaker, DMIC/controller/rail map and its live endpoint
 identification sequence are in
 [`../../../docs/frankel-physical-audio-map.md`](../../../docs/frankel-physical-audio-map.md).
 
-Current speaker findings are in
-[`../../../docs/frankel-speaker-rate-only-20260905.md`](../../../docs/frankel-speaker-rate-only-20260905.md).
-EP6 has real acoustic 48 kHz evidence; neither D0 nor the rate-only EP6
-experiment has established native 192 kHz physical playback.
+## Current entrypoints: D5 playback and D10 reference
 
-## Files
+The September 11 **D5/source-5/EP6** path supersedes the D0/source-0,
+D28/source-14, four-S16-slot, and rate-only experiments retained later in this
+file. The [dated playback report](../../../docs/frankel-playback192-20260911.md)
+is authoritative for actual raw, API, and packaged-image results. The old
+[September 5 rate-only report](../../../docs/frankel-speaker-rate-only-20260905.md)
+is historical, not the current playback status.
+
+Use these entrypoints for the current image:
+
+- `framework-sound-effects-d10-reference.sh`: eight actual Android UI clicks,
+  with independent D10 capture; `--warm-primary true` compares an already-active
+  ordinary output. Requires the included `SoundEffectsActivity` app build.
+  Analyze the unchanged WAV with `tools/audio/analyze_frankel_ui_clicks.py`,
+  including the real `Effect_Tick.ogg` source, event log, and capture markers.
+  The click is principally below 2 kHz; a 2–18 kHz-only test misses it.
+- `d5-d10-acoustic-measurement.sh`: simultaneous direct D5 playback and one
+  D10 raw microphone. Stops all three audio services once, owns both routes,
+  retains stimulus/capture/logs/analysis, and restores prior service states
+  only after both streams finish. It uses already-installed firmware profiles;
+  it does not apply or revert firmware patches.
+- `framework-playback-d10-reference.sh`: ordinary primary AudioTrack playback
+  or addressed research AudioTrack/AAudio playback, while independent tinycap
+  records D10. It keeps audio services running, never writes speaker controls,
+  and disables application-side recording so AudioRecord cannot be mistaken
+  for the raw reference. It uses `com.csr460.powerphone/.StockPlaybackActivity`.
+- `d5-speaker-192k.sh`: playback-only direct ALSA run for one physical speaker.
+  It owns service stop/restore and amp/route cleanup, and normally checks the
+  already-patched source-5 profile before and after playback. This does not
+  itself provide an acoustic measurement; use the simultaneous wrapper above
+  for that.
+- `d10-raw192-capture.sh --use-boot-profile`: capture-only run of one existing
+  D10 raw-microphone profile, leaving that boot profile resident.
+
+The current defaults are deliberately separate at each boundary:
+
+| Boundary | Selected configuration |
+| --- | --- |
+| Direct speaker PCM | Card 0, device 5; 192000 Hz, stereo S32_LE |
+| Speaker ALSA queue | 192 frames × 20 periods; 3840-frame full-buffer start; 30,720 bytes within the 32,768-byte physical ring |
+| AoC/TDM speaker path | Source 5/EP6; coherent 192-frame jobs; two S32 slots at 12.288 MHz; ASP_BYPASS and ASPRX1 |
+| Kernel period delivery | Real AoC mailbox progress; dedicated `pp_d5_period` FIFO/95 worker, not the shared delayed workqueue or a synthetic timer |
+| Application playback handoff | Primary/research HAL workers FIFO/90; 960-frame framework transfers while physical ALSA periods remain 192 frames |
+| Independent microphone reference | Card 0, device 10; mono S16_LE/192000; 1920×4 periods |
+
+Both codec ultrasonic modes remain disabled in this D5 route. Only the
+selected amplifier is enabled; the other remains off. The selected codec's
+digital volume is 817 and the raw amp gain defaults to 0. These are mixer
+values, not calibrated acoustic output levels. The research image also holds
+cluster idle residency at 1,500,000 µs; its higher-idle-power tradeoff and
+primary scheduling patches are documented in
+[the primary playback profile](../../../tools/audio/frankel_primary_playback_192k.md).
+That document also covers the immediate-idle-standby configuration candidate
+for completed BUS↔primary handoffs. Check the dated report for its packaged
+qualification; simultaneously active primary/BUS playback is unsupported
+because both routes share D5.
+
+The research BUS strings still contain `D0` for API compatibility:
+`POWERPHONE_C0_D0_BOTTOM` and `POWERPHONE_C0_D0_EARPIECE` now select physical
+**PCM0,D5**, not the retired D0 path. Logical microphone selectors 0/1/2 do
+not by themselves establish which enclosure opening/controller they represent.
+
+### Direct playback with an independent microphone reference
+
+Generate a modest 12,037-Hz pilot for the same pitch/continuity check used in
+the real hardware trials. It is not the historical four-channel stimulus.
+
+```bash
+scripts/audio/frankel/generate-signal.py generate \
+  work/audio-research/frankel/signals/tone12037-192k-s32-stereo-30s.wav \
+  --signal tone --frequency 12037 --rate 192000 --channels 2 --bits 32 \
+  --duration 30 --amplitude 0.08
+
+scripts/audio/frankel/d5-d10-acoustic-measurement.sh \
+  --stimulus work/audio-research/frankel/signals/tone12037-192k-s32-stereo-30s.wav \
+  --output-dir work/audio-research/frankel/raw-bottom-mic0-30s \
+  --speaker bottom --microphone 0 --tone 12037 \
+  --duration 35 --lead-seconds 2 --amp-gain 0
+
+python3 tools/audio/qualify_frankel_playback_measurement.py \
+  work/audio-research/frankel/raw-bottom-mic0-30s/tone-analysis.json \
+  --tone 12037 --play-seconds 30
+```
+
+Repeat with `--speaker earpiece` and a fresh output directory; change
+`--microphone` explicitly for each reference selector. Capture must cover the
+quiet lead, complete stimulus, and at least one second of tail. The raw
+wrapper's exit status primarily describes transport: it preserves acoustic
+analysis even when that analysis is inconclusive. Therefore run the explicit
+qualification command and inspect `playback.log`, `capture.log`, `aoc-live.log`,
+`logcat.txt`, and `tone-qualification.json`; do not treat its exit zero as a
+full acoustic pass.
+
+For playback alone, using the same stereo WAV:
+
+```bash
+scripts/audio/frankel/d5-speaker-192k.sh \
+  --file work/audio-research/frankel/signals/tone12037-192k-s32-stereo-30s.wav \
+  --endpoint bottom --period-size 192 --period-count 20 --amp-gain 0
+```
+
+`--skip-live-patch-check` remains an explicit development escape hatch, not a
+required step or permission to use a source-0/source-14 profile.
+
+### Framework playback, independently observed at D10
+
+The test application must already be installed. Ordinary UI/media use the
+primary speaker path; no research address is passed in this example:
+
+```bash
+scripts/audio/frankel/framework-playback-d10-reference.sh \
+  --output-dir work/audio-research/frankel/primary-java48-mic0-30s \
+  --output-api java --output-rate 48000 --tone 12000 --microphone 0 \
+  --play-seconds 30 --duration 36 --lead-seconds 2
+```
+
+For the addressed research earpiece at a 192-kHz application rate:
+
+```bash
+scripts/audio/frankel/framework-playback-d10-reference.sh \
+  --output-dir work/audio-research/frankel/research-aaudio-earpiece-mic0-30s \
+  --output-api aaudio --output-rate 192000 \
+  --output-address POWERPHONE_C0_D0_EARPIECE \
+  --tone 12037 --microphone 0 --play-seconds 30 --duration 36 --lead-seconds 2
+```
+
+Use `--output-api java` for the corresponding research AudioTrack test, and
+the `...BOTTOM` address for the other speaker. Capture must cover lead plus
+playback plus four seconds for launch and idle tail. Output directories must
+be new. App peak defaults to 0.08; per-device Android volume also applies to
+the BUS and can differ from ordinary speaker volume. A very weak received
+tone may be policy attenuation, not a missing amplifier or sampling-rate fault.
+
+This wrapper requires complete app/native results and full-duration acoustic
+continuity at 12,000/12,037 Hz, and checks HAL errors through the quiet tail.
+For AAudio it retains `native-report.txt` and checks its run ID against the
+actual launch; an old success report cannot qualify a later failed run.
+
+For above-48-kHz transmission evidence, use a 192000-Hz output rate with
+`--tone 54283` (for example `--play-seconds 5 --duration 11`). That gate
+requires the intended-frequency peak and contrast above the quiet lead; it
+does **not** certify duration/jitter from a weak ultrasonic envelope. Pair it
+with the lower-frequency continuity test and appropriate amplifier-off/
+frequency controls. PDM noise near Nyquist is not evidence that the speaker
+transmitted a requested carrier, and one carrier does not establish a flat
+response through 96 kHz or expose every whole-cycle sample slip.
+
+Avoid intrusive AoC memory dumps, `MIC Clock Rate` reads, or repeated large
+AudioFlinger dumps during acceptance recordings. Such diagnostics can disturb
+the stream being measured. Retain the original WAVs and logs; do not infer
+physical bandwidth from WAV headers, APIs, or successful byte counts alone.
+
+## Retained tool inventory and historical profiles
+
+The older D0/source-0, D28/source-14, rate-only, and AP-PDM descriptions below
+record the bring-up history. They are **superseded experiments, not current
+playback recipes**. Use the D5/D10 and framework entrypoints above for the
+current image; do not copy a historical route/profile into a running D5 test.
 
 - `speaker-alsa-rate-trial.sh` runs normal ALSA/mixer-only experiments with
   explicit frontend/backend rate, endpoint, access and buffer geometry. It
@@ -44,14 +203,14 @@ experiment has established native 192 kHz physical playback.
 - `tinyplay.sh` routes PCM card 0, device 28 (`audio_ultrasonic`) to exactly
   one of the earpiece or bottom-candidate amplifiers; simultaneous enable is
   rejected because it watchdogs FF1.
-- `d5-speaker-192k.sh` is the isolated PCM 0,5 (`EP6`/Source 5) counterpart:
-  it fixes the frontend at stereo S32/192 kHz, the speaker backend at four
-  S16 slots, and owns the audio-service stop/restore boundary. Its normal
-  live-profile check is meaningful only after the named profile's guard has
-  been retargeted from Source 14 to Source 5; `--skip-live-patch-check` is an
-  explicit development-only escape hatch.
-- `d0-speaker-192k.sh` is the fixed PCM 0,0 (`EP1`/Source 0) qualification
-  wrapper. Its frontend is always stereo S32_LE/192 kHz on the 15,360-byte
+- `d5-speaker-192k.sh` is the current isolated PCM 0,5 (`EP6`/Source 5)
+  wrapper: stereo S32/192 kHz, two S32 TDM slots, 192×20 ALSA periods,
+  full 3840-frame startup, and FIFO/90 playback. The named source-5 live
+  profile is already selected in the current native/Python profile; no
+  Source 14 retargeting is an operator prerequisite. See current recipes above.
+- `d0-speaker-192k.sh` is the historical PCM 0,0 (`EP1`/Source 0) transport
+  wrapper, not the current playback qualification path. Its frontend is
+  always stereo S32_LE/192 kHz on the 15,360-byte
   `audio_playback0` ring. It defaults to the historically transport-tested
   `q192-s32-2slot`, 1920x2, start-threshold-1920 path, which maps to
   `experimental-enum7-q192-tdm12288-192-2xs32-dma-source0` and programs
@@ -91,11 +250,12 @@ experiment has established native 192 kHz physical playback.
   another diagnostic apply/revert transaction; readiness, generation,
   freshness, exclusive ownership, and route cleanup checks remain active. See
   [`../../../docs/frankel-aoc-d10-raw192-runtime.md`](../../../docs/frankel-aoc-d10-raw192-runtime.md).
-- `d0-d10-self-loop-192k.sh` is the guarded phone self-loop orchestrator for
-  the qualified D0 speaker and D10 RAW capture paths. It invokes the two
+- `d0-d10-self-loop-192k.sh` is the historical self-loop orchestrator for
+  the former D0 transport trial and D10 RAW capture. It invokes the two
   wrappers above as independent children, waits for PCM 0,10 to enter and
   remain `RUNNING`, retains separate child logs, and analyzes the resulting
-  mono capture. It never duplicates their mixer or volatile-patch logic.
+  mono capture. Its transport results did not establish correct D0 acoustic
+  playback; it has been superseded by `d5-d10-acoustic-measurement.sh`.
 - `observe-aoc-up-ring.sh` records one AoC service's read-only Up-ring Tx/Rx
   occupancy as TSV; it defaults to `ultrasonic_capture` every 25 ms.
 - `raw-pdm-capture.sh` and `powerphone-runtime.sh` are retained historical
@@ -103,7 +263,7 @@ experiment has established native 192 kHz physical playback.
   not be run on the current D10 PowerPhone image.
 - `self-loop-192k.sh` starts raw capture before one physical speaker and
   produces combined-path analysis for the older PCM 0,8/four-channel probe.
-  It is not the D0/D10 qualification wrapper.
+  It is not the current D5/D10 qualification path.
 - `reset-routes.sh` is an emergency hard-off helper for only the routes and
   power controls managed here.
 - `common.sh` implements the Frankel/device/root guard, quoted ADB execution,
@@ -122,16 +282,21 @@ experiment has established native 192 kHz physical playback.
 - `../../../tools/audio/frankel_a32_raw_pdm.py` is the guarded A32-side raw-PDM
   handoff. It must not be applied until the separately reviewed AP FIFO
   consumer is loaded and ready.
-- `../../../tools/audio/device/frankel_aoc_speaker_patch/` is the only allowed
-  first-live writer for the reboot-volatile Source14-to-speaker F1 patch. The
-  older Python helper remains analysis/reference code and is prohibited for
-  hardware mutation because it lacks per-write AoC generation guards.
+- `../../../tools/audio/device/frankel_aoc_speaker_patch/` is the native
+  boot-time writer for the current reboot-volatile source-5 speaker profile.
+  Its earlier Source 14 and Source 0 configurations are historical. The
+  current playback wrappers consume the boot profile; they do not instruct
+  users to reapply those older configurations.
 - `../../../tools/audio/patch_frankel_aoc_firmware_speaker_192k.py` applies
   the same expected-bytes patch to the reviewed Frankel `aoc.bin` layout.
 
 Every `--help` path is dry: it neither starts ADB nor contacts the phone.
 
-## Qualified D0/D10 phone self-loop
+## Historical D0/D10 self-loop — superseded
+
+The following commands preserve the earlier transport investigation. They
+are not a qualified current D0 speaker path and should not be run as the
+current-image acceptance test. Use `d5-d10-acoustic-measurement.sh` above.
 
 Use `d0-d10-self-loop-192k.sh` to exercise one D0 physical speaker and one
 D10 RAW microphone concurrently without bypassing either path's guards. The
@@ -261,17 +426,22 @@ The current research image uses a platform-context RC in `/system_ext` to stop
 AoC HAL are running and audioserver is confirmed stopped, but before
 `sys.boot_completed`, it starts the confined vendor bootstrap. That process
 clears both research readiness properties, establishes the strict idle D10
-mixer state, attests the cold A32 allocator fallback, certifies the A32/F1 D0
+mixer state, establishes the cold A32 allocator fallback, selects the A32/F1 D5
 speaker profile first, and certifies D10 last. Real-device boots showed that
 the speaker factory-mailbox transaction
 can fail after D10's resident diagnostic profile is installed. D10's final
 whole-F1 cache synchronization covers both profiles; a bounded retry
 re-certifies an already-selected speaker state idempotently before retrying
 D10.
-AudioFlinger is released only after `vendor.powerphone.pdm.ready=1` and
-`vendor.powerphone.aoc_speaker_192k.ready=1` both read back. The AIDL module
+On a successful research bootstrap, `vendor.powerphone.pdm.ready=1` and
+`vendor.powerphone.aoc_speaker_192k.ready=1` both read back before normal
+AudioFlinger release. The bounded fail-open/watchdog paths can release the
+framework without research readiness; a running UI alone does not qualify
+the research audio profile. The AIDL module
 then exposes three logical card-0/D10 input addresses and two individually
-addressed card-0/D0 outputs. Card 1, the AP-PDM kernel module, and its loader
+addressed card-0/D5 outputs (the stable BUS address strings retain `D0`).
+The current kernel delivers D5 period callbacks on its dedicated real-time
+worker. Card 1, the AP-PDM kernel module, and its loader
 must remain absent. See
 [`../../../docs/frankel-powerphone-image-integration.md`](../../../docs/frankel-powerphone-image-integration.md)
 for the image contract and build commands. Runtime success alone is not
@@ -293,9 +463,12 @@ The default ADB executable is:
 work/toolchains/platform-tools/adb
 ```
 
-The phone must be a fully booted Frankel userdebug build with root ADB and
-`/system/bin/tinymix`, `/system/bin/tinyplay`, and `/system/bin/tinycap`. If
-needed, run the following once before a probe:
+The phone must be a fully booted Frankel userdebug build with root ADB,
+`/system/bin/tinymix`, `/system/bin/tinycap`, `/system/bin/chrt`, and
+`/vendor/bin/frankel_aoc_staged_play`. The historical playback wrappers also
+use `/system/bin/tinyplay`. The framework reference wrapper requires the
+installed `com.csr460.powerphone` test application and the current integrated
+HAL/bootstrap/kernel profile. If needed, run the following once before a probe:
 
 ```bash
 work/toolchains/platform-tools/adb -P 5038 root
@@ -386,9 +559,14 @@ the idle result first, use only one active snapshot, and inspect AoC/watchdog
 logs afterward. The neutral array/slot labels do not assert which physical mic
 is attached to a control block.
 
-## Guarded speaker F1 patch
+## Historical D0 speaker F1 patch transaction — superseded
 
-The selected boot profile is source 0 / PCM0,D0, native 192-frame jobs, two
+This archived manual sequence describes an earlier Source 0 profile. Do not
+apply or revert it on the current integrated Source 5 image; its boot helper
+owns the resident D5 transaction. These addresses/counts are retained as
+history rather than current instructions.
+
+The then-selected boot profile was source 0 / PCM0,D0, native 192-frame jobs, two
 S32 slots at 12.288 MHz, and 1920-frame source pulls. The native helper owns
 the complete reboot-volatile transaction: the A32 allocator fallback, one
 dynamic 0x3000 F1 allocation split into four 0xc00 speaker banks, conditional
@@ -419,7 +597,10 @@ A32 fallback and dynamic bank pointers until reboot; all state disappears when
 stock signed `aoc.bin` reloads. Do not enable the retained offline signed-AoC
 transform: GSA rejects modified firmware on this target.
 
-## Generate a stimulus
+## Historical four-channel stimulus generation
+
+These four-channel files were for the D28/source-14 experiments. Current D5
+playback requires the two-channel S32 examples at the top of this document.
 
 The tone default is 18 kHz, deliberately not the annoying 1 kHz laboratory
 default. Amplitude defaults to 0.03 full scale. Examples:
@@ -440,7 +621,10 @@ All channels contain the same stimulus. The generator also supports
 deterministic `white` and `pink` signals. It refuses a tone/chirp at or above
 Nyquist and refuses to overwrite a file unless `--force` is given.
 
-## Play a physical speaker
+## Historical D28 physical-speaker recipe — superseded
+
+This retained `tinyplay.sh` route is not the current D5 recipe. Its backend
+and codec mode must not be combined with the current integrated speaker path.
 
 All stream parameters are mandatory, so the invocation is reproducible:
 
@@ -476,7 +660,10 @@ Android-shell trap and a host trap independently force both amps off, turn off
 `TDM_0_RX Mixer US`, and disable both codec ultrasonic modes. This cleanup also
 runs on PCM errors and termination signals.
 
-## Capture physical microphones
+## Historical AP and stock AoC capture paths
+
+For current independent 192-kHz capture, use D10 and the top-level entrypoints.
+The AP-MMIO and PCM0,D8/D12 commands below retain their original limitations.
 
 ### Guarded raw AP controller capture
 
@@ -610,7 +797,7 @@ requested output as `.failed-capture-PID`. Capture lists and other non-power
 controls are restored in reverse order, and cleanup is limited to the three
 supported scalar logical-mic controls.
 
-## Current stock blockers
+## Historical stock-path constraints (not the selected D5/D10 profile)
 
 The wrappers intentionally accept 48, 96, and 192 kHz so the same commands can
 be used before and after a port, but stock Frankel is not a 192 kHz end-to-end
@@ -638,8 +825,9 @@ constraints rather than silently relying on the stock path.
 
 The complete isolated-speaker, isolated-microphone, host-ALSA, calibration,
 jitter, and six-combination self-loop procedure is in
-[`../host/README.md`](../host/README.md). The currently available UMC202HD can
-run a true 192 kHz hardware PCM, but its official analog input response is
+[`../host/README.md`](../host/README.md). The UMC202HD described in that
+historical external-receiver runbook can run a true 192 kHz hardware PCM,
+but its official analog input response is
 specified only through 50 kHz. It can help expose 24/48 kHz brick walls; it
 cannot by itself substantiate the requested smooth 60+ kHz acoustic response.
 
@@ -650,12 +838,13 @@ noise-shaping toward the 96 kHz Nyquist edge. For speaker validation, measure
 with a microphone/interface independently known to exceed 96 kHz bandwidth;
 look for gradual acoustic rolloff rather than a brick wall at 24 or 48 kHz.
 
-Check kernel/AoC logs for XRUNs and compare successive chirps for discontinuous
-phase or time gaps. Increase `--period-size` and/or `--period-count` if underruns
-or overruns occur, but remain within Frankel's 15,360-byte period and
-98,304-byte buffer limits. The wrappers reject larger geometry. For ordinary
-S32 capture, use 1024x8 with mono or 512x8 with three channels as conservative
-starting points, not universal proof of jitter-free operation.
+Check kernel/AoC logs for XRUNs and compare successive pilots/chirps for
+discontinuous phase or time gaps. For the current D5 path, preserve the
+192×20/full-3840 geometry and investigate notification/producer scheduling
+before changing it: larger periods previously made notification starvation
+worse. Its actual ring permits only 32,768 bytes, despite broader generic
+ALSA limits. The older S32 D8/D12 capture geometries below are not current D10
+defaults and are not universal proof of jitter-free operation.
 
 Run the host analyzer on every pulled recording. A broadband example is:
 

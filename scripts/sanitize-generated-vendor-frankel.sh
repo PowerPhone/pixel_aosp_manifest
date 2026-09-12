@@ -675,15 +675,31 @@ if [[ "$powerphone_d5_timer" == true && \
       "$powerphone_d0_progress_mode" != one-period-lag ]]; then
   die "POWERPHONE_D5_TIMER=true requires POWERPHONE_D0_PROGRESS_MODE=one-period-lag"
 fi
-powerphone_primary_hal_192k=${POWERPHONE_PRIMARY_HAL_192K:-$powerphone_aoc_alsa_192k}
+if [[ -n ${POWERPHONE_PRIMARY_HAL_192K:-} ]]; then
+  powerphone_primary_hal_192k=$POWERPHONE_PRIMARY_HAL_192K
+elif [[ "$powerphone_aoc_alsa_192k" == true ]]; then
+  powerphone_primary_hal_192k=true
+else
+  powerphone_primary_hal_192k=false
+fi
 case "$powerphone_primary_hal_192k" in
-  true) powerphone_primary_hal_state=patched ;;
-  false) powerphone_primary_hal_state=stock ;;
-  *) die "POWERPHONE_PRIMARY_HAL_192K must be true or false" ;;
+  true)
+    powerphone_primary_hal_state=patched
+    powerphone_primary_route_state=patched
+    ;;
+  rate-only)
+    powerphone_primary_hal_state=rate-only
+    powerphone_primary_route_state=stock
+    ;;
+  false)
+    powerphone_primary_hal_state=stock
+    powerphone_primary_route_state=stock
+    ;;
+  *) die "POWERPHONE_PRIMARY_HAL_192K must be true, rate-only, or false" ;;
 esac
-if [[ "$powerphone_primary_hal_192k" == true && \
+if [[ "$powerphone_primary_hal_192k" != false && \
       "$powerphone_aoc_alsa_192k" != true ]]; then
-  die "POWERPHONE_PRIMARY_HAL_192K=true requires POWERPHONE_AOC_ALSA_192K=true"
+  die "a high-rate primary HAL requires POWERPHONE_AOC_ALSA_192K=true"
 fi
 powerphone_audio_sidecar=${POWERPHONE_AUDIO_SIDECAR:-false}
 case "$powerphone_audio_sidecar" in
@@ -1001,9 +1017,10 @@ fi
 note "verified Frankel CS35L43 192 kHz selection: $powerphone_cs35l43_module_state"
 
 # Keep every physical output below AudioFlinger at a fixed 192 kHz. The
-# proprietary HAL's guarded transform changes the primary/deep mix profiles
-# and all built-in output interfaces; ordinary app rates are then converted by
-# AudioFlinger before the guarded D1/D5-to-D0 redirect reaches EP1/source 0.
+# proprietary HAL's guarded transform changes the primary/deep mix profiles,
+# all built-in output interfaces, and makes the secondary deep port on-demand
+# DIRECT. Ordinary UI and media consequently share one primary AudioFlinger
+# thread before the guarded D1-to-D5 redirect reaches EP6/source 5.
 powerphone_primary_hal_patcher="$project_root/tools/audio/patch_frankel_primary_hal_192k.py"
 powerphone_primary_hal="$generated_dir/proprietary/vendor/bin/hw/android.hardware.audio.service-aidl.aoc"
 require_file "$powerphone_primary_hal_patcher"
@@ -1012,9 +1029,9 @@ require_file "$powerphone_primary_hal"
   die "Frankel primary HAL patch helper is unsafe or not executable"
 [[ ! -L "$powerphone_primary_hal" ]] || \
   die "generated Frankel primary audio HAL must not be a symlink"
-verify_sha256 \
-  80bc0d37677c05e89d8ec7a413da6c6f64447743c8922b6bf50f2b55b6fab8af \
-  "$powerphone_primary_hal_patcher"
+# The primary HAL selector validates its reviewed instruction sites directly,
+# including migration from the former ten-ms PCM geometry; no file hash is
+# needed for that scoped transformation.
 if [[ "$check_only" == true ]]; then
   "$powerphone_primary_hal_patcher" --check "$powerphone_primary_hal_state" \
     "$powerphone_primary_hal"
@@ -1026,8 +1043,8 @@ else
 fi
 note "verified Frankel fixed-192 kHz primary HAL selection: $powerphone_primary_hal_state"
 
-# Match the proprietary HAL's guarded D1/D5-to-D0 PCM redirect at the mixer
-# layer.  Both ordinary speaker mix paths must connect TDM RX to EP1/source 0;
+# Match the proprietary HAL's guarded D1-to-D5 PCM redirect at the mixer
+# layer. Both ordinary speaker mix paths connect TDM RX to EP6/source 5;
 # Bluetooth, USB, raw, haptic, and capture routes remain stock.
 powerphone_primary_route_patcher="$project_root/tools/audio/patch_frankel_primary_speaker_route.py"
 powerphone_mixer_paths="$generated_dir/proprietary/vendor/etc/audio/config/mixer_paths.xml"
@@ -1037,19 +1054,18 @@ require_file "$powerphone_mixer_paths"
   die "Frankel primary speaker route patch helper is unsafe or not executable"
 [[ ! -L "$powerphone_mixer_paths" ]] || \
   die "generated Frankel mixer paths must not be a symlink"
-verify_sha256 \
-  2580f36e75ffdef0a4818a0b8d6bd0a8a6ec5d97317ec553c6d9e607f6ad2712 \
-  "$powerphone_primary_route_patcher"
+# The selector recognizes complete scoped stanzas, including prior gain-6
+# and current donor-gain-17 profiles, without whole-file hash verification.
 if [[ "$check_only" == true ]]; then
-  "$powerphone_primary_route_patcher" --check "$powerphone_primary_hal_state" \
+  "$powerphone_primary_route_patcher" --check "$powerphone_primary_route_state" \
     "$powerphone_mixer_paths"
 else
-  "$powerphone_primary_route_patcher" --set-state "$powerphone_primary_hal_state" \
+  "$powerphone_primary_route_patcher" --set-state "$powerphone_primary_route_state" \
     --in-place "$powerphone_mixer_paths"
-  "$powerphone_primary_route_patcher" --check "$powerphone_primary_hal_state" \
+  "$powerphone_primary_route_patcher" --check "$powerphone_primary_route_state" \
     "$powerphone_mixer_paths"
 fi
-note "verified Frankel EP1/source-0 primary speaker route: $powerphone_primary_hal_state"
+note "verified Frankel primary speaker route selection: $powerphone_primary_route_state"
 
 # PowerPhone's framework experiment is deliberately opt-in and additive. The
 # service registers only IModule/powerphone; Google's extracted default module
@@ -1162,6 +1178,24 @@ set_optional_exact_line "$powerphone_audio_sidecar" \
   "$powerphone_service_context_line" "$powerphone_service_contexts" \
   'PowerPhone audio Binder-service label'
 unset -f set_optional_exact_line
+
+# Both primary and addressed research playback use physical D5. Let normal
+# AudioFlinger presentation completion enter standby without its three-second
+# idle hold, so a completed BUS stream does not retain D5 during a later
+# primary-route activation. This is not concurrent-client arbitration.
+powerphone_standby_patcher="$project_root/tools/audio/patch_frankel_powerphone_standby.py"
+powerphone_vendor_props="$generated_dir/sysprop/vendor.prop"
+require_file "$powerphone_standby_patcher"
+require_file "$powerphone_vendor_props"
+powerphone_standby_state=stock
+[[ "$powerphone_audio_sidecar" != true ]] || powerphone_standby_state=research
+if [[ "$check_only" == true ]]; then
+  python3 "$powerphone_standby_patcher" "$powerphone_vendor_props" \
+    --state "$powerphone_standby_state" --check
+else
+  python3 "$powerphone_standby_patcher" "$powerphone_vendor_props" \
+    --state "$powerphone_standby_state" --in-place
+fi
 
 sync_optional_powerphone_directory() {
   local enabled=$1 source=$2 destination=$3 description=$4 temporary

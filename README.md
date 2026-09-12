@@ -12,7 +12,7 @@ with `PIXEL_TARGET`; it is never inferred from an attached USB device.
 | Phone | Codename | Platform | Repository status |
 | --- | --- | --- | --- |
 | Pixel 11 | `cubs` | Malibu | Real-hardware boot qualified; broader functional qualification remains incomplete |
-| Pixel 10 | `frankel` | Laguna | Complete device bundle boot-qualified; PowerPhone image transport-qualified at 192 kHz on all two speaker and three microphone research routes through tinyALSA, Java, and AAudio |
+| Pixel 10 | `frankel` | Laguna | Native 192 kHz playback verified on both built-in speaker routes in the September 11 hardware/API tests; see the dated report for limits |
 | Pixel 9 | To be established from its own stock package | To be established | Future target; no build or qualification claim |
 
 Read [`docs/multi-target-layout.md`](docs/multi-target-layout.md) for the target
@@ -28,18 +28,55 @@ The final 192 kHz endpoint matrix and evidence boundary are in
 serial-free qualification record and exact final evidence are in
 [`docs/frankel-validation.md`](docs/frankel-validation.md).
 
-The 192 kHz speaker path is transport-qualified but **not independently
-acoustically qualified**. The selected path uses stock signed AoC firmware,
-guarded reboot-volatile F1/H0 changes, in-place AudioEntrypoint getters,
-PCM0,D0 S32 stereo at 192 kHz/1920x2, and a 12.288 MHz two-slot backend.
-Both individual amplifiers passed direct tinyALSA, Java `AudioTrack`, and
-native AAudio with zero xruns and stable AoC counters. The retained unsigned
-cold-firmware image is explicitly non-loadable/non-flashable. A calibrated
-external wideband receiver is still required to assign physical ultrasonic
-bandwidth to each transducer; see the
-[final qualification record](docs/frankel-powerphone-final-qualification.md).
+The [September 11 playback report](docs/frankel-playback192-20260911.md)
+supersedes earlier playback-rate claims: those missed wrong pitch and repeated
+samples inside AoC despite successful APIs and zero ALSA xruns. The corrected
+path uses PCM0,D5/source5/EP6, S32 stereo at 192 kHz, coherent
+192-frame DSP blocks, and a 12.288 MHz two-slot backend. Intermittent host
+underruns with 1920x2 ALSA periods led to 192x20 periods with the same
+3840-frame buffer and full-buffer start. A dedicated FIFO/95 kernel period
+worker, FIFO/90 playback writers and 960-frame framework bursts complete the
+host transport. The September 11 flashed image passed Java AudioTrack on both speaker
+routes, AAudio for 120 seconds on the bottom speaker and 30 seconds on the
+earpiece, and intended 54.283 kHz self-loop components through both speakers.
+The ordinary 48 kHz client reproduces 12 kHz at the correct pitch through the
+fixed 192 kHz backend. The direct ALSA results and all earlier failed trials
+remain in the report. This is not a calibrated flat-response claim through
+96 kHz or a sample-clock jitter measurement. Signed AoC firmware stays
+unchanged; guarded boot-time runtime patches apply the corrections. The
+retained unsigned firmware is not flashable.
 
-### Pixel 10 qualification status
+The [September 12 ordinary-audio investigation](docs/frankel-ordinary-audio-fix-20260912.md)
+addresses a subsequent report of inaudible UI sounds. The ordinary-speaker
+route had incorrectly overridden donor amplifier gain 17 with the earpiece's
+gain 6. Restoring the ordinary route's donor gain improves measured playback
+level; the report distinguishes live trials from post-flash results. The old
+66.547 kHz recording was weak evidence, not proof of airborne ultrasonic
+output. On-device tone correlation and amplifier-off controls alone do not
+fully separate acoustic output from electrical coupling.
+
+Completed research/ordinary playback handoffs pass after selecting the existing
+`ro.audio.flinger_standbytime_ms=0` setting, which removes a three-second idle
+hardware hold. **Simultaneously active primary and research BUS outputs are
+not supported**: they share hardware and are not mutually arbitrated. Use
+one output owner at a time. Capture uses its separate, unchanged D10 path.
+
+The current development bundle is
+[`artifacts/frankel/powerphone-playback192-20260912/flash-all.sh`](artifacts/frankel/powerphone-playback192-20260912/flash-all.sh),
+with all images alongside it. Its full-install script wipes userdata; see the
+bundle README. This iteration skipped hashes and attestation as requested.
+The September 12 vendor correction was tested by incremental flashing, keeping
+the preceding RT kernel and system/userdata; this is not a new full-wipe run
+of all 36 images. Ordinary UI/media improvement is measured on the flashed
+image. The repeat research-route acoustic continuity tests retained failures,
+so this is not a renewed all-research-path qualification. The phone is left
+booted with enforcing SELinux, ready audio helpers, responsive UI, and the
+starting speaker/BUS volumes restored.
+Reproduction: [incremental audio build](scripts/audio/frankel/BUILD_PLAYBACK192.md).
+The reusable [PowerPhone skill](skills/powerphone/SKILL.md) records the general
+hardware-to-API workflow and the measured failure modes.
+
+### Pixel 10 stock-compatible baseline qualification (historical)
 
 > **The hardened complete `frankel` bundle boots on real hardware.** Its
 > guarded runner flashed all 36 packaged A-only images, wiped data/metadata,
@@ -218,11 +255,12 @@ the downloaded binary package.
 The required Ubuntu package set installed by the script is:
 
 ```text
-alsa-utils android-sdk-libsparse-utils binutils bison brotli build-essential ca-certificates ccache
+alsa-utils android-sdk-libsparse-utils binutils bison brotli build-essential ca-certificates ccache cpio
 curl device-tree-compiler diffutils e2fsprogs erofs-utils f2fs-tools flex
 fontconfig git-core git-lfs gnupg gperf kmod lib32z1-dev libc6-dev-i386
 libgl1-mesa-dev libx11-dev libxml2-utils jq lz4 openssh-client openssl pkgconf
-protobuf-compiler python3 python3-numpy python3-protobuf python3-scipy repo rsync
+protobuf-compiler python3 python-is-python3 python3-numpy python3-protobuf python3-scipy repo rsync
+python3-matplotlib libsndfile1
 shellcheck unzip x11proto-core-dev util-linux xsltproc xxd zip
 zlib1g-dev zstd xz-utils 7zip
 ```
@@ -313,10 +351,16 @@ ALSA ring and D0's 1,920-by-two ALSA ring. Its companion tinyALSA patch exposes
 the cumulative xrun count, including internally recovered EPIPEs, so the HAL
 can fail client streams closed. `POWERPHONE_CS35L43_192K=true`
 selects the narrow high-rate amplifier transform.
-`POWERPHONE_D5_TIMER=false` retains the real-mailbox D5 implementation, and
-`POWERPHONE_PRIMARY_HAL_192K=true` fixes ordinary primary/deep physical output
-at 192 kHz, maps D1/D5 onto qualified D0/source 0, and leaves AudioFlinger to
-resample ordinary client rates. Use the same explicit values
+`POWERPHONE_D5_TIMER=false` retains the real-mailbox D5 implementation.
+`POWERPHONE_PRIMARY_HAL_192K=true` advertises ordinary primary/deep physical
+output at 192 kHz so AudioFlinger resamples ordinary clients, redirects both
+proprietary playback selectors to D5/source 5, and connects the speaker TDM
+backend to EP6. It also marks the secondary deep-buffer port `DIRECT`, leaving
+one persistent primary mixer for UI and media instead of two AudioFlinger
+threads racing the same AoC source-5 ring. The older `rate-only` value is
+retained only for historical
+comparison; pairing its source-1 route with the native-q192 profile can assert
+AMixSPKR and must not be used as the normal profile. Use the same explicit values
 for vendor sanitization, attestation, build, and packaging. Returning the AoC
 flag to `false` with `POWERPHONE_D0_PROGRESS_MODE=mailbox` and
 `POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock` restores both paired modules and
@@ -335,11 +379,16 @@ routes and all three D10 logical input routes passed direct 192 kHz transport.
 Java `AudioTrack`/AAudio passed both outputs and Java
 `AudioRecord`/AAudio passed all three UNPROCESSED inputs while the HAL
 reported exact 192 kHz hardware geometry and AoC counters remained stable.
-The exact packaged image also passed ordinary 48 kHz `AudioTrack` playback:
-AudioFlinger converted 384,000 client frames into the active 192 kHz
-deep-buffer physical stream in 8.254 seconds with zero underruns and stable AoC
-counters. This preserves normal UI/media audio while the underlying built-in
-speaker transport remains fixed at 192 kHz.
+The final single-output source-5/EP6 image survived five UI lock/unlock cycles
+and opened Sound Settings in 273 ms with AoC restart/coredump counters at 0/0.
+Three ordinary 48 kHz `AudioTrack` runs, deliberately overlapped with
+lock/unlock, Settings, and volume-key sonification, were converted onto the
+same 192 kHz primary thread. They completed 384,000 client frames in 8.005,
+8.015, and 8.008 seconds with zero underruns. Their simultaneous 192 kHz D10
+captures contain uninterrupted physical 15 kHz speaker responses: every run
+had zero missing 20 ms windows between the first and last detected response.
+The earlier source-1 crash, source-0 transport-only silence, and dual-output
+source-5 timing corruption remain documented as rejected experiments.
 Independently calibrated acoustic qualification remains separate: a
 characterized external ultrasonic source/receiver is still required to assign
 physical bandwidth to each speaker and enclosure microphone.
@@ -578,7 +627,11 @@ archive is itself ignored and is not an input to later builds.
   bundles, and host-specific build/validation logs. Current device bundle roots
   are the legacy `artifacts/cubs/` and the target-scoped
   `artifacts/frankel/device/` (baseline) and
-  `artifacts/frankel/powerphone/` (exact-profile research build).
+  `artifacts/frankel/powerphone/` (forced-primary-192 research build). The
+  local `artifacts/frankel/powerphone-audio192-dev/` tested rate-only build is
+  an intentionally unhashed, unattested bundle with audible 192 kHz primary
+  audio and 192 kHz research BUS endpoints; it is ignored by Git like all image
+  artifacts.
 - `.cache/`: ignored private recovery journals and attestations; never publish
   or copy this state between devices.
 

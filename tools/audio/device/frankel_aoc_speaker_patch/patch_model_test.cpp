@@ -74,14 +74,14 @@ void TestPatchTable() {
            "selected patch addresses are unique");
   }
   const uint64_t fingerprint = PatchTableFingerprint();
-  Expect(fingerprint == UINT64_C(0x13d41657c485e908),
-         "complete SOURCE0 native-q192 two-slot profile fingerprint");
+  Expect(fingerprint == UINT64_C(0xd84698322216ebd7),
+         "complete SOURCE5 native-q192 two-slot profile fingerprint");
   Expect(patches.front().address == 0x4038aee8, "first cave address");
   Expect(Hex(patches.front().after) == "924bfca2", "first cave bytes");
   Expect(patches[kCavePatchCount - 1].address == 0x403c9460,
          "source-read cave is the final cave word");
-  Expect(Hex(patches[9].after) == "52076704",
-         "guard selects source bitmap bit zero");
+  Expect(Hex(patches[9].after) == "52576704",
+         "guard selects source bitmap bit five");
   Expect(Hex(patches[10].after) == "62a0c00c",
          "guard requests the 192-frame quantum");
   Expect(Hex(patches[13].after) == "8122a0c0", "TDM cave forces 192 kHz");
@@ -89,16 +89,16 @@ void TestPatchTable() {
          "TDM cave uses shift six for 12.288 MHz");
   Expect(
       patches[24].address == 0x403d3c84 && Hex(patches[24].after) == "1b22f066",
-      "source0 two-slot profile uses x2 primary copies");
+      "source5 two-slot profile uses x2 primary copies");
   Expect(
       patches[29].address == 0x403d3e1c && Hex(patches[29].after) == "20c2a600",
-      "source0 q192 profile commits 0x600 bytes");
+      "source5 q192 profile commits 0x600 bytes");
   Expect(std::none_of(
              patches.begin(), patches.end(),
              [](const Patch& patch) { return patch.address == 0x403c8978; }),
-         "SOURCE0 leaves the generic enum-7 mapper unselected");
+         "SOURCE5 leaves the generic enum-7 mapper unselected");
   Expect(patches.back().address == 0x4038ba4c,
-         "source-0 activation hook is last");
+         "source-5 activation hook is last");
   Expect(std::none_of(patches.begin(), patches.end(), [](const Patch& patch) {
            return patch.address == 0x4026f03c || patch.address == 0x4026f040 ||
                   (patch.address >= 0x40341080 && patch.address <= 0x4034108c);
@@ -393,29 +393,29 @@ void TestGenerationParser() {
 
 void TestPlaybackPcmInventory() {
   constexpr std::string_view good =
-      "00-00: EP1 playback (*) :  : playback 1\n"
+      "00-05: EP6 playback (*) :  : playback 1\n"
       "00-01: EP2 playback (*) :  : playback 1\n";
   std::string error;
   Expect(ValidatePlaybackPcmInventory(good, &error),
-         "accept exact PCM 0,0 inventory identity");
-  Expect(ValidatePlaybackPcmInventory("00-00: EP1 playback (*) :  : playback 1",
+         "accept exact PCM 0,5 inventory identity");
+  Expect(ValidatePlaybackPcmInventory("00-05: EP6 playback (*) :  : playback 1",
                                       &error),
          "accept exact identity without a final newline");
   Expect(!ValidatePlaybackPcmInventory(
-             "00-00: EP1 playback (*) :  : capture 1\n", &error),
+             "00-05: EP6 playback (*) :  : capture 1\n", &error),
          "reject wrong PCM direction");
-  Expect(!ValidatePlaybackPcmInventory("00-00: renamed (*) :  : playback 1\n",
+  Expect(!ValidatePlaybackPcmInventory("00-05: renamed (*) :  : playback 1\n",
                                        &error),
          "reject wrong PCM name");
   Expect(!ValidatePlaybackPcmInventory(
-             "00-00: EP1 playback (*) :  : playback 2\n", &error),
+             "00-05: EP6 playback (*) :  : playback 2\n", &error),
          "reject wrong PCM substream count");
   Expect(!ValidatePlaybackPcmInventory(
-             "prefix 00-00: EP1 playback (*) :  : playback 1\n", &error),
+             "prefix 00-05: EP6 playback (*) :  : playback 1\n", &error),
          "reject embedded rather than exact PCM identity");
   Expect(
-      !ValidatePlaybackPcmInventory("00-00: EP1 playback (*) :  : playback 1\n"
-                                    "00-00: EP1 playback (*) :  : playback 1\n",
+      !ValidatePlaybackPcmInventory("00-05: EP6 playback (*) :  : playback 1\n"
+                                    "00-05: EP6 playback (*) :  : playback 1\n",
                                     &error),
       "reject duplicate PCM identity");
 }

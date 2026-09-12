@@ -1,4 +1,35 @@
-# Frankel AoC offline assembly review
+# Frankel audio instruction fragments
+
+## Primary Android HAL playback
+
+The AArch64 fragments `frankel_primary_hal_prefill_start.*`,
+`frankel_primary_hal_d5_fifo90.*`, and `frankel_primary_hal_d5_fmq960.*`
+document the guarded proprietary-HAL changes selected by
+`../patch_frankel_primary_hal_192k.py`. The FIFO fragment replaces the earlier
+prefill fragment's selected success continuation; they are layered fragments,
+not competing standalone HAL executables. The FMQ getter changes only the
+Android-visible minimum, not the physical ALSA period.
+
+For example, from `pixel_aosp_manifest`, assemble the FMQ fragment with the
+matching AOSP compiler:
+
+```sh
+work/aosp/prebuilts/clang/host/linux-x86/clang-r596125/bin/clang \
+  --target=aarch64-linux-gnu -c tools/audio/asm/frankel_primary_hal_d5_fmq960.S \
+  -o work/audio-research/frankel/primary-hal-d5-fmq960.o
+
+work/aosp/prebuilts/clang/host/linux-x86/clang-r596125/bin/ld.lld \
+  -T tools/audio/asm/frankel_primary_hal_d5_fmq960.ld \
+  work/audio-research/frankel/primary-hal-d5-fmq960.o \
+  -o work/audio-research/frankel/primary-hal-d5-fmq960.elf
+```
+
+Hardware evidence and image-selection instructions are in
+[primary playback](../frankel_primary_playback_192k.md). Assembling these
+fragments is not a substitute for actual waveform and sustained-playback
+qualification.
+
+## Historical AoC offline assembly review
 
 `frankel_aoc_speaker_192k_analysis.S` and its linker script encode the
 instruction fragments referenced by the incomplete semantic manifest. They

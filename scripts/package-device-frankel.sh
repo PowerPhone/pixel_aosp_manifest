@@ -23,7 +23,13 @@ powerphone_audio_sidecar=${POWERPHONE_AUDIO_SIDECAR:-false}
 powerphone_cs35l43_192k=${POWERPHONE_CS35L43_192K:-false}
 powerphone_d0_progress_mode=${POWERPHONE_D0_PROGRESS_MODE:-mailbox}
 powerphone_d5_timer=${POWERPHONE_D5_TIMER:-false}
-powerphone_primary_hal_192k=${POWERPHONE_PRIMARY_HAL_192K:-$powerphone_aoc_alsa_192k}
+if [[ -n ${POWERPHONE_PRIMARY_HAL_192K:-} ]]; then
+  powerphone_primary_hal_192k=$POWERPHONE_PRIMARY_HAL_192K
+elif [[ "$powerphone_aoc_alsa_192k" == true ]]; then
+  powerphone_primary_hal_192k=true
+else
+  powerphone_primary_hal_192k=false
+fi
 powerphone_signed_aoc_firmware_profile=${POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE:-stock}
 case "$powerphone_aoc_alsa_192k" in
   true|false) ;;
@@ -46,8 +52,8 @@ case "$powerphone_d5_timer" in
   *) die "POWERPHONE_D5_TIMER must be true or false" ;;
 esac
 case "$powerphone_primary_hal_192k" in
-  true|false) ;;
-  *) die "POWERPHONE_PRIMARY_HAL_192K must be true or false" ;;
+  true|rate-only|false) ;;
+  *) die "POWERPHONE_PRIMARY_HAL_192K must be true, rate-only, or false" ;;
 esac
 case "$powerphone_signed_aoc_firmware_profile" in
   stock|source0-4s32-allocator-fallback) ;;
@@ -57,7 +63,7 @@ if [[ "$powerphone_aoc_alsa_192k" == false && \
       ( "$powerphone_d0_progress_mode" != mailbox || \
         "$powerphone_signed_aoc_firmware_profile" != stock || \
         "$powerphone_d5_timer" == true || \
-        "$powerphone_primary_hal_192k" == true ) ]]; then
+        "$powerphone_primary_hal_192k" != false ) ]]; then
   die "non-default AoC selections require POWERPHONE_AOC_ALSA_192K=true"
 fi
 [[ "$powerphone_d5_timer" != true || \
@@ -71,6 +77,10 @@ case "$powerphone_aoc_alsa_192k:$powerphone_audio_sidecar:$powerphone_cs35l43_19
   true:true:true:one-period-lag:false:true:stock)
     frankel_bundle_profile=powerphone
     frankel_bundle_subdir=powerphone
+    ;;
+  true:true:true:one-period-lag:false:rate-only:stock)
+    frankel_bundle_profile=experimental-powerphone-rate-only
+    frankel_bundle_subdir="$frankel_bundle_profile"
     ;;
   *)
     frankel_bundle_profile="experimental-powerphone-${powerphone_aoc_alsa_192k}-${powerphone_audio_sidecar}-${powerphone_cs35l43_192k}-${powerphone_d0_progress_mode}-d5timer-${powerphone_d5_timer}-primary192-${powerphone_primary_hal_192k}-${powerphone_signed_aoc_firmware_profile}"

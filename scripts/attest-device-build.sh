@@ -115,11 +115,18 @@ if [[ "$DEVICE_CODENAME" == frankel ]]; then
     true|false) ;;
     *) die "POWERPHONE_D5_TIMER must be true or false" ;;
   esac
-  powerphone_primary_hal_192k=${POWERPHONE_PRIMARY_HAL_192K:-$powerphone_aoc_alsa_192k}
+  if [[ -n ${POWERPHONE_PRIMARY_HAL_192K:-} ]]; then
+    powerphone_primary_hal_192k=$POWERPHONE_PRIMARY_HAL_192K
+  elif [[ "$powerphone_aoc_alsa_192k" == true ]]; then
+    powerphone_primary_hal_192k=true
+  else
+    powerphone_primary_hal_192k=false
+  fi
   case "$powerphone_primary_hal_192k" in
     true) frankel_primary_hal_state=patched ;;
+    rate-only) frankel_primary_hal_state=rate-only ;;
     false) frankel_primary_hal_state=stock ;;
-    *) die "POWERPHONE_PRIMARY_HAL_192K must be true or false" ;;
+    *) die "POWERPHONE_PRIMARY_HAL_192K must be true, rate-only, or false" ;;
   esac
   powerphone_signed_aoc_firmware_profile=${POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE:-stock}
   case "$powerphone_signed_aoc_firmware_profile" in
@@ -130,7 +137,7 @@ if [[ "$DEVICE_CODENAME" == frankel ]]; then
         ( "$powerphone_d0_progress_mode" != mailbox || \
           "$powerphone_signed_aoc_firmware_profile" != stock || \
           "$powerphone_d5_timer" == true || \
-          "$powerphone_primary_hal_192k" == true ) ]]; then
+          "$powerphone_primary_hal_192k" != false ) ]]; then
     die "non-default AoC selections require POWERPHONE_AOC_ALSA_192K=true"
   fi
   [[ "$powerphone_d5_timer" != true || \
@@ -216,7 +223,7 @@ if [[ "$DEVICE_CODENAME" == frankel ]]; then
       die "Frankel primary HAL input is missing, empty, or unsafe: $frankel_primary_path"
   done
   verify_sha256 \
-    80bc0d37677c05e89d8ec7a413da6c6f64447743c8922b6bf50f2b55b6fab8af \
+    6390132493ddf7894f1e5621b5f5e6c47010f6b7005cbefd7983070258a5f04f \
     "$frankel_primary_hal_patcher"
   "$frankel_primary_hal_patcher" --check "$frankel_primary_hal_state" \
     "$frankel_primary_hal_input"

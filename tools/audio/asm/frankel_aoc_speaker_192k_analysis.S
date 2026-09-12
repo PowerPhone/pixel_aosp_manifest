@@ -44,6 +44,17 @@ speaker_high_rate:
     { ae_format_1; movi a15, 192; movi a10, 32 }
 
 /*
+ * The playback worker commits and notifies one 0x600-byte native-q192
+ * stereo-S32 block.  Its following cache writeback must cover that complete
+ * block as well; retaining the stock 0x180-byte extent exposes three stale
+ * quarters of every millisecond to the downstream mixer.
+ */
+    .section .patch.cache_writeback, "ax"
+    .global speaker_cache_writeback
+speaker_cache_writeback:
+    { ae_format_1; or a10, a3, a3; movi a11, 0x600 }
+
+/*
  * These four bundles describe the coordinated 48 <-> 192 AspSrc design.
  * The frame counts and rate are resolved.  Static reconstruction gives
  * conservative 6,240 and 7,424-byte private-heap bounds for the ratio-4

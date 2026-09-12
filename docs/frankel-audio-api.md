@@ -94,13 +94,15 @@ driver is therefore not the present 192 kHz limitation.
 The stock proprietary primary HAL hard-coded built-in primary and deep-buffer
 speaker use cases to 48000 Hz and separate D1/D5 frontends. In the selected
 PowerPhone image, an exact-binary guarded patch advertises those two use cases
-as stereo S32 at 192 kHz with 1,920-by-two geometry before AudioFlinger creates
-its playback threads, maps D1/D5 `pcm_open` calls to D0, and a paired guarded
-mixer-route patch sends them through source 0 / EP1. Ordinary client streams
-remain free to use common rates such as 48 kHz; AudioFlinger performs the
-explicit resampling into the fixed 192 kHz HAL stream. Other primary-HAL use
-cases, including calls, capture, Bluetooth, raw, and MMAP, retain their stock
-configuration.
+as stereo float at 192 kHz with 1,920-by-two geometry before AudioFlinger
+creates its playback threads, maps D1/D5 `pcm_open` calls to D5, and a paired
+guarded mixer-route patch sends them through source 5 / EP6. The deep-buffer
+mix port is marked `DIRECT`, so it is not kept as a second ordinary mixer that
+can race the primary thread for the one AoC ring. Ordinary UI and media clients
+share the primary mixer and remain free to use common rates such as 48 kHz;
+AudioFlinger performs the explicit resampling into the fixed 192 kHz HAL
+stream. Other primary-HAL use cases, including calls, capture, Bluetooth, raw,
+and MMAP, retain their stock configuration.
 
 The additive research HAL also owns PCM0,D0 stereo S32 at 192 kHz. The
 qualified physical transport uses
@@ -279,9 +281,12 @@ across vendor sanitization, attestation, build, and packaging:
   `fc631fc227ab2e7e8cfa2d664e97ac7cca4c14324fb2a39479fc8e79aa358a3a`.
 - `POWERPHONE_D5_TIMER=false` retains the qualified real-mailbox D5 behavior;
   the timer variant is an experiment, not part of the published profile.
-- `POWERPHONE_PRIMARY_HAL_192K=true` selects the guarded proprietary-primary
-  HAL and mixer-route transforms which keep ordinary primary/deep physical
-  playback at a fixed 192 kHz hardware rate.
+- `POWERPHONE_PRIMARY_HAL_192K=true` selects the guarded proprietary HAL rate
+  and route transform: D1/D5 converge on D5/source 5 with 1920x2 geometry and
+  the speaker mixer connects TDM0 to EP6. The deep port becomes on-demand
+  `DIRECT`, leaving ordinary UI and media on one primary thread. AudioFlinger
+  converts ordinary clients into the audible 192 kHz physical stream. The legacy `rate-only`
+  value can reproduce the rejected source-1 AMixSPKR failure.
 
 Example:
 

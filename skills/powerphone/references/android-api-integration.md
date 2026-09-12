@@ -42,6 +42,14 @@ research clients and ordinary 44.1/48 kHz clients. Do not extend this policy to
 calls, hotword, or capture paths whose processing contract has not been
 qualified.
 
+Separate rate advertisement from PCM selection and routing. If the stock PCM
+and mixer path is already audible under the raised DSP clock, first patch only
+the HAL's rate declarations and let AudioFlinger convert client frames. Do not
+also redirect the PCM or replace its mixer route unless hardware evidence shows
+that each extra change is required. Validate wall-clock duration and actual
+audibility: successful writes, zero underruns, asserted amplifier controls, and
+a plausible playback head can all coexist with silence or a 2x/4x clock error.
+
 First identify whether the device actually uses AIDL, HIDL, or a legacy audio
 HAL. On an AIDL device whose proprietary primary module hard-codes a legacy
 rate, a target-scoped additive module with explicit `TYPE_BUS` devices can
@@ -158,6 +166,11 @@ audioserver/HAL restart. If the DSP can restart independently, prove that the
 research readiness generation is revoked and that no stale stream resumes.
 Document any deliberate loss of stock media, call, camera, assistant, or hotword
 behavior.
+
+Keep lifecycle cancellation out of rate diagnosis. A test Activity sent behind
+the keyguard may stop after a short audible beep because `onStop` cancels its
+worker; keep the screen awake and Activity foreground, or use a foreground
+service, before attributing a short run to the audio path.
 
 ## 6. Integrate and attest the image
 

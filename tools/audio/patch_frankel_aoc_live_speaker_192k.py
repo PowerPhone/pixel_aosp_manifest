@@ -16,12 +16,16 @@ import sys
 import time
 
 from aoc_factory_diag import AocFactoryDiag
+from frankel_aoc_speaker_q192_profile import NATIVE_SOURCE5_Q192_WORDS
 
 
 EXPECTED_DEVICE = "frankel"
 EXPECTED_VENDOR_BUILD_ID = "CP2A.260805.005"
 PLAYBACK_STATUS = "/proc/asound/card0/pcm28p/sub0/status"
 SOURCE5_PROFILE = "experimental-enum7-early-q48-tdm12288-192-4xs16-dma-source5"
+SOURCE5_Q192_2SLOT_PROFILE = (
+    "experimental-enum7-q192-tdm12288-192-2xs32-dma-source5"
+)
 SOURCE0_PROFILE = "experimental-enum7-early-q48-tdm12288-192-4xs16-dma-source0"
 SOURCE0_2SLOT_PROFILE = (
     "experimental-enum7-early-q48-tdm12288-192-2xs32-dma-source0"
@@ -43,6 +47,7 @@ SOURCE0_Q192_4S16_FIFO32_PROFILE = (
 )
 PROFILE_PLAYBACK_STATUS = {
     SOURCE5_PROFILE: "/proc/asound/card0/pcm5p/sub0/status",
+    SOURCE5_Q192_2SLOT_PROFILE: "/proc/asound/card0/pcm5p/sub0/status",
     SOURCE0_PROFILE: "/proc/asound/card0/pcm0p/sub0/status",
     SOURCE0_2SLOT_PROFILE: "/proc/asound/card0/pcm0p/sub0/status",
     SOURCE0_4S32_PROFILE: "/proc/asound/card0/pcm0p/sub0/status",
@@ -126,6 +131,23 @@ CAVE_GUARD_SOURCE5_Q48_PATCHES = tuple(
         patch.kind,
     )
     for patch in CAVE_GUARD_Q48_PATCHES
+)
+
+# Native one-millisecond EP6 / PCM5 profile. This is the source-5 counterpart
+# of the source-0 q192 guard: retain cave B's 192-frame quantum and change only
+# its source-bitmap test from bit 14 to bit 5. Source 5 is the stock physical
+# speaker frontend and, unlike source 0, has demonstrated non-zero speaker data.
+CAVE_GUARD_SOURCE5_Q192_PATCHES = tuple(
+    Patch(
+        patch.name.replace("speaker guard", "speaker source-5 q192 guard"),
+        patch.address,
+        patch.before,
+        bytes.fromhex("52576704")
+        if patch.address == 0x4039D52C
+        else patch.after,
+        patch.kind,
+    )
+    for patch in CAVE_GUARD_PATCHES
 )
 
 # EP1 / PCM0 is Frankel's native legacy source-0 frontend.  Retarget the same
@@ -821,6 +843,7 @@ def parse_args() -> argparse.Namespace:
             "experimental-enum7-early-q48-tdm12288-192-2xs32-dma",
             "experimental-enum7-early-q48-tdm12288-192-4xs16-dma",
             SOURCE5_PROFILE,
+            SOURCE5_Q192_2SLOT_PROFILE,
             SOURCE0_PROFILE,
             SOURCE0_2SLOT_PROFILE,
             SOURCE0_4S32_PROFILE,
@@ -937,6 +960,15 @@ def preflight(
         if status_result.returncode == 0
         else "unavailable"
     )
+    if (
+        playback_status == "unavailable"
+        and playback_status_path == "/proc/asound/card0/pcm5p/sub0/status"
+        and not allow_active_playback
+    ):
+        # This kernel omits PCM proc status. The device helper establishes
+        # exclusive D5 ownership directly through ALSA instead.
+        transport.run("shell", "/vendor/bin/frankel_aoc_speaker_patch", "check-playback-closed")
+        playback_status = "closed"
     if playback_status != "closed" and not allow_active_playback:
         raise RuntimeError(
             f"playback idleness at {playback_status_path} is not established "
@@ -1136,6 +1168,15 @@ def profile_patches(profile: str) -> tuple[Patch, ...]:
                 tdm_hook,
                 activation_hook,
             )
+        )
+    if profile == SOURCE5_Q192_2SLOT_PROFILE:
+        # Same selected words as the boot helper: period1 scheduling,
+        # complete source-copy/advance, packed stereo, balanced DMA bursts,
+        # and both in-place endpoint getters. Boot-time dynamic allocation
+        # and the TX block extent must already have been established.
+        return tuple(
+            Patch(name, address, bytes.fromhex(before), bytes.fromhex(after), kind)
+            for name, address, before, after, kind in NATIVE_SOURCE5_Q192_WORDS
         )
     if profile == SOURCE0_PROFILE:
         return (

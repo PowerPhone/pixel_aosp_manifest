@@ -26,6 +26,7 @@ packages=(
   build-essential
   ca-certificates
   ccache
+  cpio
   curl
   device-tree-compiler
   diffutils
@@ -51,9 +52,12 @@ packages=(
   pkgconf
   protobuf-compiler
   python3
+  python-is-python3
   python3-numpy
   python3-protobuf
   python3-scipy
+  python3-matplotlib
+  libsndfile1
   repo
   rsync
   shellcheck

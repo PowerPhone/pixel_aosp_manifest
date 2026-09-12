@@ -67,7 +67,13 @@ case "$DEVICE_CODENAME" in
     powerphone_cs35l43_192k=${POWERPHONE_CS35L43_192K:-false}
     powerphone_d0_progress_mode=${POWERPHONE_D0_PROGRESS_MODE:-mailbox}
     powerphone_d5_timer=${POWERPHONE_D5_TIMER:-false}
-    powerphone_primary_hal_192k=${POWERPHONE_PRIMARY_HAL_192K:-$powerphone_aoc_alsa_192k}
+    if [[ -n ${POWERPHONE_PRIMARY_HAL_192K:-} ]]; then
+      powerphone_primary_hal_192k=$POWERPHONE_PRIMARY_HAL_192K
+    elif [[ "$powerphone_aoc_alsa_192k" == true ]]; then
+      powerphone_primary_hal_192k=true
+    else
+      powerphone_primary_hal_192k=false
+    fi
     powerphone_signed_aoc_firmware_profile=${POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE:-stock}
     case "$powerphone_aoc_alsa_192k" in
       true|false) ;;
@@ -90,8 +96,8 @@ case "$DEVICE_CODENAME" in
       *) die "POWERPHONE_D5_TIMER must be true or false" ;;
     esac
     case "$powerphone_primary_hal_192k" in
-      true|false) ;;
-      *) die "POWERPHONE_PRIMARY_HAL_192K must be true or false" ;;
+      true|rate-only|false) ;;
+      *) die "POWERPHONE_PRIMARY_HAL_192K must be true, rate-only, or false" ;;
     esac
     case "$powerphone_signed_aoc_firmware_profile" in
       stock|source0-4s32-allocator-fallback) ;;
@@ -101,7 +107,7 @@ case "$DEVICE_CODENAME" in
           ( "$powerphone_d0_progress_mode" != mailbox || \
             "$powerphone_signed_aoc_firmware_profile" != stock || \
             "$powerphone_d5_timer" == true || \
-            "$powerphone_primary_hal_192k" == true ) ]]; then
+            "$powerphone_primary_hal_192k" != false ) ]]; then
       die "non-default AoC selections require POWERPHONE_AOC_ALSA_192K=true"
     fi
     [[ "$powerphone_d5_timer" != true || \
@@ -146,7 +152,7 @@ if [[ "$DEVICE_CODENAME" == frankel ]]; then
     1ed1d9507155587b554ca3031a6882e5f4bcb9beaf1923dec93ea0496b32a987 \
     "$powerphone_d5_timer_patcher"
   verify_sha256 \
-    80bc0d37677c05e89d8ec7a413da6c6f64447743c8922b6bf50f2b55b6fab8af \
+    6390132493ddf7894f1e5621b5f5e6c47010f6b7005cbefd7983070258a5f04f \
     "$powerphone_primary_hal_patcher"
   verify_sha256 \
     d5e8f5edc1ffe2901efbc807d434b308794c7588e57b47111118be85445bf0c2 \

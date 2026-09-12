@@ -32,12 +32,15 @@ it watchdogs FF1. Acoustic ultrasonic bandwidth remains a separate gate.
 
 For ordinary Android media, the selected image also applies guarded transforms
 to the extracted primary HAL and its mixer routes. Primary and deep-buffer
-built-in-speaker configurations are published as stereo S32 at 192 kHz with
-1,920-by-two geometry; their D1/D5 opens are mapped onto D0 and their routes
-join source 0 / EP1. AudioFlinger therefore resamples ordinary client rates to
-the fixed high-rate physical transport. Exact-rate qualification continues to
-use the separately addressed PowerPhone BUS routes. Calls, capture, Bluetooth,
-raw, and MMAP configurations are not changed by this compatibility transform.
+built-in-speaker configurations are published as stereo float at 192 kHz with
+1,920-by-two geometry; their D1/D5 opens are mapped onto D5 and their routes
+join source 5 / EP6. The deep port is changed from a persistent non-direct mix
+to an on-demand `DIRECT` port. AudioFlinger therefore resamples ordinary UI
+and media clients through one primary thread into the fixed high-rate physical
+transport instead of racing two handles on one AoC ring. Exact-rate
+qualification continues to use the separately addressed PowerPhone BUS
+routes. Calls, capture, Bluetooth, raw, and MMAP configurations are not changed
+by this compatibility transform.
 
 ## Required boot order
 
@@ -366,8 +369,12 @@ fragment, both selected AoC kernel modules, and must reject the obsolete
 
 `POWERPHONE_D5_TIMER=false` retains D5's real-mailbox behavior.
 `POWERPHONE_PRIMARY_HAL_192K=true` selects the exact primary-service and
-primary-speaker-route binary transforms. Attestation pins both stock and
-selected digests, and packaging refuses a selector mismatch.
+speaker-route transforms: D1/D5 converge on D5/source 5, TDM0 uses EP6, and
+deep-buffer becomes on-demand `DIRECT` so normal clients share the primary
+mixer.
+The legacy `rate-only` state retains source 1 and is rejected because it can
+assert AMixSPKR under the q192 profile. Attestation pins all selected states, and
+packaging refuses a selector mismatch.
 
 The exact seven-selector combination selects the
 dedicated Frankel research-audio bundle. Other profiles are

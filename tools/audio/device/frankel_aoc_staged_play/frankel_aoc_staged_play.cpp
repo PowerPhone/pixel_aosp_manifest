@@ -61,16 +61,18 @@ struct RwTransferAccounting {
   uint64_t frame_bytes;
   uint64_t successful_ioctl_calls = 0;
   uint64_t returned_frames = 0;
+  uint64_t short_write_calls = 0;
 
   ~RwTransferAccounting() {
     if (enabled) {
       // Also report partial progress when Stream exits on an error. These
       // counts come only from valid snd_xferi.result values, never requests.
       std::printf("rw_successful_ioctl_calls=%llu rw_returned_frames=%llu "
-                  "rw_returned_bytes=%llu\n",
+                  "rw_returned_bytes=%llu rw_short_write_calls=%llu\n",
                   static_cast<unsigned long long>(successful_ioctl_calls),
                   static_cast<unsigned long long>(returned_frames),
-                  static_cast<unsigned long long>(returned_frames * frame_bytes));
+                  static_cast<unsigned long long>(returned_frames * frame_bytes),
+                  static_cast<unsigned long long>(short_write_calls));
       std::fflush(stdout);
     }
   }
@@ -403,6 +405,7 @@ bool Stream(struct pcm* pcm, Input* input, const Options& options) {
     int write_result = 0;
     int write_errno = 0;
     unsigned int write_retries = 0;
+    unsigned int transferred = 0;
     for (;;) {
       errno = 0;
       if (options.mmap) {
@@ -414,8 +417,12 @@ bool Stream(struct pcm* pcm, Input* input, const Options& options) {
         // leave the already-started stream intact.
         struct snd_xferi transfer_request = {};
         transfer_request.result = -1;
-        transfer_request.buf = buffer.data();
-        transfer_request.frames = transfer / frame_bytes;
+        // A successful WRITEI can accept fewer frames than requested. Submit
+        // only its untransferred suffix on the next call, preserving the
+        // exact sample position even if that suffix later needs an EFAULT
+        // retry. Never resend the already accepted prefix.
+        transfer_request.buf = buffer.data() + transferred;
+        transfer_request.frames = (transfer - transferred) / frame_bytes;
         write_result = ioctl(pcm_get_poll_fd(pcm),
                              SNDRV_PCM_IOCTL_WRITEI_FRAMES,
                              &transfer_request);
@@ -428,23 +435,36 @@ bool Stream(struct pcm* pcm, Input* input, const Options& options) {
           if (valid_result) {
             rw_accounting.returned_frames += static_cast<uint64_t>(returned);
           }
-          if (!valid_result ||
-              static_cast<uint64_t>(returned) != transfer_request.frames) {
+          if (!valid_result || returned == 0) {
             std::fprintf(
                 stderr,
-                "PCM RW incomplete transfer after %llu full-request bytes: "
+                "PCM RW invalid/no-progress transfer after %llu bytes: "
                 "requested_frames=%llu returned_frames=%lld ioctl_status=0 "
-                "retries=%u; refusing to count or retry an untransferred tail\n",
+                "retries=%u\n",
                 static_cast<unsigned long long>(total),
                 static_cast<unsigned long long>(transfer_request.frames),
                 static_cast<long long>(returned), write_retries);
             return false;
           }
+          if (static_cast<uint64_t>(returned) < transfer_request.frames) {
+            ++rw_accounting.short_write_calls;
+          }
+          const unsigned int completed_bytes =
+              static_cast<unsigned int>(returned * frame_bytes);
+          transferred += completed_bytes;
+          total += completed_bytes;
         }
       }
       write_errno = errno;
       if (write_result == 0) {
-        break;
+        if (options.mmap) {
+          transferred = transfer;
+          total += transfer;
+        }
+        if (transferred == transfer) {
+          break;
+        }
+        continue;
       }
       const bool transient_rw_efault =
           !options.mmap &&
@@ -477,7 +497,6 @@ bool Stream(struct pcm* pcm, Input* input, const Options& options) {
                    "PCM RW write resumed after %u EFAULT retries at %llu bytes\n",
                    write_retries, static_cast<unsigned long long>(total));
     }
-    total += transfer;
     const int xruns = pcm_get_xruns(pcm);
     if (xruns != last_xruns) {
       std::fprintf(stderr,

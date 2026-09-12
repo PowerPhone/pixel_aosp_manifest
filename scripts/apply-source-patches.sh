@@ -157,7 +157,8 @@ apply_stack \
   "$source_dir/external/tinyalsa_new" \
   "$project_root/patches/external-tinyalsa-new/0001-expose-pcm-xrun-counter.patch" \
   "$project_root/patches/external-tinyalsa-new/0002-honor-explicit-avail-min.patch" \
-  "$project_root/patches/external-tinyalsa-new/0003-report-tinyplay-xruns.patch"
+  "$project_root/patches/external-tinyalsa-new/0003-report-tinyplay-xruns.patch" \
+  "$project_root/patches/external-tinyalsa-new/0004-retry-frankel-q192-startup-efault.patch"
 
 apply_stack \
   "$source_dir/hardware/interfaces" \
@@ -181,7 +182,14 @@ apply_stack \
   "$project_root/patches/hardware-interfaces/0018-require-qualified-fifo90-playback.patch" \
   "$project_root/patches/hardware-interfaces/0019-match-tinyplay-params-preflight.patch" \
   "$project_root/patches/hardware-interfaces/0020-scope-d0-pcm-open-wait.patch" \
-  "$project_root/patches/hardware-interfaces/0021-use-qualified-native-q192-speaker-path.patch"
+  "$project_root/patches/hardware-interfaces/0021-use-qualified-native-q192-speaker-path.patch" \
+  "$project_root/patches/hardware-interfaces/0022-bypass-48k-speaker-effects-for-native-q192.patch" \
+  "$project_root/patches/hardware-interfaces/0023-use-one-millisecond-d5-mailbox-periods.patch" \
+  "$project_root/patches/hardware-interfaces/0024-advertise-positional-stereo-for-playback.patch" \
+  "$project_root/patches/hardware-interfaces/0025-retain-d5-idle-silence-refill-headroom.patch" \
+  "$project_root/patches/hardware-interfaces/0026-pace-d5-through-one-millisecond-fastmixer.patch" \
+  "$project_root/patches/hardware-interfaces/0027-amortize-d5-fastmixer-fmq-round-trips.patch" \
+  "$project_root/patches/hardware-interfaces/0028-diagnose-d5-playback-transfer-timing.patch"
 
 apply_stack \
   "$source_dir/system/core" \

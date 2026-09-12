@@ -102,6 +102,17 @@ still miss an application callback gap. Fit and remove the steady phase slope
 caused by independent source and capture clocks before treating a pilot-phase
 step as a dropped or repeated sample.
 
+A short-window phase flag can also come from additive acoustic interference.
+Retain the original failed gate, locate the event in the raw recording, and
+compare carrier phase/amplitude before and after it with the off-carrier
+residual spectrum. Unchanged long-window carrier phase alongside a nearby-band
+transient favors interference, but does not identify its source or exclude a
+brief canceling excursion. Do not change firmware or relax thresholds solely
+to remove that flag. If the pilot is weak, a new bounded trial with a stronger
+pilot can improve measurement signal-to-noise; record the changed stimulus
+level and keep the original result. Keep genuine HAL failures terminal even
+if a waveform interval or app counter looks clean.
+
 These checks establish transport continuity, callback scheduling, and coarse
 clock drift. They do not measure sample-clock jitter or phase noise; reserve
 that term for a calibrated timebase or spectral method with a stated bandwidth

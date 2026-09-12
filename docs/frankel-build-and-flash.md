@@ -270,10 +270,15 @@ selects the exact stock CS35L43 module with its ultrasonic GLOBAL_FS immediate
 changed from 48 to 96 kHz (SHA-256
 `fc631fc227ab2e7e8cfa2d664e97ac7cca4c14324fb2a39479fc8e79aa358a3a`).
 `POWERPHONE_D5_TIMER=false` retains the real-mailbox D5 implementation used by
-the published profile. `POWERPHONE_PRIMARY_HAL_192K=true` selects the guarded
-primary-HAL and mixer-route transforms: primary/deep speaker streams are
-advertised at 192 kHz with 1,920-by-two geometry and D1/D5 opens are redirected
-to the qualified D0/source-0 path. Pass the same seven selection values to
+the published profile. `POWERPHONE_PRIMARY_HAL_192K=true` changes the
+primary/deep and physical-interface rate declarations to 192 kHz, redirects
+both proprietary selectors to D5/source 5 with 1920x2 geometry, and connects
+the TDM0 speaker backend to EP6. It marks deep-buffer playback `DIRECT`, so
+normal UI/media use only the persistent primary mixer and cannot race two HAL
+handles on the same source-5 ring. The legacy `rate-only` value retains source 1;
+paired with the native-q192 profile it can assert AMixSPKR and is not a usable
+normal path. Pass
+the same seven selection values to
 `scripts/package-device.sh`, whose completion-attestation verification
 rechecks the selected generated tree. Neither a successful build nor the
 presence of 192000 in ALSA constraints is physical bandwidth evidence.

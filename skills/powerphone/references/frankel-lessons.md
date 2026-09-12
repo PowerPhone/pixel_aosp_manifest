@@ -8,6 +8,11 @@ be copied to another phone.
 
 ## Hardware-qualified transport state
 
+The September 11 pitch investigation supersedes earlier playback qualification
+based on rates, elapsed time, and successful APIs alone. See
+`docs/frankel-playback192-20260911.md` for current live and flashed-image status.
+Do not treat the historical API results below as acoustic pitch validation.
+
 The exact boot-integrated image reached `phase=complete`, PDM and speaker
 readiness `1`, SELinux enforcing, and unchanged AoC restart/coredump counters.
 The OEM-authenticated AoC image remains stock. The selected F1 changes are
@@ -34,48 +39,54 @@ source result or logical-selector-to-enclosure-hole map is retained.
 
 ### Playback
 
-PCM card 0 device 0 runs stereo S32_LE at 192000 Hz with 1920 frames by two
-periods. The selected F1 profile uses source 0, a 192-frame firmware quantum,
-two physical S32 slots, and a 12.288 MHz TDM clock. It patches the two existing
-`AudioEntrypoint` getters in place to implement `a3 ? 192 : 1920`; a prior
-vtable redirect into a zero-filled cave caused an illegal instruction during
-D0 PREPARE and is deliberately absent.
+The corrected September 11 live path is PCM0,D5/source5/EP6, stereo S32_LE
+at 192000 Hz, 1920-by-two ALSA geometry, full 3840-frame initial fill, and
+192 frames per one-millisecond DSP block. The two physical S32 slots use a
+12.288 MHz clock. Both H0 and F1 must agree on the 1536-byte block, including
+the enclosing copy/advance caller, packed mixer stride, retained TX offset,
+cache extent, and balanced eight-byte DMA load/store bursts.
 
-On the exact final integrated boot, the individual bottom and earpiece routes
-each consumed a 4608000-byte three-second WAV with zero xruns. Measured elapsed
-times were 3.4649 and 3.5642 seconds respectively, including bounded first-ring
-startup handling. Java `AudioTrack` and native AAudio then passed on both exact
-BUS routes at an observed S32/stereo/192 kHz hardware rate, with complete
-1536000-frame transfers, zero framework underruns/HAL xruns, and stable AoC
-counters.
+The bottom speaker's 15-second 12 kHz run measured 11999.999466 Hz across
+14.89 seconds of active audio, with zero detected phase discontinuities,
+dropouts, or clipping. Both independently selected amplifiers produced the
+intended 54.283 kHz component in D10 recordings. This is combined-path
+Nyquist-domain evidence above the limit of a 96 kHz transport, not a flat
+response claim through 96 kHz or a calibrated transducer measurement.
+Refer to the dated report for whether the newly packaged image has also
+passed reboot and API qualification; live success does not establish that.
 
-This qualifies the 192 kHz transport and Android API routes. It does not
-independently qualify either transducer's ultrasonic response. Phone
-speaker-to-phone-microphone spectra are only combined-path evidence; calibrated
-external wideband source and receiver measurements remain necessary for
-per-endpoint acoustic-bandwidth claims.
+The earlier D0/source0 and incomplete D5 profiles are historical experiments.
+Do not restore their getter vtable redirects, stale 48-frame caller counts,
+four-word packing, or compensating doubled-cache patch.
 
 ### Ordinary playback at fixed hardware rate
 
 Frankel's proprietary primary AIDL HAL originally exposed its primary and
-deep-buffer built-in speaker use cases at 48 kHz and selected separate D1/D5
-frontends. A guarded, exact-build patch now exposes those stream configurations
-to AudioFlinger as stereo S32_LE at 192 kHz with 1,920-by-two geometry, maps
-their PCM opens onto the already-qualified D0 frontend, and routes their mixer
-paths into the same source-0/EP1 chain. The configuration is changed before
-AudioFlinger creates its playback thread, not after a stream has opened.
+deep-buffer built-in speaker use cases at 48 kHz and selected D1/D5 frontends.
+The first fixed-rate patch combined three independent changes: advertise 192
+kHz, replace D1/D5 geometry, and redirect both PCMs into D0/source 0. It moved
+frames with zero reported underruns but was acoustically silent. A later
+rate-only D1/source-1 trial asserted AMixSPKR under the native-q192 profile.
+Both results are rejected experiments.
 
-This makes the conversion boundary explicit: ordinary 48 kHz AudioTrack input
-is resampled by AudioFlinger, while the HAL and physical AoC transport stay at
-192 kHz. A live-pushed eight-second AudioTrack trial completed all 384,000
-client frames with zero framework underruns and an observed 192 kHz HAL thread.
-The same behavior was then reproduced after flashing the exact packaged image:
-384,000 client frames completed in 8.254 seconds with zero underruns while the
-active deep-buffer stream reported 192 kHz and AoC restart/coredump counters
-remained 0/0.
-Treat this as a compatibility layer, not an exact-rate research measurement;
+The historical fixed-rate state advertises 192 kHz on the primary, deep-buffer, and three
+physical interface profiles; maps both D1 and D5 opens to D5 with 1920-by-two
+geometry; selects AoC source 5; and joins the mixer route to EP6. It also marks
+the deep-buffer port `DIRECT`. Without that last change, AudioPolicy kept both
+primary and deep-buffer mixers open against the same non-shareable source-5
+ring. UI-to-media overlap then made a nominal eight-second AudioTrack finish in
+6.299 seconds and produced 97 missing 20 ms windows in simultaneous capture,
+despite AudioTrack reporting zero underruns. With deep-buffer removed as a
+persistent ordinary-mix candidate, UI and media share one 192 kHz primary
+thread. Three forced-overlap runs completed in 8.005, 8.015, and 8.008 seconds
+with zero underruns, zero interior 20 ms acoustic dropouts, and AoC
+restart/coredump 0/0.
+
+On that exact image, the five-second Java/AAudio matrix passed both D0 speaker
+BUS endpoints and all three D10 microphone BUS endpoints at 192 kHz. Treat the
+primary route as a compatibility layer, not an exact-rate research measurement;
 the address-selected PowerPhone BUS routes remain the evidence path for exact
-192 kHz Java and AAudio clients.
+192 kHz clients.
 
 ## Required target-specific closure
 
@@ -98,8 +109,10 @@ allocates successfully. In that proven path
 `vendor.powerphone.aoc_a32_allocator.ready=0` is intentional. The A32 worker
 current/base priority remains stock at 7/7.
 
-The selected F1 table contains 46 words: 24 cave words followed by 22 hook
-words. Eight hook words replace the two existing AudioEntrypoint getter
+The September 11 F1 table contains 75 words: 44 cave words followed by 31 hook
+words. The retained TX block field is additionally updated in the buffer-rebase
+transaction, and the conditional H0 geometry is a separate six-word profile.
+Eight F1 hook words replace the two existing AudioEntrypoint getter
 functions in place at `0x403f03ac` and `0x403f03bc`. Do not restore the
 retired getter vtable redirects or their zero cave.
 
@@ -130,6 +143,8 @@ opened on it`. This is a lifecycle failure, not a sample-rate failure.
 
 - `docs/frankel-aoc-d10-raw192-runtime.md` describes capture.
 - `docs/frankel-aoc-speaker-runtime.md` describes playback and boot mutation.
+- `docs/frankel-playback192-20260911.md` supersedes the historical playback
+  status with actual pitch, continuity, and ultrasonic self-loop evidence.
 - `docs/frankel-audio-api.md` and
   `docs/frankel-powerphone-image-integration.md` describe HAL/build integration.
 - `docs/frankel-physical-audio-map.md` records proven and unresolved identities.
@@ -159,3 +174,10 @@ opened on it`. This is a lifecycle failure, not a sample-rate failure.
 7. Separate transport qualification from physical acoustic bandwidth. Correct
    rates, clocks, bytes, fresh blocks, APIs, and spectra from an uncalibrated
    self-loop still do not measure each transducer independently.
+8. Patch one primary-path dimension at a time. Rate-only advertisement can be
+   correct while a simultaneous PCM redirect is silent; require audible output
+   and wall-clock duration in addition to frame/xrun counters.
+9. Count hardware owners, not just routes. Two AudioFlinger outputs can report
+   the same correct 192 kHz geometry and zero underruns while racing one DSP
+   source ring; force UI/media overlap and compare wall time with a simultaneous
+   physical capture before declaring ordinary audio stable.

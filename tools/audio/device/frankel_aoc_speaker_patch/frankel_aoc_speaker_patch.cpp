@@ -48,12 +48,12 @@ constexpr std::string_view kExpectedVendorBuildId = "CP2A.260805.005";
 constexpr char kFactoryDiag[] = "/dev/acd-factory_diag";
 constexpr char kDebugDevice[] = "/dev/acd-debug";
 constexpr char kPcmInventory[] = "/proc/asound/pcm";
-constexpr char kPlaybackDevice[] = "/dev/snd/pcmC0D0p";
-constexpr char kPlaybackStatus[] = "/proc/asound/card0/pcm0p/sub0/status";
+constexpr char kPlaybackDevice[] = "/dev/snd/pcmC0D5p";
+constexpr char kPlaybackStatus[] = "/proc/asound/card0/pcm5p/sub0/status";
 constexpr unsigned int kPlaybackDeviceMajor = 116;
-// Frankel uses CONFIG_SND_DYNAMIC_MINORS. PCM D0 is the first playback node
-// registered after controlC0 and therefore has dynamic minor 2.
-constexpr unsigned int kPlaybackDeviceMinor = 2;
+// Frankel uses CONFIG_SND_DYNAMIC_MINORS. PCM D5 is registered as dynamic
+// minor 7 on the reviewed kernel/card inventory.
+constexpr unsigned int kPlaybackDeviceMinor = 7;
 constexpr char kRestartCount[] =
     "/sys/devices/platform/9000000.aoc/restart_count";
 constexpr char kCoredumpCount[] =
@@ -106,12 +106,13 @@ constexpr std::array<uint8_t, 4> ConstLe32Bytes(uint32_t value) {
 }
 
 // Native-q192 speaker storage. One 0x3000-byte aligned allocation is split
-// into four 0xc00-byte banks. A second allocation is forbidden: hardware
+// into four 0x0c00-byte banks: two CPU banks and two DMA banks. A second
+// allocation is forbidden: hardware
 // proved that it exhausts HeapMicroAllocGenericInternal and restarts AoC.
 constexpr uint32_t kSpeakerObject = 0x4051b0b8;
 constexpr uint32_t kSpeakerVtable = 0x40275d00;
 constexpr uint32_t kStockBankBytes = 0x600;
-constexpr uint32_t kNativeBankBytes = 0xc00;
+constexpr uint32_t kNativeBankBytes = 0x0c00;
 constexpr uint32_t kAllocationBytes = 0x3000;
 constexpr uint32_t kDmaTxOffset = 0x1800;
 constexpr uint32_t kHeapMinimum = 0x4051c800;
@@ -119,6 +120,9 @@ constexpr uint32_t kHeapLimit = 0x42000000;
 constexpr std::size_t kZeroScanChunkBytes = 64;
 constexpr uint32_t kTxSizeAddress = kSpeakerObject + 0x2b8;
 constexpr uint32_t kSourceSizeAddress = kSpeakerObject + 0x2bc;
+constexpr uint32_t kTxBlockBytesAddress = kSpeakerObject + 0x2a8;
+constexpr uint32_t kStockTxBlockBytes = 0x300;
+constexpr uint32_t kNativeTxBlockBytes = 192 * 2 * 4;
 constexpr uint32_t kTxPointerAddress = kSpeakerObject + 0x2c4;
 constexpr uint32_t kSourcePointerAddress = kSpeakerObject + 0x2c8;
 constexpr uint32_t kStockTxPointer = 0x4051bbe0;
@@ -549,7 +553,7 @@ bool CheckPlaybackStatus(std::string* error) {
   }
   status = TrimAscii(std::move(status));
   if (status != "closed") {
-    *error = "PCM 0,0 idleness is not established (status='" + status +
+    *error = "PCM 0,5 idleness is not established (status='" + status +
              "'); stop all speaker playback";
     return false;
   }
@@ -660,7 +664,7 @@ bool CheckNoPlaybackFileDescriptor(dev_t playback_device, std::string* error) {
       }
       if (S_ISCHR(descriptor_status.st_mode) &&
           descriptor_status.st_rdev == playback_device) {
-        *error = "PCM 0,0 is open at " + fd_directory_path + "/" +
+        *error = "PCM 0,5 is open at " + fd_directory_path + "/" +
                  descriptor_entry->d_name + "; stop all speaker playback";
         return false;
       }
@@ -683,7 +687,7 @@ bool CheckPlaybackClosed(std::string* error) {
     return false;
   }
   if (!(before == after)) {
-    *error = "PCM 0,0 character-device identity changed during fd scan";
+    *error = "PCM 0,5 character-device identity changed during fd scan";
     return false;
   }
   return true;
@@ -1186,11 +1190,11 @@ bool ValidateAllocation(FactoryDiag* transport, const Generation& generation,
 
 bool RequireFixedSpeaker(FactoryDiag* transport,
                          const Generation& generation, std::string* error) {
-  constexpr std::array<std::pair<uint32_t, uint32_t>, 16> kFields = {{
+  constexpr std::array<std::pair<uint32_t, uint32_t>, 15> kFields = {{
       {0x280, 0x00010000}, {0x284, 0x4051c7f8}, {0x288, 0x00001800},
       {0x28c, 4},          {0x290, 2},          {0x294, 3},
       {0x298, 0x30},       {0x29c, 0x300},      {0x2a0, 0xc0},
-      {0x2a4, 0x300},      {0x2a8, 0x300},      {0x2ac, 0},
+      {0x2a4, 0x300},      {0x2ac, 0},
       {0x2b0, 0},          {0x2b4, 0x300},      {0x2c0, 0x4051b8d0},
       {0x2cc, 0x4051b800},
   }};
@@ -1279,6 +1283,7 @@ bool ReadSpeakerBufferState(FactoryDiag* transport,
   uint32_t source_size = 0;
   uint32_t tx_pointer = 0;
   uint32_t source_pointer = 0;
+  uint32_t tx_block_bytes = 0;
   if (!ReadU32Guarded(transport, generation, kF1Core, kTxSizeAddress,
                       &tx_size, error) ||
       !ReadU32Guarded(transport, generation, kF1Core, kSourceSizeAddress,
@@ -1286,16 +1291,20 @@ bool ReadSpeakerBufferState(FactoryDiag* transport,
       !ReadU32Guarded(transport, generation, kF1Core, kTxPointerAddress,
                       &tx_pointer, error) ||
       !ReadU32Guarded(transport, generation, kF1Core, kSourcePointerAddress,
-                      &source_pointer, error)) {
+                      &source_pointer, error) ||
+      !ReadU32Guarded(transport, generation, kF1Core, kTxBlockBytesAddress,
+                      &tx_block_bytes, error)) {
     return false;
   }
   const bool stock = tx_size == kStockBankBytes &&
                      source_size == kStockBankBytes &&
                      tx_pointer == kStockTxPointer &&
-                     source_pointer == kStockSourcePointer;
+                     source_pointer == kStockSourcePointer &&
+                     tx_block_bytes == kStockTxBlockBytes;
   const bool rebased = tx_size == kNativeBankBytes &&
                        source_size == kNativeBankBytes &&
-                       source_pointer == tx_pointer + kNativeBankBytes;
+                       source_pointer == tx_pointer + kNativeBankBytes &&
+                       tx_block_bytes == kNativeTxBlockBytes;
   if (!stock && !rebased) {
     *error = "speaker CPU buffer layout is neither exact stock nor exact "
              "native-q192 rebase; cold reboot required";
@@ -1312,7 +1321,8 @@ bool ReadSpeakerBufferState(FactoryDiag* transport,
                               &backing, &descriptor, error)) {
       return false;
     }
-    const uint32_t expected_size = stock ? kStockBankBytes : kNativeBankBytes;
+    const uint32_t expected_size =
+        stock ? kStockBankBytes : kNativeBankBytes;
     const uint32_t expected_backing =
         stock ? kDmaRings[index].inline_backing
               : tx_pointer + kDmaTxOffset +
@@ -1329,7 +1339,7 @@ bool ReadSpeakerBufferState(FactoryDiag* transport,
   *state = stock ? SpeakerBufferState::kStock : SpeakerBufferState::kRebased;
   *cpu_allocation = stock ? 0 : tx_pointer;
   std::cout << (stock ? "verified exact stock 0x600 speaker banks\n"
-                      : "verified exact rebased 0xc00 speaker banks at 0x") ;
+                      : "verified exact rebased 0xc00 speaker banks at 0x");
   if (rebased) {
     std::cout << std::hex << tx_pointer << std::dec << '\n';
   }
@@ -2523,6 +2533,15 @@ bool CommitSpeakerBufferRebase(FactoryDiag* transport,
       return false;
     }
   }
+  // The constructor derived this from 48 frames x four slots. Start changes
+  // those inputs after construction. Correct the retained ping-pong offset,
+  // final notification extent, and stock cache-writeback length together.
+  // RX has its own smaller intermediate buffer and retains its stock extent.
+  if (!SetU32Exact(transport, generation, kTxBlockBytesAddress,
+                   kStockTxBlockBytes, kNativeTxBlockBytes,
+                   "speaker TX period extent", error)) {
+    return false;
+  }
   return true;
 }
 
@@ -2655,7 +2674,7 @@ int Run(std::string_view action_text, bool allow_incomplete_boot,
         !CheckPlaybackClosed(error)) {
       return 2;
     }
-    std::cout << "verified exact PCM 0,0 closed: inventory, character node, "
+    std::cout << "verified exact PCM 0,5 closed: inventory, character node, "
                  "and complete root fd scan\n";
     return 0;
   }

@@ -42,7 +42,12 @@ constexpr uint16_t kCommandMemoryDump = 0x26;
 constexpr int32_t kDefaultCore = 2;  // F1.
 constexpr std::size_t kHeaderSize = 8;
 constexpr std::size_t kMaximumFactoryResponse = 4096;
-constexpr std::size_t kMaximumDebugOutput = 64 * 1024;
+// Active native-q192 speaker diagnostics emit two GLITCH records every
+// millisecond.  A memory-dump reply shares that text stream, so the original
+// 64-KiB ceiling could be reached before the requested address line was
+// parsed.  Keep the one-second deadline, but retain enough bounded text to
+// permit read-only live speaker-bank inspection.
+constexpr std::size_t kMaximumDebugOutput = 2 * 1024 * 1024;
 constexpr uint32_t kMaximumDumpChunk = 256;
 constexpr uint32_t kMaximumDumpRequest = 64 * 1024;
 constexpr auto kFactoryWriteTimeout = std::chrono::seconds(2);
@@ -373,8 +378,9 @@ bool IsHorizontalSpace(char character) {
 bool ParseMemoryDump(std::string_view debug_output, uint32_t address,
                      std::size_t size, std::vector<uint8_t>* result,
                      std::string* error) {
-  result->clear();
-  uint32_t wanted = address;
+  result->assign(size, 0);
+  std::vector<bool> covered(size, false);
+  std::size_t covered_count = 0;
   std::size_t cursor = 0;
   while (cursor < debug_output.size()) {
     const std::size_t prefix = debug_output.find("0x", cursor);
@@ -428,13 +434,24 @@ bool ParseMemoryDump(std::string_view debug_output, uint32_t address,
       line.push_back(static_cast<uint8_t>((high << 4) | low));
       position += 2;
     }
-    if (static_cast<uint32_t>(line_address) == wanted && !line.empty()) {
-      result->insert(result->end(), line.begin(), line.end());
-      if (result->size() >= size) {
-        result->resize(size);
-        return true;
+    const uint64_t request_begin = address;
+    const uint64_t request_end = request_begin + size;
+    const uint64_t line_begin = line_address;
+    const uint64_t line_end = line_begin + line.size();
+    const uint64_t copy_begin = std::max(request_begin, line_begin);
+    const uint64_t copy_end = std::min(request_end, line_end);
+    for (uint64_t current = copy_begin; current < copy_end; ++current) {
+      const std::size_t destination =
+          static_cast<std::size_t>(current - request_begin);
+      const std::size_t source = static_cast<std::size_t>(current - line_begin);
+      (*result)[destination] = line[source];
+      if (!covered[destination]) {
+        covered[destination] = true;
+        ++covered_count;
       }
-      wanted += static_cast<uint32_t>(line.size());
+    }
+    if (covered_count == size) {
+      return true;
     }
     cursor = std::max(position, prefix + 2);
   }
@@ -484,30 +501,77 @@ class FactoryDiag {
  private:
   bool DumpChunk(uint32_t address, uint32_t size, std::vector<uint8_t>* bytes,
                  std::string* error) {
+    // Keep one debug descriptor open across drain, command, acknowledgement,
+    // and parse. The formatted dump can be emitted before factory_diag's
+    // acknowledgement; reopening /dev/acd-debug after that loses the reply
+    // under the continuous F1 speaker diagnostics.
+    UniqueFd debug_fd(open(kDebugDevice, O_RDONLY | O_CLOEXEC | O_NONBLOCK));
+    if (!debug_fd.valid()) {
+      *error = ErrnoText(std::string("open ") + kDebugDevice);
+      return false;
+    }
+    const Clock::time_point drain_deadline =
+        Clock::now() + std::chrono::milliseconds(100);
+    std::array<char, 4096> buffer{};
+    std::size_t discarded = 0;
+    while (Clock::now() < drain_deadline && discarded <= kMaximumDebugOutput) {
+      const ssize_t count = read(debug_fd.get(), buffer.data(), buffer.size());
+      if (count > 0) {
+        discarded += static_cast<std::size_t>(count);
+        continue;
+      }
+      if (count == 0 || errno == EAGAIN || errno == EWOULDBLOCK) {
+        break;
+      }
+      if (errno == EINTR) {
+        continue;
+      }
+      *error = ErrnoText(std::string("read ") + kDebugDevice);
+      return false;
+    }
+    if (discarded > kMaximumDebugOutput) {
+      *error = "unable to establish a bounded acd-debug boundary";
+      return false;
+    }
     const uint8_t counter = counter_++;
     const std::vector<uint8_t> packet =
         BuildDumpPacket(counter, core_, address, size);
+    if (!WriteOnePacket(packet, error)) {
+      return false;
+    }
+    std::vector<uint8_t> response;
+    if (!ReadResponse(&response, error) ||
+        !ParseCommandResponse(response, counter, kCommandMemoryDump, error)) {
+      return false;
+    }
+    const Clock::time_point dump_deadline =
+        Clock::now() + std::chrono::seconds(1);
     std::string debug;
-    if (!Transact(packet, counter, kCommandMemoryDump, true, &debug, error)) {
-      return false;
+    while (Clock::now() < dump_deadline) {
+      const ssize_t count = read(debug_fd.get(), buffer.data(), buffer.size());
+      if (count > 0) {
+        debug.append(buffer.data(), static_cast<std::size_t>(count));
+        if (ParseMemoryDump(debug, address, size, bytes, error)) {
+          return true;
+        }
+        if (debug.size() > kMaximumDebugOutput) {
+          debug.erase(0, debug.size() - kMaximumDebugOutput);
+        }
+        continue;
+      }
+      if (count < 0 && errno == EINTR) {
+        continue;
+      }
+      if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        *error = ErrnoText(std::string("read ") + kDebugDevice);
+        return false;
+      }
+      PauseBeforeRetry(dump_deadline);
     }
-    if (ParseMemoryDump(debug, address, size, bytes, error)) {
-      return true;
-    }
-    // The command response and text channel are separate. Collect one delayed
-    // tail without ever resending the command; this keeps reads idempotent and
-    // writes strictly one-shot.
-    std::string delayed;
-    if (!ReadDebug(std::chrono::seconds(1), std::chrono::milliseconds(100),
-                   &delayed, error)) {
-      return false;
-    }
-    debug += delayed;
-    if (!ParseMemoryDump(debug, address, size, bytes, error)) {
-      *error += "; debug output: " + debug;
-      return false;
-    }
-    return true;
+    (void)ParseMemoryDump(debug, address, size, bytes, error);
+    *error += "; captured " + std::to_string(debug.size()) +
+              " bytes of interleaved debug output";
+    return false;
   }
 
   bool WriteOnePacket(std::span<const uint8_t> packet, std::string* error) {
@@ -622,8 +686,8 @@ class FactoryDiag {
                 uint16_t command, bool collect_debug, std::string* debug,
                 std::string* error) {
     std::string discarded;
-    if (!ReadDebug(std::chrono::milliseconds(100),
-                   std::chrono::milliseconds(20), &discarded, error) ||
+    if (!ReadDebug(std::chrono::milliseconds(10),
+                   std::chrono::milliseconds(2), &discarded, error) ||
         !WriteOnePacket(packet, error)) {
       return false;
     }
@@ -636,7 +700,8 @@ class FactoryDiag {
       debug->clear();
       return true;
     }
-    return ReadDebug(std::chrono::seconds(1), std::chrono::milliseconds(100),
+    return ReadDebug(std::chrono::milliseconds(300),
+                     std::chrono::milliseconds(5),
                      debug, error);
   }
 

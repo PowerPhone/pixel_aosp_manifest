@@ -47,16 +47,19 @@ count. `--post-write-sleep-us` is retained only for explicit timing
 experiments and defaults to zero.
 
 An RW ioctl returning status zero is not itself a complete transfer. The
-helper now requires `snd_xferi.result` to equal the requested frame count.
-A short, zero, negative, or oversized result terminates the stream with an
-error; no untransferred tail is silently counted or retried. On both success
-and stream failure, `rw_returned_frames` and `rw_returned_bytes` report the
-sum of valid frame counts actually returned by successful ioctls, including
-a short positive result from the final failed request. The separate
-`rw_successful_ioctl_calls` field counts zero-status ioctls, not complete
-periods. These are kernel-reported transfer counts, not proof of acoustic
-output. Earlier `streamed=...` reports did not inspect this result field and
-cannot alone prove that all requested frames were accepted.
+helper advances by the positive frame count in `snd_xferi.result` and submits
+only the untransferred suffix until the period is complete. This handles the
+real D5 result of 192 accepted frames from a 1920-frame request without
+dropping the remaining 1728 frames or replaying the accepted prefix. EFAULT
+retries retain that precise suffix pointer. Zero, negative, or oversized
+results still terminate with an error instead of entering an unbounded loop.
+On both success and failure, `rw_returned_frames` and `rw_returned_bytes`
+report the sum of valid frame counts actually returned by successful ioctls.
+`rw_short_write_calls` counts positive partial completions, while
+`rw_successful_ioctl_calls` counts zero-status ioctls, not complete periods.
+These are kernel-reported transfer counts, not proof of acoustic output.
+Earlier `streamed=...` reports did not inspect this result field and cannot
+alone prove that all requested frames were accepted.
 
 The speaker TDM and amplifier controls must be configured separately. The
 hardware-qualified native-q192 D0 target is card 0, device 0, stereo S32_LE at
