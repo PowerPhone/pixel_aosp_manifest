@@ -204,23 +204,23 @@ constexpr std::array<Patch, 2> kAllocatorScratchPatches = {{
     {"allocator result literal", kAllocatorScratchLiteralAddress,
      {0x00, 0x00, 0x00, 0x00}, {0xa0, 0x64, 0x3f, 0x40},
      PatchKind::kCave},
-    {"allocator P192 marker", kAllocatorScratchLiteralAddress + 4,
-     {0x00, 0x00, 0x00, 0x00}, {0x32, 0x39, 0x31, 0x50},
+    {"guarded allocator extension entry", kAllocatorScratchLiteralAddress + 4,
+     {0x00, 0x00, 0x00, 0x00}, {0x90, 0x15, 0x37, 0x40},
      PatchKind::kCave},
 }};
 constexpr std::array<Patch, 6> kAllocatorBodyPatches = {{
     {"pure allocator word 0", kAllocatorBodyAddress, {0x36, 0x41, 0x00, 0x5e},
-     {0x36, 0x41, 0x00, 0x4c}, PatchKind::kCave},
+     {0x91, 0x12, 0xfc, 0xa0}, PatchKind::kCave},
     {"pure allocator word 1", kAllocatorBodyAddress + 4, {0x03, 0x08, 0x48, 0xdd},
-     {0x0a, 0x3c, 0x0b, 0x80}, PatchKind::kCave},
+     {0x09, 0x00, 0x00, 0x00}, PatchKind::kCave},
     {"pure allocator word 2", kAllocatorBodyAddress + 8, {0xc8, 0x1d, 0xf0, 0x00},
-     {0xbb, 0x11, 0x81, 0x15}, PatchKind::kCave},
+     {0x00, 0x00, 0x00, 0x00}, PatchKind::kCave},
     {"pure allocator word 3", kAllocatorBodyAddress + 12, {0xbd, 0x04, 0xe5, 0x01},
-     {0x6e, 0xe0, 0x08, 0x00}, PatchKind::kCave},
+     {0x00, 0x00, 0x00, 0x00}, PatchKind::kCave},
     {"pure allocator word 4", kAllocatorBodyAddress + 16, {0x00, 0x1d, 0xf0, 0x00},
-     {0x41, 0x0d, 0xfc, 0xa9}, PatchKind::kCave},
+     {0x00, 0x00, 0x00, 0x00}, PatchKind::kCave},
     {"pure allocator word 5", kAllocatorBodyAddress + 20, {0x00, 0x00, 0x00, 0x00},
-     {0x04, 0x1d, 0xf0, 0x00}, PatchKind::kCave},
+     {0x00, 0x00, 0x00, 0x00}, PatchKind::kCave},
 }};
 constexpr Patch kAllocatorDispatch = {
     "HD Mic dispatch -> pure allocator", 0x4038ea50,
@@ -228,12 +228,85 @@ constexpr Patch kAllocatorDispatch = {
     PatchKind::kHook};
 
 constexpr Patch kCacheFlushDispatch = {
-    "HD Mic gain dispatch -> whole F1 I-cache invalidator",
+    "HD Mic gain dispatch -> coherent F1 I-cache/literal invalidator",
     0x4038ea50,
     {0xc0, 0xc8, 0x3d, 0x40},
-    {0xe0, 0x6d, 0x48, 0x40},
+    {0xa4, 0x64, 0x3f, 0x40},
     PatchKind::kCave,
 };
+
+// Reboot-resident, exact-stock padding only. The first region extends the
+// previously qualified period1 padding and ends before live ASCII at715d0.
+// The second region is behind the stock D12 no-op return and ends before
+// the next live literal at64c0; the allocation cookie64a0 is NOT code.
+// Encoded by frankel_aoc_speaker_coherence.{S,ld}; retain these unreachable
+// helpers after allocation so every later cache synchronization is coherent.
+constexpr std::array<Patch, 29> kCoherencePatches = {{
+    {"allocator extension word 0", 0x40371580,
+     {0, 0, 0, 0}, {0xa0, 0x64, 0x3f, 0x40}, PatchKind::kCave},
+    {"allocator extension word 1", 0x40371584,
+     {0, 0, 0, 0}, {0x40, 0xbf, 0x40, 0x40}, PatchKind::kCave},
+    {"allocator extension word 2", 0x40371588,
+     {0, 0, 0, 0}, {0x50, 0xea, 0x38, 0x40}, PatchKind::kCave},
+    {"allocator extension word 3", 0x4037158c,
+     {0, 0, 0, 0}, {0x00, 0x00, 0x00, 0x00}, PatchKind::kCave},
+    {"allocator extension word 4", 0x40371590,
+     {0, 0, 0, 0}, {0x36, 0x41, 0x00, 0x41}, PatchKind::kCave},
+    {"allocator extension word 5", 0x40371594,
+     {0, 0, 0, 0}, {0xfb, 0xff, 0x28, 0x04}, PatchKind::kCave},
+    {"allocator extension word 6", 0x40371598,
+     {0, 0, 0, 0}, {0xdc, 0xa2, 0x7c, 0xf2}, PatchKind::kCave},
+    {"allocator extension word 7", 0x4037159c,
+     {0, 0, 0, 0}, {0x29, 0x04, 0x4c, 0x0a}, PatchKind::kCave},
+    {"allocator extension word 8", 0x403715a0,
+     {0, 0, 0, 0}, {0x3c, 0x0b, 0x80, 0xbb}, PatchKind::kCave},
+    {"allocator extension word 9", 0x403715a4,
+     {0, 0, 0, 0}, {0x11, 0x81, 0xf7, 0xff}, PatchKind::kCave},
+    {"allocator extension word 10", 0x403715a8,
+     {0, 0, 0, 0}, {0xe0, 0x08, 0x00, 0xa0}, PatchKind::kCave},
+    {"allocator extension word 11", 0x403715ac,
+     {0, 0, 0, 0}, {0x2a, 0x93, 0x29, 0x04}, PatchKind::kCave},
+    {"allocator extension word 12", 0x403715b0,
+     {0, 0, 0, 0}, {0x42, 0x74, 0x00, 0xc0}, PatchKind::kCave},
+    {"allocator extension word 13", 0x403715b4,
+     {0, 0, 0, 0}, {0x20, 0x00, 0x51, 0xf4}, PatchKind::kCave},
+    {"allocator extension word 14", 0x403715b8,
+     {0, 0, 0, 0}, {0xff, 0x82, 0x75, 0x02}, PatchKind::kCave},
+    {"allocator extension word 15", 0x403715bc,
+     {0, 0, 0, 0}, {0x62, 0x75, 0x00, 0xc0}, PatchKind::kCave},
+    {"allocator extension word 16", 0x403715c0,
+     {0, 0, 0, 0}, {0x20, 0x00, 0x0c, 0x02}, PatchKind::kCave},
+    {"allocator extension word 17", 0x403715c4,
+     {0, 0, 0, 0}, {0x1d, 0xf0, 0x00, 0x00}, PatchKind::kCave},
+    {"allocator extension word 18", 0x403715c8,
+     {0, 0, 0, 0}, {0x00, 0x00, 0x00, 0x00}, PatchKind::kCave},
+    {"allocator extension word 19", 0x403715cc,
+     {0, 0, 0, 0}, {0x00, 0x00, 0x00, 0x00}, PatchKind::kCave},
+    {"cache literals word 0", 0x403f6490,
+     {0, 0, 0, 0}, {0xe0, 0x6d, 0x48, 0x40}, PatchKind::kCave},
+    {"cache literals word 1", 0x403f6494,
+     {0, 0, 0, 0}, {0x50, 0xea, 0x38, 0x40}, PatchKind::kCave},
+    {"cache trampoline word 0", 0x403f64a4,
+     {0, 0, 0, 0}, {0x36, 0x41, 0x00, 0x81}, PatchKind::kCave},
+    {"cache trampoline word 1", 0x403f64a8,
+     {0, 0, 0, 0}, {0xfa, 0xff, 0xe0, 0x08}, PatchKind::kCave},
+    {"cache trampoline word 2", 0x403f64ac,
+     {0, 0, 0, 0}, {0x00, 0x41, 0xf9, 0xff}, PatchKind::kCave},
+    {"cache trampoline word 3", 0x403f64b0,
+     {0, 0, 0, 0}, {0x82, 0x74, 0x02, 0x62}, PatchKind::kCave},
+    {"cache trampoline word 4", 0x403f64b4,
+     {0, 0, 0, 0}, {0x74, 0x00, 0xc0, 0x20}, PatchKind::kCave},
+    {"cache trampoline word 5", 0x403f64b8,
+     {0, 0, 0, 0}, {0x00, 0x4c, 0x02, 0x1d}, PatchKind::kCave},
+    {"cache trampoline word 6", 0x403f64bc,
+     {0, 0, 0, 0}, {0xf0, 0x00, 0x00, 0x00}, PatchKind::kCave},
+}};
+constexpr std::array<StockWordRequirement, 4> kCoherenceBoundaryWords = {{
+    {"period padding next live data", 0x403715d0, {0x30, 0x31, 0x32, 0x33}},
+    {"D12 no-op entry/return", 0x403f6488, {0x36, 0x41, 0x00, 0x1d}},
+    {"D12 no-op return/padding", 0x403f648c, {0xf0, 0x00, 0x00, 0x00}},
+    {"D12 padding next live literal", 0x403f64c0, {0xf0, 0x69, 0x48, 0x40}},
+}};
 
 using Clock = std::chrono::steady_clock;
 
@@ -814,6 +887,34 @@ void PauseBeforeRetry(Clock::time_point deadline) {
   (void)nanosleep(&pause, nullptr);
 }
 
+// Preserve only actual HD Mic controller messages that this exclusive debug
+// reader would otherwise consume before aocd can forward them. This observes
+// firmware execution, not just Linux's accepted mixer-control write.
+void TraceHdMicDebug(std::string_view chunk) {
+  static std::string partial;
+  for (const char value : chunk) {
+    if (value == '\n' || value == '\0') {
+      if ((partial.find("F1:") != std::string::npos ||
+           partial.find("A3:") != std::string::npos) &&
+          (partial.find("016c") != std::string::npos ||
+           partial.find("016C") != std::string::npos)) {
+        std::ostringstream line;
+        line << "aoc-control-observed monotonic_ms="
+             << std::chrono::duration_cast<std::chrono::milliseconds>(
+                    Clock::now().time_since_epoch()).count()
+             << ' ' << partial << '\n';
+        std::cout << line.str();
+      }
+      partial.clear();
+    } else {
+      if (partial.size() == 2048) {
+        partial.erase(0, 1024);
+      }
+      partial.push_back(value);
+    }
+  }
+}
+
 bool DrainDebugNow(int fd, std::string* error) {
   const Clock::time_point deadline = Clock::now() + kDebugDrainTimeout;
   std::size_t discarded = 0;
@@ -821,6 +922,7 @@ bool DrainDebugNow(int fd, std::string* error) {
   while (Clock::now() < deadline && discarded <= kMaximumDebugOutput) {
     const ssize_t count = read(fd, buffer.data(), buffer.size());
     if (count > 0) {
+      TraceHdMicDebug(std::string_view(buffer.data(), static_cast<std::size_t>(count)));
       discarded += static_cast<std::size_t>(count);
       continue;
     }
@@ -847,6 +949,7 @@ bool ReadDumpDebug(int fd, uint32_t address, std::size_t size,
   while (Clock::now() < deadline) {
     const ssize_t count = read(fd, buffer.data(), buffer.size());
     if (count > 0) {
+      TraceHdMicDebug(std::string_view(buffer.data(), static_cast<std::size_t>(count)));
       output->append(buffer.data(), static_cast<std::size_t>(count));
       if (ParseMemoryDump(*output, address, size, bytes, &parse_error)) {
         return true;
@@ -893,6 +996,10 @@ class FactoryDiag {
       *error = "memory dump size must be 1..256 bytes";
       return false;
     }
+    uint32_t wire_address = address;
+    if (!SharedWireAddress(core, address, size, &wire_address, error)) {
+      return false;
+    }
     // Open and drain the debug service before issuing the command. The AoC
     // service is message-backed and exclusive-open, so retaining this exact
     // descriptor both establishes the request boundary and preserves a dump
@@ -907,12 +1014,12 @@ class FactoryDiag {
     }
     const uint8_t counter = counter_++;
     const std::vector<uint8_t> packet =
-        BuildDumpPacket(counter, core, address, static_cast<uint32_t>(size));
+        BuildDumpPacket(counter, core, wire_address, static_cast<uint32_t>(size));
     if (!Transact(packet, counter, kCommandMemoryDump, error)) {
       return false;
     }
     std::string debug;
-    return ReadDumpDebug(debug_fd.get(), address, size, bytes, &debug, error);
+    return ReadDumpDebug(debug_fd.get(), wire_address, size, bytes, &debug, error);
   }
 
   bool DumpWord(int32_t core, uint32_t address, std::array<uint8_t, 4>* word,
@@ -932,9 +1039,13 @@ class FactoryDiag {
 
   bool SetWord(int32_t core, uint32_t address, std::span<const uint8_t, 4> word,
                std::string* error) {
+    uint32_t wire_address = address;
+    if (!SharedWireAddress(core, address, word.size(), &wire_address, error)) {
+      return false;
+    }
     const uint8_t counter = counter_++;
     const std::vector<uint8_t> packet =
-        BuildSetWordPacket(counter, core, address, word);
+        BuildSetWordPacket(counter, core, wire_address, word);
     return Transact(packet, counter, kCommandMemorySet, error);
   }
 
@@ -944,6 +1055,58 @@ class FactoryDiag {
   }
 
  private:
+  bool SharedWireAddress(int32_t core, uint32_t address, std::size_t size,
+                         uint32_t* wire_address, std::string* error) {
+    *wire_address = address;
+    // Only these nine shared SRAM sections have live-verified paired A32
+    // mappings. MB0 uses a coarse L2 descriptor and is deliberately excluded.
+    // Core1 runtime/TCB accesses retain A32's cached view of its own state.
+    if ((core != kF1Core && core != kH0Core) || address < 0x40100000U ||
+        address >= 0x40a00000U) {
+      return true;
+    }
+    if (size > 0x40a00000U - address) {
+      *error = "factory transaction crosses the verified shared alias range";
+      return false;
+    }
+    if (!shared_alias_guarded_) {
+      std::vector<uint8_t> cached;
+      std::vector<uint8_t> uncached;
+      // Explicit core1 accesses bypass this translation, avoiding recursion.
+      // Read the live SECTION descriptors, not the boot ROM's different
+      // initial supersection table. Both reads precede the first alias access.
+      if (!Dump(kA32Core, 0x40009004U, 36, &cached, error) ||
+          !Dump(kA32Core, 0x4000a004U, 36, &uncached, error)) {
+        *error = "shared alias page-table guard failed: " + *error;
+        return false;
+      }
+      if (cached.size() != 36 || uncached.size() != 36) {
+        *error = "shared alias page-table guard has an incomplete descriptor block";
+        return false;
+      }
+      for (uint32_t mb = 1; mb <= 9; ++mb) {
+        const auto expected_cached = ConstLe32Bytes((mb << 20) | 0x1c0eU);
+        const auto expected_uncached = ConstLe32Bytes((mb << 20) | 0x1c12U);
+        const std::size_t offset = (mb - 1) * 4;
+        if (!std::equal(expected_cached.begin(), expected_cached.end(),
+                        cached.begin() + offset) ||
+            !std::equal(expected_uncached.begin(), expected_uncached.end(),
+                        uncached.begin() + offset)) {
+          *error = "unknown live A32 shared-memory mapping for MB" +
+                   std::to_string(mb) + "; refusing uncached factory access";
+          return false;
+        }
+      }
+      shared_alias_guarded_ = true;
+      std::cout << "verified live A32 MB1..9 WBWA/noncacheable section pairs; "
+                   "F1/H0 factory wire accesses use 0x80100000..0x809fffff\n";
+    }
+    // Translate only the factory address. Stored DSP pointers, patch-model
+    // addresses, and caller-visible guard values remain logical0x40xxxxxx.
+    *wire_address = address + 0x40000000U;
+    return true;
+  }
+
   bool WriteOnePacket(std::span<const uint8_t> packet, std::string* error) {
     const Clock::time_point deadline = Clock::now() + kFactoryWriteTimeout;
     int raw_fd = -1;
@@ -1058,6 +1221,7 @@ class FactoryDiag {
   }
 
   uint8_t counter_ = 0;
+  bool shared_alias_guarded_ = false;
 };
 
 uint32_t ReadLe32(std::span<const uint8_t> bytes, std::size_t offset) {
@@ -2035,6 +2199,62 @@ bool RequireUnselectedSitesStock(FactoryDiag* transport,
   return true;
 }
 
+bool ReadCoherenceScaffold(FactoryDiag* transport,
+                            const Generation& generation, bool* installed,
+                            std::string* error) {
+  for (const auto& guard : kCoherenceBoundaryWords) {
+    std::array<uint8_t, 4> actual{};
+    if (!DumpWordGuarded(transport, generation, kF1Core, guard.address,
+                         &actual, error)) {
+      return false;
+    }
+    if (actual != guard.expected) {
+      *error = std::string(guard.name) + " changed; refusing coherence cave";
+      return false;
+    }
+  }
+  bool all_stock = true;
+  bool all_installed = true;
+  for (const Patch& patch : kCoherencePatches) {
+    std::array<uint8_t, 4> actual{};
+    if (!DumpWordGuarded(transport, generation, kF1Core, patch.address,
+                         &actual, error)) {
+      return false;
+    }
+    all_stock &= actual == patch.before;
+    all_installed &= actual == patch.after;
+    if (actual != patch.before && actual != patch.after) {
+      *error = std::string(patch.name) + " is unknown; cold reboot required";
+      return false;
+    }
+  }
+  if (!all_stock && !all_installed) {
+    *error = "mixed coherence cave installation; cold reboot required";
+    return false;
+  }
+  *installed = all_installed;
+  return true;
+}
+
+bool EnsureCoherenceScaffold(FactoryDiag* transport,
+                              const Generation& generation,
+                              std::string* error) {
+  bool installed = false;
+  if (!ReadCoherenceScaffold(transport, generation, &installed, error)) {
+    return false;
+  }
+  if (!installed) {
+    for (const Patch& patch : kCoherencePatches) {
+      if (!SetPatchExact(transport, generation, kF1Core, patch, true, error)) {
+        *error += "; incomplete unreachable coherence cave; cold reboot required";
+        return false;
+      }
+    }
+  }
+  return ReadCoherenceScaffold(transport, generation, &installed, error) &&
+         installed;
+}
+
 bool RequireStockCacheDispatch(FactoryDiag* transport,
                                const Generation& generation,
                                std::string* error) {
@@ -2060,7 +2280,8 @@ bool RequireStockCacheDispatch(FactoryDiag* transport,
 
 bool FlushInstructionCache(FactoryDiag* transport, const Generation& generation,
                            mixer* card, std::string* error) {
-  if (!RequireStockCacheDispatch(transport, generation, error)) {
+  if (!RequireStockCacheDispatch(transport, generation, error) ||
+      !EnsureCoherenceScaffold(transport, generation, error)) {
     return false;
   }
 
@@ -2096,7 +2317,8 @@ bool FlushInstructionCache(FactoryDiag* transport, const Generation& generation,
     invocation_ok = trigger_ok && dwell_ok && worker_idle;
   }
   if (invocation_ok) {
-    std::cout << "invoked HD Mic CMD 0x016c whole-I-cache invalidator "
+    std::cout << "invoked HD Mic CMD 0x016c whole-I-cache invalidator and "
+                 "dispatch-literal D-cache invalidator "
                  "(libtinyalsa result "
               << mixer_result << ", expected F1 rc=64)\n";
   }
@@ -2149,6 +2371,13 @@ bool FlushInstructionCache(FactoryDiag* transport, const Generation& generation,
 bool ReadTemporaryAllocatorScaffold(
     FactoryDiag* transport, const Generation& generation,
     uint32_t* scratch_value, std::string* error) {
+  // Resident coherence helpers deliberately survive temporary allocator
+  // restoration; accept only their complete stock or complete installed state.
+  bool coherence_installed = false;
+  if (!ReadCoherenceScaffold(transport, generation, &coherence_installed,
+                              error)) {
+    return false;
+  }
   const auto require_stock = [&](const Patch& patch) {
     std::array<uint8_t, 4> actual{};
     if (!DumpWordGuarded(transport, generation, kF1Core, patch.address,
@@ -2366,7 +2595,10 @@ bool AllocateSpeakerStorage(FactoryDiag* transport,
       publication_read_ok = false;
       break;
     }
-    if (candidate != 0) {
+    // The F1 allocator claims the cookie before calling malloc. Its sentinel
+    // may become visible through eviction; it means pending/failed, NEVER
+    // permission to issue a second allocation or a plausible heap pointer.
+    if (candidate != 0 && candidate != UINT32_MAX) {
       first_allocation = candidate;
       publication_observed = true;
       if ((candidate & 0x3fU) != 0 || candidate < kHeapMinimum ||
@@ -2983,6 +3215,9 @@ void Usage(const char* program) {
 }  // namespace frankel_aoc_speaker_patch
 
 int main(int argc, char** argv) {
+  // Emit complete lines to init's kmsg descriptor. Per-insertion unitbuf
+  // would split a single diagnostic across many separate kernel records.
+  std::setvbuf(stdout, nullptr, _IOLBF, BUFSIZ);
   using namespace frankel_aoc_speaker_patch;
   if (argc == 2 && (std::string_view(argv[1]) == "--help" ||
                     std::string_view(argv[1]) == "-h")) {

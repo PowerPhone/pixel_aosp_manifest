@@ -1067,6 +1067,22 @@ else
 fi
 note "verified Frankel primary speaker route selection: $powerphone_primary_route_state"
 
+# Keep factory amplifier gains. Compensate UI sounds only for the custom
+# effects-bypassed built-in-speaker path, leaving music and research BUS alone.
+powerphone_ui_volume_state=factory
+[[ "$powerphone_primary_route_state" != patched ]] || powerphone_ui_volume_state=ui-plus6db
+powerphone_ui_volume_patcher="$project_root/tools/audio/patch_frankel_system_ui_volume.py"
+powerphone_ui_volume_xml="$generated_dir/proprietary/vendor/etc/audio/config/audio_policy_volumes.xml"
+require_file "$powerphone_ui_volume_patcher"
+require_file "$powerphone_ui_volume_xml"
+if [[ "$check_only" == true ]]; then
+  python3 "$powerphone_ui_volume_patcher" "$powerphone_ui_volume_xml" \
+    --state "$powerphone_ui_volume_state" --check
+else
+  python3 "$powerphone_ui_volume_patcher" "$powerphone_ui_volume_xml" \
+    --state "$powerphone_ui_volume_state" --in-place
+fi
+
 # PowerPhone's framework experiment is deliberately opt-in and additive. The
 # service registers only IModule/powerphone; Google's extracted default module
 # remains the owner of IModule/default, IConfig/default, effects, Bluetooth,

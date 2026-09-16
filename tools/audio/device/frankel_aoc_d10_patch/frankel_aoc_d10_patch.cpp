@@ -55,6 +55,12 @@ constexpr uint8_t kDataTypeCommand = 0;
 constexpr uint16_t kCommandMemorySet = 0x25;
 constexpr uint16_t kCommandMemoryDump = 0x26;
 constexpr int32_t kF1Core = 2;
+constexpr int32_t kA32Core = 1;
+// Only shared RAM MB1..9 has the live-verified section alias. MB0 uses
+// coarse L2 mappings and must never be translated by this transport.
+constexpr uint32_t kSharedRamBegin = 0x40100000;
+constexpr uint32_t kSharedRamEnd = 0x40a00000;
+constexpr uint32_t kSharedRamAliasOffset = 0x40000000;
 constexpr std::size_t kHeaderSize = 8;
 constexpr std::size_t kMaximumFactoryResponse = 4096;
 constexpr std::size_t kMaximumDebugOutput = 64 * 1024;
@@ -172,6 +178,22 @@ constexpr std::array<StockGuard, 3> kNative96StockGuards = {{
 constexpr PatchSpec kCacheFlushDispatch = {
     "HD Mic gain dispatch -> whole F1 I-cache invalidator", 0x4038ea50,
     "c0c83d40", "e06d4840", PatchKind::kSupport};
+constexpr char kSpeakerReadyProperty[] =
+    "vendor.powerphone.aoc_speaker_192k.ready";
+constexpr PatchSpec kResidentCacheFlushDispatch = {
+    "HD Mic gain dispatch -> resident coherent F1 cache wrapper", 0x4038ea50,
+    "c0c83d40", "a4643f40", PatchKind::kSupport};
+// Exact resident bytes from frankel_aoc_speaker_coherence.S/.ld. The wrapper
+// invokes the same whole-I invalidator, then DHU/DHI/MEMW on the HD dispatch line
+// before returning 64. Host restoration therefore cannot leave a stale F1
+// dispatch pointer for the next speaker/D10 transaction. The allocation cookie
+// at 0x403f64a0 is data and deliberately excluded from these code guards.
+constexpr std::array<StockGuard, 2> kResidentCacheFlushGuards = {{
+    {"resident coherent-cache literals", 0x403f6490,
+     "e06d484050ea3840"},
+    {"resident coherent-cache wrapper", 0x403f64a4,
+     "36410081faffe0080041f9ff827402627400c020004c021df0000000"},
+}};
 constexpr std::string_view kCacheFlushControl = "HD Mic gain (cB)";
 
 constexpr std::array<const char*, 4> kCapturePaths = {{
@@ -837,7 +859,7 @@ bool DrainDebugNow(int fd, std::string* error) {
 }
 
 std::vector<uint8_t> BuildDumpPacket(uint8_t counter, uint32_t address,
-                                     uint32_t size) {
+                                     uint32_t size, int32_t core = kF1Core) {
   constexpr uint16_t kLength = 8 + 4 + 4 + 4;
   std::vector<uint8_t> packet;
   packet.reserve(kLength);
@@ -846,7 +868,7 @@ std::vector<uint8_t> BuildDumpPacket(uint8_t counter, uint32_t address,
   AppendLe16(&packet, kLength);
   AppendLe16(&packet, kCommandMemoryDump);
   AppendLe16(&packet, 0);
-  AppendLe32(&packet, static_cast<uint32_t>(kF1Core));
+  AppendLe32(&packet, static_cast<uint32_t>(core));
   AppendLe32(&packet, address);
   AppendLe32(&packet, size);
   return packet;
@@ -1047,6 +1069,35 @@ class FactoryDiag {
       *error = "memory dump size must be 1..256 bytes";
       return false;
     }
+    uint32_t wire_address;
+    if (!SharedRamWireAddress(address, size, &wire_address, error)) {
+      return false;
+    }
+    return DumpRaw(kF1Core, wire_address, size, bytes, error);
+  }
+
+  bool Write(uint32_t address, uint32_t value, uint32_t width_bits,
+             std::string* error) {
+    if ((width_bits != 8 && width_bits != 16 && width_bits != 32) ||
+        address % (width_bits / 8) != 0) {
+      *error = "internal unaligned factory_diag write";
+      return false;
+    }
+    uint32_t wire_address;
+    if (!SharedRamWireAddress(address, width_bits / 8, &wire_address, error)) {
+      return false;
+    }
+    const uint8_t counter = counter_++;
+    // Only the transport address changes: values and embedded F1 pointers
+    // retain their logical 0x40... representation.
+    const std::vector<uint8_t> packet =
+        BuildSetPacket(counter, wire_address, value, width_bits);
+    return Transact(packet, counter, kCommandMemorySet, error);
+  }
+
+ private:
+  bool DumpRaw(int32_t core, uint32_t address, uint32_t size,
+               std::vector<uint8_t>* bytes, std::string* error) {
     UniqueFd debug_fd(open(kDebugDevice, O_RDONLY | O_CLOEXEC | O_NONBLOCK));
     if (!debug_fd.valid()) {
       *error = ErrnoText("open " + std::string(kDebugDevice));
@@ -1057,28 +1108,63 @@ class FactoryDiag {
     }
     const uint8_t counter = counter_++;
     const std::vector<uint8_t> packet =
-        BuildDumpPacket(counter, address, size);
+        BuildDumpPacket(counter, address, size, core);
     if (!Transact(packet, counter, kCommandMemoryDump, error)) {
       return false;
     }
     std::string debug;
+    // Factory diagnostics prints the wire address, including the NC alias.
     return ReadDumpDebug(debug_fd.get(), address, size, bytes, &debug, error);
   }
 
-  bool Write(uint32_t address, uint32_t value, uint32_t width_bits,
-             std::string* error) {
-    if ((width_bits != 8 && width_bits != 16 && width_bits != 32) ||
-        address % (width_bits / 8) != 0) {
-      *error = "internal unaligned factory_diag write";
+  bool RequireSharedRamAlias(std::string* error) {
+    if (shared_ram_alias_guarded_) {
+      return true;
+    }
+    std::vector<uint8_t> cached;
+    std::vector<uint8_t> noncacheable;
+    // Read the actual A32 L1 descriptors via RAW core1; this bypasses the
+    // F1 alias selector, cannot recurse, and never aliases A32-owned objects.
+    if (!DumpRaw(kA32Core, 0x40009004, 36, &cached, error) ||
+        !DumpRaw(kA32Core, 0x4000a004, 36, &noncacheable, error)) {
       return false;
     }
-    const uint8_t counter = counter_++;
-    const std::vector<uint8_t> packet =
-        BuildSetPacket(counter, address, value, width_bits);
-    return Transact(packet, counter, kCommandMemorySet, error);
+    for (uint32_t mb = 1; mb <= 9; ++mb) {
+      const std::size_t offset = (mb - 1) * 4;
+      if (BytesToLe32(std::span<const uint8_t>(cached).subspan(offset, 4)) !=
+              ((mb << 20) | 0x1c0e) ||
+          BytesToLe32(std::span<const uint8_t>(noncacheable).subspan(offset, 4)) !=
+              ((mb << 20) | 0x1c12)) {
+        *error = "A32 shared-RAM alias descriptors differ at MB" +
+                 std::to_string(mb) + "; cached=" + Hex(cached) +
+                 "; noncacheable=" + Hex(noncacheable);
+        return false;
+      }
+    }
+    shared_ram_alias_guarded_ = true;
+    std::cout << "guarded A32 MB1..9 cached/noncacheable section mappings; "
+                 "F1 shared-RAM wire addresses use the 0x80... alias\n";
+    return true;
   }
 
- private:
+  bool SharedRamWireAddress(uint32_t address, uint32_t size,
+                            uint32_t* wire_address, std::string* error) {
+    const uint64_t end = static_cast<uint64_t>(address) + size;
+    const bool overlaps = address < kSharedRamEnd && end > kSharedRamBegin;
+    if (overlaps && (address < kSharedRamBegin || end > kSharedRamEnd)) {
+      *error = "factory_diag range crosses the guarded shared-RAM alias boundary";
+      return false;
+    }
+    *wire_address = address;
+    if (overlaps) {
+      if (!RequireSharedRamAlias(error)) {
+        return false;
+      }
+      *wire_address += kSharedRamAliasOffset;
+    }
+    return true;
+  }
+
   bool WriteOnePacket(std::span<const uint8_t> packet, std::string* error) {
     const Clock::time_point deadline = Clock::now() + kFactoryWriteTimeout;
     int raw_fd = -1;
@@ -1195,6 +1281,7 @@ class FactoryDiag {
   }
 
   uint8_t counter_ = 0;
+  bool shared_ram_alias_guarded_ = false;
 };
 
 bool PatchBytes(const PatchSpec& patch, bool after, std::vector<uint8_t>* bytes,
@@ -1397,8 +1484,40 @@ bool WriteOneChunk(FactoryDiag* transport, const WriteChunk& chunk,
 
 bool FlushInstructionCache(FactoryDiag* transport, mixer* card,
                            std::string* error) {
+  std::array<char, PROP_VALUE_MAX> speaker_ready{};
+  const int speaker_ready_length =
+      __system_property_get(kSpeakerReadyProperty, speaker_ready.data());
+  const std::string_view speaker_state(
+      speaker_ready.data(),
+      speaker_ready_length > 0 ? static_cast<std::size_t>(speaker_ready_length)
+                               : 0);
+  if (!speaker_state.empty() && speaker_state != "0" && speaker_state != "1") {
+    *error = std::string("unexpected ") + kSpeakerReadyProperty + '=' +
+             std::string(speaker_state);
+    return false;
+  }
+  const bool resident_coherence = speaker_state == "1";
+  if (resident_coherence) {
+    for (const StockGuard& guard : kResidentCacheFlushGuards) {
+      std::vector<uint8_t> expected;
+      std::vector<uint8_t> actual;
+      if (!DecodeHex(guard.expected_hex, &expected, error) ||
+          !transport->Dump(guard.address, expected.size(), &actual, error)) {
+        return false;
+      }
+      if (actual != expected) {
+        *error = std::string(guard.name) + ": unexpected bytes " + Hex(actual) +
+                 "; refusing ready speaker profile without coherent wrapper";
+        return false;
+      }
+    }
+  }
+  // Missing/zero speaker readiness retains standalone stock-speaker D10 mode.
+  // Never fall back to the I-only routine after a ready-profile guard failure.
+  const PatchSpec& dispatch =
+      resident_coherence ? kResidentCacheFlushDispatch : kCacheFlushDispatch;
   std::vector<WriteChunk> install_chunks;
-  if (!ChangedChunks(kCacheFlushDispatch, Action::kApply, &install_chunks,
+  if (!ChangedChunks(dispatch, Action::kApply, &install_chunks,
                      error) ||
       install_chunks.size() != 1) {
     if (error->empty()) {
@@ -1440,13 +1559,16 @@ bool FlushInstructionCache(FactoryDiag* transport, mixer* card,
     invocation_ok = trigger_ok && dwell_ok;
   }
   if (invocation_ok) {
-    std::cout << "invoked HD Mic CMD 0x016c whole-I-cache invalidator "
-                 "(libtinyalsa result "
+    std::cout << "invoked HD Mic CMD 0x016c "
+              << (resident_coherence
+                      ? "resident coherent I-cache/dispatch-line wrapper "
+                      : "whole-I-cache invalidator ")
+              << "(libtinyalsa result "
               << mixer_result << ", expected F1 rc=64)\n";
   }
 
   const WriteChunk restore{
-      .patch_name = kCacheFlushDispatch.name,
+      .patch_name = dispatch.name,
       .address = install.address,
       .before = install.after,
       .after = install.before,

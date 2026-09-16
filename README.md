@@ -55,6 +55,13 @@ level; the report distinguishes live trials from post-flash results. The old
 output. On-device tone correlation and amplifier-off controls alone do not
 fully separate acoustic output from electrical coupling.
 
+After the user confirmed the UI sound was working but quiet, the
+[UI-volume adjustment](docs/frankel-ui-volume-20260912.md) retained factory
+amplifier settings and raised only the SYSTEM/SPEAKER policy curve by 6 dB.
+This is custom compensation, not a factory curve. The measured click-level
+increase is larger than the nominal policy change; see the real recordings
+and limits in the report. Media and research gain settings remain unchanged.
+
 Completed research/ordinary playback handoffs pass after selecting the existing
 `ro.audio.flinger_standbytime_ms=0` setting, which removes a three-second idle
 hardware hold. **Simultaneously active primary and research BUS outputs are
@@ -62,17 +69,25 @@ not supported**: they share hardware and are not mutually arbitrated. Use
 one output owner at a time. Capture uses its separate, unchanged D10 path.
 
 The current development bundle is
-[`artifacts/frankel/powerphone-playback192-20260912/flash-all.sh`](artifacts/frankel/powerphone-playback192-20260912/flash-all.sh),
+[`artifacts/frankel/powerphone-playback192-bootready-20260912/flash-all.sh`](artifacts/frankel/powerphone-playback192-bootready-20260912/flash-all.sh),
 with all images alongside it. Its full-install script wipes userdata; see the
-bundle README. This iteration skipped hashes and attestation as requested.
-The September 12 vendor correction was tested by incremental flashing, keeping
-the preceding RT kernel and system/userdata; this is not a new full-wipe run
-of all 36 images. Ordinary UI/media improvement is measured on the flashed
-image. The repeat research-route acoustic continuity tests retained failures,
-so this is not a renewed all-research-path qualification. The phone is left
-booted with enforcing SELinux, ready audio helpers, responsive UI, and the
-starting speaker/BUS volumes restored.
-Reproduction: [incremental audio build](scripts/audio/frankel/BUILD_PLAYBACK192.md).
+bundle README. The [boot-streamlining report](docs/frankel-boot-streamline-20260912.md)
+records two consecutive boots with native audio preparation complete at about
+19.8 seconds and boot completion at about 21.1 seconds. Normal boot presentation
+and input wait for audio readiness; no manual post-launcher warm-up remains.
+First non-root app playback/recording at 192 kHz produced the correct recorded
+20 kHz tone without detected dropouts or phase jumps on both boots. All ten
+endpoint API checks and eight recorded UI clicks passed their scoped checks.
+Existing amplifier settings and UI-volume compensation are preserved.
+
+This revision incrementally flashed system, system_ext and vendor, retaining
+the RT kernel and userdata; it is not a new full-wipe run of every bundled image.
+No hashes or attestation were required. The previous UI-volume bundle remains
+available for recovery. Earlier research-route acoustic continuity limitations
+remain documented; these startup tests are not a renewed full-bandwidth or
+all-research-path qualification.
+Reproduction: [boot-ready image build](scripts/audio/frankel/BUILD_BOOT192.md)
+and [underlying audio build](scripts/audio/frankel/BUILD_PLAYBACK192.md).
 The reusable [PowerPhone skill](skills/powerphone/SKILL.md) records the general
 hardware-to-API workflow and the measured failure modes.
 

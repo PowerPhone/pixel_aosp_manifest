@@ -142,6 +142,7 @@ framework_patches=(
   "$project_root/patches/frameworks-base/0004-aapt2-proto-java-library.patch"
   "$project_root/patches/frameworks-base/0005-aapt2-brief-package-library.patch"
   "$project_root/patches/frameworks-base/0006-pixel-euicc-gservices-flags-provider.patch"
+  "$project_root/patches/frameworks-base/0007-powerphone-audio-boot-display-gate.patch"
 )
 apply_stack "$source_dir/frameworks/base" "${framework_patches[@]}"
 
@@ -198,6 +199,7 @@ apply_stack \
 
 sepolicy_patches=(
   "$project_root/patches/system-sepolicy/0001-support-extending-sepolicy-cils.patch"
+  "$project_root/patches/system-sepolicy/0002-powerphone-audio-boot-display-gate.patch"
 )
 apply_stack "$source_dir/system/sepolicy" "${sepolicy_patches[@]}"
 

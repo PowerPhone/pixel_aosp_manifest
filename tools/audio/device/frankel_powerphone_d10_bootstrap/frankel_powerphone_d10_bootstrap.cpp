@@ -39,21 +39,11 @@ constexpr char kSpeakerPatchHelper[] = "/vendor/bin/frankel_aoc_speaker_patch";
 constexpr char kMixerNode[] = "/dev/snd/controlC0";
 constexpr int kWaitAttempts = 600;
 constexpr useconds_t kWaitIntervalUs = 100000;
-// aocd publishes "running" before the OUTPUTTER timer and the complete PCM
-// inventory are initialized.  Require ten continuous seconds of the complete
-// card so the stock HAL's one-shot D5 probe and startup debug traffic finish
-// before any factory-diag read or temporary HD Mic dispatch is attempted.
-constexpr int kPrerequisiteStableAttempts = 100;
-constexpr int kA32PrerequisiteStableAttempts = 3;
-constexpr int kA32PrerequisiteWaitAttempts = 30;
 constexpr int kWatchdogAttempts = 600;
-// Real Frankel traces show that AoC's F1 aligned allocator becomes usable
-// only after the complete Android audio control plane has been alive for
-// roughly thirty seconds.  Keep this separate from the patcher's ten-second
-// card-stability test: audioserver must remain running across both intervals
-// or its stock rc action cycles the vendor audio HAL and loses the initialized
-// allocator/control state.
-constexpr int kAudioWarmupAttempts = 300;
+// No blind allocator warm-up is required by the selected stock-A32 path.
+// The F1 allocator lazily initializes its own heap. Wait only for observable
+// device/service prerequisites; each patch helper still independently checks
+// AoC generation, PCM ownership, exact code/object state and cache coherence.
 
 constexpr std::array<const char*, 41> kCaptureRoutes{{
     "EP1 TX Mixer I2S_0_TX",
@@ -153,6 +143,10 @@ bool IsCharacterDevice(const char* path) {
 bool AudioPrerequisitesReady() {
   if (!IsCharacterDevice(kMixerNode) || access(kD10PatchHelper, X_OK) != 0 ||
       access(kSpeakerPatchHelper, X_OK) != 0 ||
+      !IsCharacterDevice("/dev/snd/pcmC0D5p") ||
+      !IsCharacterDevice("/dev/snd/pcmC0D10c") ||
+      !IsCharacterDevice("/dev/acd-factory_diag") ||
+      !IsCharacterDevice("/dev/acd-debug") ||
       Property("init.svc.vendor.audio-hal-aidl") != "running") {
     return false;
   }
@@ -163,17 +157,11 @@ bool AudioPrerequisitesReady() {
 }
 
 bool WaitForAudioPrerequisites() {
-  int stable_attempts = 0;
   for (int attempt = 0; attempt < kWaitAttempts; ++attempt) {
     if (AudioPrerequisitesReady()) {
-      ++stable_attempts;
-      if (stable_attempts == kPrerequisiteStableAttempts) {
-        Log("info", "complete AoC card and stock HAL remained stable for "
-                    "ten seconds");
-        return true;
-      }
-    } else {
-      stable_attempts = 0;
+      Log("info", "AoC card, diagnostic nodes and primary HAL available; "
+                  "no fixed warm-up or stability delay");
+      return true;
     }
     usleep(kWaitIntervalUs);
   }
@@ -185,35 +173,6 @@ bool WaitForAudioPrerequisites() {
           ", speaker_helper=" +
           (access(kSpeakerPatchHelper, X_OK) == 0 ? "ready" : "missing") +
           ", stock_audio_hal=" + Property("init.svc.vendor.audio-hal-aidl"));
-  return false;
-}
-
-bool WaitForEarlyA32Prerequisites() {
-  int stable_attempts = 0;
-  for (int attempt = 0; attempt < kA32PrerequisiteWaitAttempts; ++attempt) {
-    // The early A32 transaction does not touch capture PCMs. In particular,
-    // do not wait for late D8/D9/D12/D31 registration: the reviewed OUTPUTTER
-    // timer can be destroyed before those unrelated nodes appear.
-    const bool ready =
-        IsCharacterDevice(kMixerNode) &&
-        IsCharacterDevice("/dev/snd/pcmC0D0p") &&
-        IsCharacterDevice("/dev/acd-factory_diag") &&
-        IsCharacterDevice("/dev/acd-debug") &&
-        access(kSpeakerPatchHelper, X_OK) == 0 &&
-        Property("init.svc.vendor.audio-hal-aidl") == "running";
-    if (ready) {
-      ++stable_attempts;
-      if (stable_attempts == kA32PrerequisiteStableAttempts) {
-        Log("info", "complete AoC card and stock HAL remained stable for "
-                    "300 ms before the short-lived A32 timer transaction");
-        return true;
-      }
-    } else {
-      stable_attempts = 0;
-    }
-    usleep(kWaitIntervalUs);
-  }
-  Log("error", "early A32 prerequisites did not stabilize within 3 seconds");
   return false;
 }
 
@@ -239,6 +198,22 @@ bool SetInteger(mixer* card, const char* name, int wanted) {
     return false;
   }
   return true;
+}
+
+bool EnsureHdMicGainZero(mixer* card) {
+  constexpr char name[] = "HD Mic gain (cB)";
+  mixer_ctl* control = RequireControl(card, name, 1);
+  if (control == nullptr) return false;
+  // An unchanged gain write still sends an AoC command. In particular, do not
+  // refill F1's HD Mic dispatch cache line between the speaker cache barrier
+  // and D10's cache barrier. Retain the zero-gain requirement and correct a
+  // genuinely different value, but omit this otherwise redundant command.
+  if (mixer_ctl_get_value(control, 0) == 0) return true;
+  if (Property(kSpeakerReadyProperty) == "1") {
+    Log("error", "HD Mic gain changed during the speaker/D10 handoff");
+    return false;
+  }
+  return SetInteger(card, name, 0);
 }
 
 bool SetEnum(mixer* card, const char* name, const char* wanted) {
@@ -329,7 +304,7 @@ bool EstablishStrictMixerState() {
          SetInteger(card.get(), "Mic Spatial Module Enable", 0) &&
          SetInteger(card.get(), "MIC DC Blocker", 0) &&
          SetInteger(card.get(), "MIC Record Soft Gain (dB)", 0) &&
-         SetInteger(card.get(), "HD Mic gain (cB)", 0) &&
+         EnsureHdMicGainZero(card.get()) &&
          SetEnum(card.get(), "INTERNAL_MIC_TX Sample Rate", "SR_192K") &&
          SetEnum(card.get(), "INTERNAL_MIC_TX Format", "S16_LE") &&
          SetEnum(card.get(), "INTERNAL_MIC_TX Chan", "One") &&
@@ -465,38 +440,6 @@ int RunFailOpenWatchdog() {
   return 0;
 }
 
-int RunAudioWarmup() {
-  if (getuid() != 0 || geteuid() != 0) {
-    Log("error", "audio warm-up real and effective uid must both be root");
-    return 2;
-  }
-  for (int attempt = 0; attempt < kAudioWarmupAttempts; ++attempt) {
-    usleep(kWaitIntervalUs);
-  }
-  Log("info", "completed the bounded 30-second Android audio warm-up");
-  return 0;
-}
-
-int RunA32Preparation() {
-  if (getuid() != 0 || geteuid() != 0) {
-    Log("error", "A32 preparation real and effective uid must both be root");
-    return 2;
-  }
-  if (Property("ro.product.device") != kExpectedDevice ||
-      Property("ro.vendor.build.id") != kExpectedVendorBuildId) {
-    Log("error", "refusing A32 preparation on an unreviewed target");
-    return 2;
-  }
-  if (!WaitForEarlyA32Prerequisites() ||
-      !RunPatchHelper(kSpeakerPatchHelper, "prepare-a32")) {
-    Log("error", "early-boot A32 allocator preparation failed");
-    return 2;
-  }
-  Log("info", "early A32 allocation path is prepared; the late warmed "
-              "transaction may retain the exact stock allocator");
-  return 0;
-}
-
 int Main(bool finalize_fail_open) {
   if (getuid() != 0 || geteuid() != 0) {
     Log("error", "real and effective uid must both be root");
@@ -609,15 +552,8 @@ int main(int argc, char** argv) {
   if (argc == 2 && std::string_view(argv[1]) == "--watchdog-fail-open") {
     return RunFailOpenWatchdog();
   }
-  if (argc == 2 && std::string_view(argv[1]) == "--audio-warmup") {
-    return RunAudioWarmup();
-  }
-  if (argc == 2 && std::string_view(argv[1]) == "--prepare-a32") {
-    return RunA32Preparation();
-  }
   Log("error",
       "usage: frankel_powerphone_d10_bootstrap "
-      "[--finalize-fail-open|--watchdog-fail-open|--audio-warmup|"
-      "--prepare-a32]");
+      "[--finalize-fail-open|--watchdog-fail-open]");
   return 2;
 }
