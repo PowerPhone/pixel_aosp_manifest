@@ -88,6 +88,11 @@ remain documented; these startup tests are not a renewed full-bandwidth or
 all-research-path qualification.
 Reproduction: [boot-ready image build](scripts/audio/frankel/BUILD_BOOT192.md)
 and [underlying audio build](scripts/audio/frankel/BUILD_PLAYBACK192.md).
+The [September 16 three-microphone experiment](docs/frankel-three-mic-192k.md)
+adds simultaneous interleaved D10 capture for direct acoustic measurements.
+It requires an additional kernel image and a reversible, exclusive RAW
+firmware profile; these changes are not included in the September 12 bundle
+and do not advertise three-channel Android API capture.
 The reusable [PowerPhone skill](skills/powerphone/SKILL.md) records the general
 hardware-to-API workflow and the measured failure modes.
 

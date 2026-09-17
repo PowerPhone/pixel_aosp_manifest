@@ -24,6 +24,14 @@ identification sequence are in
 
 ## Current entrypoints: D5 playback and D10 reference
 
+For the separate **simultaneous three-microphone** experiment, use
+[`d5-d10-three-mic-measurement.sh`](d5-d10-three-mic-measurement.sh) or the
+four-run [`three-mic-cw-sweep-suite.sh`](three-mic-cw-sweep-suite.sh).
+They require the additional kernel and reversible firmware changes described
+in [the three-channel guide](../../../docs/frankel-three-mic-192k.md).
+The selectable-mono tools below remain unchanged; neither three-channel
+framework APIs nor a three-channel default boot profile are implied.
+
 The September 11 **D5/source-5/EP6** path supersedes the D0/source-0,
 D28/source-14, four-S16-slot, and rate-only experiments retained later in this
 file. The [dated playback report](../../../docs/frankel-playback192-20260911.md)
