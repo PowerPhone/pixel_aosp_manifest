@@ -1,0 +1,177 @@
+From: PowerPhone research platform <powerphone@csr460.com>
+Subject: [PATCH] Diagnose D5 playback handoff timing without recurring logs
+
+Record playback-only monotonic timings around positive FMQ transfers and
+native WRITEI calls. On an existing terminal write error, report the prior
+successful transfer exit, inter-transfer gap, open/property/lease/gain
+handling, and failed write duration. Close reports the maximum observed gap.
+Successful transfers do not log or perform additional mixer operations.
+Capture, buffer geometry, scheduler policy and terminal xrun behavior are
+unchanged. This instrumentation does not recover, conceal or qualify faults.
+
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -23,6 +23,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <cerrno>
++#include <chrono>
+ #include <cstdint>
+ #include <limits>
+ #include <memory>
+@@ -90,6 +91,12 @@
+ constexpr char kCaptureReadyProperty[] = "vendor.powerphone.pdm.ready";
+ constexpr char kSpeakerReadyProperty[] = "vendor.powerphone.aoc_speaker_192k.ready";
+ 
++int64_t playbackMonotonicNs() {
++    return std::chrono::duration_cast<std::chrono::nanoseconds>(
++                   std::chrono::steady_clock::now().time_since_epoch())
++            .count();
++}
++
+ struct Endpoint {
+     const char* name;
+     const char* address;
+@@ -1655,6 +1662,11 @@
+         }
+         return ::android::OK;
+     }
++    const int64_t transferEntryNs = playbackMonotonicNs();
++    const int64_t previousTransferEndNs =
++            mPlaybackLastTransferEndNs.load(std::memory_order_relaxed);
++    const int64_t interTransferGapNs =
++            previousTransferEndNs == 0 ? 0 : transferEntryNs - previousTransferEndNs;
+     // AudioFlinger may issue a zero-frame burst immediately after START. Do
+     // not bind EP6 until a complete first client transaction is available.
+     if (frameCount == 0) {
+@@ -1662,6 +1674,11 @@
+         *latencyMs = kPlaybackLatencyMs;
+         return ::android::OK;
+     }
++    int64_t maxTransferGapNs = mPlaybackMaxTransferGapNs.load(std::memory_order_relaxed);
++    while (interTransferGapNs > maxTransferGapNs &&
++           !mPlaybackMaxTransferGapNs.compare_exchange_weak(
++                   maxTransferGapNs, interTransferGapNs, std::memory_order_relaxed)) {
++    }
+     // Reject a partial quantum/overflowing client burst before binding EP6.
+     // The full 3,840-frame ALSA start threshold accumulates across successive
+     // 192-frame FastMixer transactions; it does not require one full-ring FMQ.
+@@ -1706,17 +1723,20 @@
+         return ::android::NO_INIT;
+     }
+ 
++    const int64_t openedNs = playbackMonotonicNs();
+     // Mixer reads cross the ALSA control path and are not real-time safe on
+     // Frankel. All passive ownership is proved before EP6 is bound and the
+     // complete state is audited after PCM close; the transfer path checks only
+     // the in-process lease and boot-local certificate. This mirrors the
+     // qualified tinyplay path, which performs no mixer I/O while PCM0,D5 runs.
+     const bool ready = ::android::base::GetBoolProperty(kSpeakerReadyProperty, false);
++    const int64_t propertyNs = playbackMonotonicNs();
+     bool routeExists = false;
+     {
+         std::lock_guard lock(mLock);
+         routeExists = mPlaybackRoute != nullptr && mOwnsPlaybackLease;
+     }
++    const int64_t leaseNs = playbackMonotonicNs();
+     if (!ready || !routeExists) {
+         LOG(ERROR) << __func__ << ": refusing playback transfer: "
+                    << (ready ? "route lease is absent" : "speaker readiness revoked");
+@@ -1746,6 +1766,7 @@
+     }
+     const size_t bytesToTransfer = frameCount * mFrameSizeBytes;
+     alsa::applyGain(buffer, mGain, bytesToTransfer, mConfig.value().format, mConfig->channels);
++    const int64_t gainNs = playbackMonotonicNs();
+     // Feed one native 192-frame/1 ms quantum per raw blocking WRITEI. Twenty
+     // periods fill the same 3,840-frame ring before playback starts. The old
+     // 1,920x2 geometry intermittently starved even at FIFO/90: its 10 ms
+@@ -1754,6 +1775,7 @@
+     // all EPIPEs remain terminal. The facade handles positive short writes
+     // by advancing only the accepted frames and submitting their suffix.
+     size_t transferredFrames = 0;
++    int64_t firstWriteNs = 0;
+     while (transferredFrames < frameCount) {
+         const size_t chunkFrames =
+                 std::min(kPlaybackAlsaPeriodFrames, frameCount - transferredFrames);
+@@ -1766,6 +1788,8 @@
+         const bool retryStartupSecondWrite =
+                 startupAcceptedFrames == kPlaybackAlsaPeriodFrames;
+         uint32_t efaultRetries = 0;
++        const int64_t writeBeginNs = playbackMonotonicNs();
++        if (firstWriteNs == 0) firstWriteNs = writeBeginNs;
+         const int writeStatus =
+                 oversized ? -1
+                           : powerphone_legacy_pcm_writei_frames(
+@@ -1774,6 +1798,7 @@
+                                             ? kPlaybackSecondWriteEfaultRetries
+                                             : 0,
+                                     kPlaybackSecondWriteEfaultRetrySleepUs, &efaultRetries);
++        const int64_t writeEndNs = playbackMonotonicNs();
+         const int xrunsAfter = powerphone_legacy_pcm_get_xruns(playbackPcm);
+         if (writeStatus != 0 || xrunsAfter != expectedXruns) {
+             const char* error = powerphone_legacy_pcm_get_error(playbackPcm);
+@@ -1782,6 +1807,24 @@
+                        << ", efault_retries=" << efaultRetries
+                        << ", xruns=" << initialXruns << "->" << xrunsAfter
+                        << ", pcm_error=" << (error == nullptr ? "<none>" : error);
++            LOG(ERROR) << __func__ << ": playback timing: requested_frames=" << frameCount
++                       << ", accepted_frames=" << transferredFrames
++                       << ", chunk_frames=" << chunkFrames << ", first_open=" << openPending
++                       << ", entry_mono_ns=" << transferEntryNs
++                       << ", previous_end_mono_ns=" << previousTransferEndNs
++                       << ", write_begin_mono_ns=" << writeBeginNs
++                       << ", write_end_mono_ns=" << writeEndNs
++                       << ", failure_mono_ns=" << playbackMonotonicNs()
++                       << ", inter_transfer_gap_us=" << interTransferGapNs / 1000
++                       << ", max_inter_transfer_gap_us="
++                       << mPlaybackMaxTransferGapNs.load(std::memory_order_relaxed) / 1000
++                       << ", pre_first_write_us=" << (firstWriteNs - transferEntryNs) / 1000
++                       << ", open_handle_us=" << (openedNs - transferEntryNs) / 1000
++                       << ", property_us=" << (propertyNs - openedNs) / 1000
++                       << ", lease_us=" << (leaseNs - propertyNs) / 1000
++                       << ", xrun_gain_us=" << (gainNs - leaseNs) / 1000
++                       << ", within_write_us=" << (writeEndNs - writeBeginNs) / 1000
++                       << ", prior_writes_us=" << (writeBeginNs - firstWriteNs) / 1000;
+             StreamAlsa::standby();
+             {
+                 std::lock_guard lock(mLock);
+@@ -1803,6 +1846,7 @@
+     }
+     *actualFrameCount = transferredFrames;
+     *latencyMs = kPlaybackLatencyMs;
++    mPlaybackLastTransferEndNs.store(playbackMonotonicNs(), std::memory_order_relaxed);
+     return ::android::OK;
+ }
+ 
+@@ -1844,6 +1888,10 @@
+     // mixer control so the asynchronous sink can never be unbound while a
+     // live file descriptor is still capable of writing into it.
+     if (mLegacyPlaybackPcm != nullptr) {
++        LOG(INFO) << __func__ << ": playback timing summary: last_success_end_mono_ns="
++                  << mPlaybackLastTransferEndNs.load(std::memory_order_relaxed)
++                  << ", max_inter_transfer_gap_us="
++                  << mPlaybackMaxTransferGapNs.load(std::memory_order_relaxed) / 1000;
+         const int expectedXruns = mPlaybackXrunsBaseline.load(std::memory_order_acquire);
+         const int finalXruns = powerphone_legacy_pcm_get_xruns(mLegacyPlaybackPcm);
+         if (finalXruns != expectedXruns) {
+@@ -1859,6 +1907,8 @@
+     }
+     mPlaybackXrunsBaseline.store(0, std::memory_order_release);
+     mPlaybackStartupAcceptedFrames.store(0, std::memory_order_release);
++    mPlaybackLastTransferEndNs.store(0, std::memory_order_relaxed);
++    mPlaybackMaxTransferGapNs.store(0, std::memory_order_relaxed);
+     mPlaybackOpenPending = false;
+     if (mPlaybackRoute != nullptr) {
+         mPlaybackRoute->cleanup();
+--- a/audio/aidl/default/powerphone/Powerphone.h
++++ b/audio/aidl/default/powerphone/Powerphone.h
+@@ -82,6 +82,9 @@
+     std::atomic<int> mPlaybackXrunsBaseline{0};
+     // Accepted startup frames across FMQ calls, saturated after one ring.
+     std::atomic<size_t> mPlaybackStartupAcceptedFrames{0};
++    // Failure-only playback diagnostics; capture never reads or updates these.
++    std::atomic<int64_t> mPlaybackLastTransferEndNs{0};
++    std::atomic<int64_t> mPlaybackMaxTransferGapNs{0};
+ };
+ 
+ class StreamInPowerphone final : public StreamIn, public StreamPowerphone {

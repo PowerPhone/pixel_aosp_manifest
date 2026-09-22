@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Thu, 10 Sep 2026 15:30:00 +0000
+Subject: [PATCH] tinyalsa: bound Frankel q192 startup EFAULT retry
+
+Frankel's AoC D0 playback endpoint can transiently return EFAULT at the first
+physical-ring boundary while its firmware consumer becomes visible.  The
+direct qualification player survives this startup window, but the proprietary
+primary HAL treats the first EFAULT as fatal and continuously tears down and
+reopens the speaker route.
+
+Retry only the precisely qualified card 0/device 0 native-q192 configuration,
+only through the first completed period, and for at most 32 milliseconds.
+Every other device, format, mode, and later transfer keeps tinyalsa's normal
+fail-fast behavior.
+---
+diff --git a/src/pcm.c b/src/pcm.c
+--- a/src/pcm.c
++++ b/src/pcm.c
+@@ -298,10 +298,15 @@ static unsigned int pcm_format_to_alsa(enum pcm_format format)
+ struct pcm {
+     /** The PCM's file descriptor */
+     int fd;
++    /** Card and device passed to pcm_open. */
++    unsigned int card;
++    unsigned int device;
+     /** Flags that were passed to @ref pcm_open */
+     unsigned int flags;
+     /** The number of (under/over)runs that have occured */
+     int xruns;
++    /** Successful frames submitted through the Frankel D0 startup window. */
++    unsigned long powerphone_frames_written;
+     /** Size of the buffer */
+     unsigned int buffer_size;
+     /** The boundary for ring buffer pointers */
+@@ -1060,6 +1065,9 @@ struct pcm *pcm_open(unsigned int card, unsigned int device,
+         return &bad_pcm;
+     }
+ 
++    pcm->card = card;
++    pcm->device = device;
++
+     /* Default to hw_ops, attemp plugin open only if hw (/dev/snd/pcm*) open fails */
+     pcm->ops = &hw_ops;
+     pcm->fd = pcm->ops->open(card, device, flags, &pcm->data, NULL);
+@@ -1709,10 +1717,35 @@ again:
+  */
+ int pcm_writei(struct pcm *pcm, const void *data, unsigned int frame_count)
+ {
++    int result;
++    unsigned int retries = 0;
++
+     if (pcm->flags & PCM_IN)
+         return -EINVAL;
+ 
+-    return pcm_generic_transfer(pcm, (void*) data, frame_count);
++    do {
++        result = pcm_generic_transfer(pcm, (void*) data, frame_count);
++        if (result >= 0) {
++            pcm->powerphone_frames_written += (unsigned int) result;
++            return result;
++        }
++
++        /* Frankel's qualified native-q192 AoC D0 path can reject the write at
++         * its first physical-ring boundary while the firmware consumer becomes
++         * visible. Keep this exception exact and bounded: card 0/device 0,
++         * playback RW, stereo S32/192 kHz, 1920x2, and no later than the first
++         * completed period. All other errors and streams retain tinyalsa's
++         * normal fail-fast behavior. */
++        if (errno != EFAULT || pcm->card != 0 || pcm->device != 0 ||
++            (pcm->flags & PCM_MMAP) || pcm->config.rate != 192000 ||
++            pcm->config.channels != 2 || pcm->config.format != PCM_FORMAT_S32_LE ||
++            pcm->config.period_size != 1920 || pcm->config.period_count != 2 ||
++            pcm->powerphone_frames_written > pcm->config.period_size ||
++            retries++ >= 32) {
++            return result;
++        }
++        usleep(1000);
++    } while (1);
+ }
+ 
+ /** Reads audio samples from PCM.
+-- 
+2.43.0

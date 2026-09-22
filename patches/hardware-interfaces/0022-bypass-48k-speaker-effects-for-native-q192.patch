@@ -1,0 +1,249 @@
+From: PowerPhone research platform <powerphone@csr460.com>
+Subject: [PATCH] Select the D5/EP6 native-q192 speaker path with ASP bypass
+
+Persist the live D5/source-5 and normal-ASPRX1 amplifier routing. Own the
+AoC speaker ASP bypass for the lifetime of the physical research playback
+route; stock effects retain 48 kHz processing assumptions. Snapshot and
+restore the previous mode only after hard-off while ownership is intact.
+
+Start only when the complete 3840-frame ALSA ring has been filled, preserving
+1920-frame transfer periods and the separate 7680-frame framework queue.
+Microphone effects and non-speaker routes remain unchanged.
+
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+index 46e930a9cc..f950a9dd7c 100644
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -67,13 +67,13 @@ namespace {
+ constexpr int32_t kCaptureCard = 0;
+ constexpr int32_t kCaptureDevice = 10;
+ constexpr int32_t kPlaybackCard = 0;
+-constexpr int32_t kPlaybackDevice = 0;
++constexpr int32_t kPlaybackDevice = 5;
+ constexpr int32_t kRate = 192000;
+ constexpr size_t kCaptureAlsaPeriodFrames = 1920;
+ constexpr size_t kCaptureAlsaBufferFrames = 7680;
+ constexpr size_t kPlaybackAlsaPeriodFrames = 1920;
+ constexpr size_t kPlaybackAlsaBufferFrames = 3840;
+-constexpr size_t kPlaybackAlsaStartThresholdFrames = 1920;
++constexpr size_t kPlaybackAlsaStartThresholdFrames = kPlaybackAlsaBufferFrames;
+ constexpr size_t kCaptureFrameworkBufferFrames = 1920;
+ constexpr size_t kPlaybackFrameworkBufferFrames = 7680;
+ constexpr uint32_t kPlaybackSecondWriteEfaultRetries = 32;
+@@ -213,7 +213,7 @@ constexpr std::array<const char*, 11> kConflictingTdmRoutes{{
+         "TDM_0_RX Mixer EP3",
+         "TDM_0_RX Mixer EP4",
+         "TDM_0_RX Mixer EP5",
+-        "TDM_0_RX Mixer EP6",
++        "TDM_0_RX Mixer EP1",
+         "TDM_0_RX Mixer EP7",
+         "TDM_0_RX Mixer EP8",
+         "TDM_0_RX Mixer IMSV",
+@@ -548,7 +548,7 @@ class PlaybackRoute {
+         // active. Never steal its TDM bus or power down its amplifier.
+         if (!requireValue("Main AMP Enable Switch", 0) ||
+             !requireValue("R Main AMP Enable Switch", 0) ||
+-            !requireValue("TDM_0_RX Mixer EP1", 0) ||
++            !requireValue("TDM_0_RX Mixer EP6", 0) ||
+             !requireValue("TDM_0_RX Mixer US", 0) ||
+             !requireEnum("Ultrasonic Mode", "Disabled") ||
+             !requireEnum("R Ultrasonic Mode", "Disabled")) {
+@@ -562,7 +562,11 @@ class PlaybackRoute {
+             }
+         }
+ 
+-        if (!snapshotAndSetEnum("TDM_0_RX Sample Rate", "SR_192K") ||
++        // AMixSPKR's stock effects retain 48 kHz processing assumptions. Own
++        // the bypass with the speaker route, before Configure/EP6 activation,
++        // and restore its prior value only after the amplifiers are off.
++        if (!snapshotAndSetEnum("AoC Speaker Mixer ASP Mode", "ASP_BYPASS") ||
++            !snapshotAndSetEnum("TDM_0_RX Sample Rate", "SR_192K") ||
+             !snapshotAndSetEnum("TDM_0_RX Format", "S32_LE") ||
+             !snapshotAndSetEnum("TDM_0_RX Chan", "Two") ||
+             !snapshotAndSetEnum("TDM_0_RX nSlot", "Two") ||
+@@ -573,18 +577,15 @@ class PlaybackRoute {
+         for (const char* prefix : {"", "R "}) {
+             if (!snapshotAndSetEnum(std::string(prefix) + "DSP RX1 Source", "ASPRX1") ||
+                 !snapshotAndSetEnum(std::string(prefix) + "DSP RX2 Source", "ASPRX1") ||
+-                // The patched CS35L43 derives its 192 kHz DAC input only from
+-                // the high-rate selector. Keep the normal-rate path silent so
+-                // a legacy 48/96 kHz copy is not mixed into the transducer.
+-                !snapshotAndSetEnum(std::string(prefix) + "PCM Source", "Zero") ||
+-                !snapshotAndSetEnum(std::string(prefix) + "High Rate PCM Source", "ASPRX1") ||
++                !snapshotAndSetEnum(std::string(prefix) + "PCM Source", "ASPRX1") ||
++                !snapshotAndSetEnum(std::string(prefix) + "High Rate PCM Source", "Zero") ||
+                 !snapshotAndSetValue(std::string(prefix) + "Amp Gain", 0)) {
+                 cleanup();
+                 return false;
+             }
+         }
+ 
+-        // Both amplifiers and EP1 are still proved off. Snapshot and set only
++        // Both amplifiers and EP6 are still proved off. Snapshot and set only
+         // the selected codec's stock digital gain; touching the inactive
+         // codec would violate endpoint isolation.
+         powerphone_playback_volume_ops volumeOps = playbackVolumeOps();
+@@ -600,10 +601,11 @@ class PlaybackRoute {
+ 
+         // From this point onward an error path must force the route and both
+         // amplifiers off. Prepare every codec and power control before binding
+-        // EP1 so that route activation is the final mixer operation before PCM
++        // EP6 so that route activation is the final mixer operation before PCM
+         // open, matching the live-qualified tinyplay sequence.
+         mPowerControlsTouched = true;
+-        if (!setEnum("Ultrasonic Mode", "In Band") || !setEnum("R Ultrasonic Mode", "In Band")) {
++        if (!setEnum("Ultrasonic Mode", "Disabled") ||
++            !setEnum("R Ultrasonic Mode", "Disabled")) {
+             cleanup();
+             return false;
+         }
+@@ -618,12 +620,12 @@ class PlaybackRoute {
+         // hw_params. A value of 200 is the shortest live-stable D0 open wait:
+         // the driver's double jiffies conversion makes it roughly 52 ms on
+         // Frankel's HZ=250 kernel. Keep the override window narrow and leave
+-        // EP1 activation as the final mixer transaction before pcm_open().
++        // EP6 activation as the final mixer transaction before pcm_open().
+         if (!setPcmOpenWait()) {
+             cleanup();
+             return false;
+         }
+-        if (!setFinalRouteValue("TDM_0_RX Mixer EP1", 1)) {
++        if (!setFinalRouteValue("TDM_0_RX Mixer EP6", 1)) {
+             cleanup();
+             return false;
+         }
+@@ -664,7 +666,7 @@ class PlaybackRoute {
+         if (mMixer == nullptr) return;
+         // The PCM-open override is independent of route ownership. Always
+         // attempt to restore it before any route cleanup decision, including
+-        // failures between EP1 activation and pcm_open/hw_params completion.
++        // failures between EP6 activation and pcm_open/hw_params completion.
+         if (!restorePcmOpenWait()) {
+             LOG(ERROR) << "card-wide PCM wait remains overridden; reboot or audited "
+                           "manual recovery is required";
+@@ -683,7 +685,7 @@ class PlaybackRoute {
+                 bool poweredDown = true;
+                 if (!setValueBestEffort("Main AMP Enable Switch", 0)) poweredDown = false;
+                 if (!setValueBestEffort("R Main AMP Enable Switch", 0)) poweredDown = false;
+-                if (!setValueBestEffort("TDM_0_RX Mixer EP1", 0)) poweredDown = false;
++                if (!setValueBestEffort("TDM_0_RX Mixer EP6", 0)) poweredDown = false;
+                 // US is not part of the qualified route, but force it off
+                 // defensively while exclusive ownership is still proved.
+                 if (!setValueBestEffort("TDM_0_RX Mixer US", 0)) poweredDown = false;
+@@ -820,7 +822,7 @@ class PlaybackRoute {
+     bool idlePowerAndRoutes() const {
+         return conflictingRoutesAreIdle() && valueMatches("Main AMP Enable Switch", 0) &&
+                valueMatches("R Main AMP Enable Switch", 0) &&
+-               valueMatches("TDM_0_RX Mixer EP1", 0) &&
++               valueMatches("TDM_0_RX Mixer EP6", 0) &&
+                valueMatches("TDM_0_RX Mixer US", 0) && enumMatches("Ultrasonic Mode", "Disabled") &&
+                enumMatches("R Ultrasonic Mode", "Disabled");
+     }
+@@ -831,9 +833,11 @@ class PlaybackRoute {
+         const bool right = *mEndpoint == PlaybackEndpoint::BOTTOM_CANDIDATE;
+         if (!valueMatches("Main AMP Enable Switch", main ? 1 : 0) ||
+             !valueMatches("R Main AMP Enable Switch", right ? 1 : 0) ||
+-            !valueMatches("TDM_0_RX Mixer EP1", 1) ||
+-            !valueMatches("TDM_0_RX Mixer US", 0) || !enumMatches("Ultrasonic Mode", "In Band") ||
+-            !enumMatches("R Ultrasonic Mode", "In Band") ||
++            !valueMatches("TDM_0_RX Mixer EP6", 1) ||
++            !valueMatches("TDM_0_RX Mixer US", 0) ||
++            !enumMatches("Ultrasonic Mode", "Disabled") ||
++            !enumMatches("R Ultrasonic Mode", "Disabled") ||
++            !enumMatches("AoC Speaker Mixer ASP Mode", "ASP_BYPASS") ||
+             !enumMatches("TDM_0_RX Sample Rate", "SR_192K") ||
+             !enumMatches("TDM_0_RX Format", "S32_LE") || !enumMatches("TDM_0_RX Chan", "Two") ||
+             !enumMatches("TDM_0_RX nSlot", "Two") || !enumMatches("TDM_0_RX SlotFmt", "S32_LE")) {
+@@ -846,8 +850,8 @@ class PlaybackRoute {
+         for (const char* prefix : {"", "R "}) {
+             if (!enumMatches(std::string(prefix) + "DSP RX1 Source", "ASPRX1") ||
+                 !enumMatches(std::string(prefix) + "DSP RX2 Source", "ASPRX1") ||
+-                !enumMatches(std::string(prefix) + "PCM Source", "Zero") ||
+-                !enumMatches(std::string(prefix) + "High Rate PCM Source", "ASPRX1") ||
++                !enumMatches(std::string(prefix) + "PCM Source", "ASPRX1") ||
++                !enumMatches(std::string(prefix) + "High Rate PCM Source", "Zero") ||
+                 !valueMatches(std::string(prefix) + "Amp Gain", 0)) {
+                 return false;
+             }
+@@ -990,8 +994,8 @@ class PlaybackRoute {
+             LOG(ERROR) << "failed to activate mixer control " << name << " to " << value;
+             return false;
+         }
+-        // Deliberately do not read the control back here. EP1 binding starts
+-        // the AoC timing window, and any subsequent mixer ioctl can starve D0.
++        // Deliberately do not read the control back here. EP6 binding starts
++        // the AoC timing window, and any subsequent mixer ioctl can starve D5.
+         rememberExpected(name, value);
+         return true;
+     }
+@@ -1368,7 +1372,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         cleanupPlaybackRouteLocked();
+         return resumedReady ? ::android::INVALID_OPERATION : ::android::PERMISSION_DENIED;
+     }
+-    // Binding EP1 starts a timing-sensitive asynchronous sink. Defer all route
++    // Binding EP6 starts a timing-sensitive asynchronous sink. Defer all route
+     // and PCM work until transfer() already owns the first complete client
+     // ring, so no framework command/reply gap can occur between binding and
+     // the first WRITEI.
+@@ -1398,7 +1402,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+     }
+ 
+     // The framework/FMQ buffer is decoupled from the fixed AoC frontend ring.
+-    // Open PCM0,D0 at 1920x2 immediately after the final EP1 mixer write. The
++    // Open PCM0,D5 at 1920x2 immediately after the final EP6 mixer write. The
+     // isolated facade retains libtinyalsa-v1's open/prepare transaction while
+     // exposing raw WRITEI for the hardware-qualified transfer path. Capture
+     // and mixer control deliberately remain on libtinyalsav2 in this process.
+@@ -1648,14 +1652,14 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         return ::android::OK;
+     }
+     // AudioFlinger may issue a zero-frame burst immediately after START. Do
+-    // not bind EP1 until a complete first client transaction is available.
++    // not bind EP6 until a complete first client transaction is available.
+     if (frameCount == 0) {
+         *actualFrameCount = 0;
+         *latencyMs = kPlaybackLatencyMs;
+         return ::android::OK;
+     }
+     // Reject a partial/overflowing client burst before the deferred route is
+-    // bound.  Once EP1 is active, AoC expects the first D0 transaction to be a
++    // bound. Once EP6 is active, AoC expects the first D5 transaction to be a
+     // complete 1,920-frame period; opening on an invalid burst can strand the
+     // asynchronous sink without enough producer headroom.
+     if (buffer == nullptr || mFrameSizeBytes != 2 * sizeof(int32_t) ||
+@@ -1700,10 +1704,10 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+     }
+ 
+     // Mixer reads cross the ALSA control path and are not real-time safe on
+-    // Frankel. All passive ownership is proved before EP1 is bound and the
++    // Frankel. All passive ownership is proved before EP6 is bound and the
+     // complete state is audited after PCM close; the transfer path checks only
+     // the in-process lease and boot-local certificate. This mirrors the
+-    // qualified tinyplay path, which performs no mixer I/O while PCM0,D0 runs.
++    // qualified tinyplay path, which performs no mixer I/O while PCM0,D5 runs.
+     const bool ready = ::android::base::GetBoolProperty(kSpeakerReadyProperty, false);
+     bool routeExists = false;
+     {
+@@ -1740,9 +1744,10 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+     const size_t bytesToTransfer = frameCount * mFrameSizeBytes;
+     alsa::applyGain(buffer, mGain, bytesToTransfer, mConfig.value().format, mConfig->channels);
+     // Match the physically qualified native-q192 transaction by feeding one
+-    // 1,920-frame period per raw blocking WRITEI. The first period reaches the
+-    // explicit start threshold and the second can immediately fill the
+-    // remaining ring headroom. Hardware observed the transient EFAULT at byte
++    // 1,920-frame period per raw blocking WRITEI. Two periods fill the complete
++    // 3,840-frame ring before the explicit start threshold allows playback,
++    // preserving one full period of scheduling headroom. Hardware observed
++    // the transient EFAULT at byte
+     // offset 15,360: the second period after the first was accepted. Give only
+     // that startup write a bounded retry without pcm_prepare(), which would
+     // reset the active AoC stream. The first and every later error remain
+@@ -1831,7 +1836,7 @@ void StreamPowerphone::cleanupCaptureRouteLocked() {
+ }
+ 
+ void StreamPowerphone::cleanupPlaybackRouteLocked() {
+-    // The PCM owns the producer side of EP1. Close it before restoring any
++    // The PCM owns the producer side of EP6. Close it before restoring any
+     // mixer control so the asynchronous sink can never be unbound while a
+     // live file descriptor is still capable of writing into it.
+     if (mLegacyPlaybackPcm != nullptr) {
