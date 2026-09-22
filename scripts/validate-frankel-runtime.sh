@@ -7,7 +7,8 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$script_dir/lib/common.sh"
 
 require_pixel_target frankel "the Frankel real-hardware runtime validator"
-(( $# == 0 )) || die "usage: [FRANKEL_ADB_SERIAL=<serial>] scripts/validate-frankel-runtime.sh"
+(( $# == 0 )) || die \
+  "usage: [FRANKEL_ADB_SERIAL=<serial>] [FRANKEL_EXPECT_DISABLED_AVB=true|false] scripts/validate-frankel-runtime.sh"
 
 if [[ -n ${FRANKEL_ADB_SERIAL:-} && -n ${ANDROID_SERIAL:-} && \
       "$FRANKEL_ADB_SERIAL" != "$ANDROID_SERIAL" ]]; then
@@ -34,6 +35,13 @@ timeout_seconds=${FRANKEL_ADB_TIMEOUT_SECONDS:-30}
 (( timeout_seconds <= 180 )) || \
   die "FRANKEL_ADB_TIMEOUT_SECONDS must not exceed 180"
 timeout_command=(timeout --foreground --signal=TERM "${timeout_seconds}s")
+
+expect_disabled_avb=${FRANKEL_EXPECT_DISABLED_AVB:-false}
+case "$expect_disabled_avb" in
+  true) expected_avb_mode=disabled ;;
+  false) expected_avb_mode=enforcing ;;
+  *) die "FRANKEL_EXPECT_DISABLED_AVB must be true or false" ;;
+esac
 
 device_serial=${FRANKEL_ADB_SERIAL:-${ANDROID_SERIAL:-}}
 if [[ -z "$device_serial" ]]; then
@@ -130,6 +138,7 @@ record "selected_device=<redacted>"
 record "adb_version=$PLATFORM_TOOLS_VERSION"
 record "expected_build_id=$STOCK_BUILD_ID"
 record "expected_framework_spl=$AOSP_SECURITY_PATCH"
+record "expected_avb_mode=$expected_avb_mode"
 record ""
 
 check_equal sys.boot_completed "$(adb_prop sys.boot_completed)" 1
@@ -152,14 +161,22 @@ check_equal ro.boot.vbmeta.device_state \
 check_equal ro.boot.flash.locked "$(adb_prop ro.boot.flash.locked)" 0
 check_equal ro.boot.verifiedbootstate \
   "$(adb_prop ro.boot.verifiedbootstate)" orange
-check_equal ro.boot.veritymode "$(adb_prop ro.boot.veritymode)" enforcing
 check_equal adb_root_uid "$(adb_shell id -u)" 0
 check_equal selinux "$(adb_shell getenforce)" Enforcing
 
 verification_output=$(adb_shell avbctl get-verification 2>&1 || true)
 verity_output=$(adb_shell avbctl get-verity 2>&1 || true)
-check_contains avbctl_verification "$verification_output" "verification is enabled"
-check_contains avbctl_verity "$verity_output" "verity is enabled"
+if [[ "$expect_disabled_avb" == true ]]; then
+  check_equal ro.boot.veritymode "$(adb_prop ro.boot.veritymode)" disabled
+  check_contains avbctl_verification "$verification_output" \
+    "verification is disabled"
+  check_contains avbctl_verity "$verity_output" "verity is disabled"
+else
+  check_equal ro.boot.veritymode "$(adb_prop ro.boot.veritymode)" enforcing
+  check_contains avbctl_verification "$verification_output" \
+    "verification is enabled"
+  check_contains avbctl_verity "$verity_output" "verity is enabled"
+fi
 
 for service in servicemanager vndservicemanager surfaceflinger zygote \
     netd vold audioserver cameraserver; do
@@ -223,16 +240,31 @@ verity_mount_points=(/ /system_dlkm /system_ext /product /vendor /vendor_dlkm)
 for index in "${!verity_partitions[@]}"; do
   partition=${verity_partitions[$index]}
   mount_point=${verity_mount_points[$index]}
-  verity_name="${partition}-verity"
-  dm_table=$(adb_shell dmctl table "$verity_name" 2>&1 || true)
-  check_contains "dmctl.$verity_name" "$dm_table" verity
-  verity_device=$(
-    adb_shell readlink -f "/dev/block/mapper/$verity_name" 2>&1 || true
-  )
-  if [[ "$verity_device" =~ ^/dev/block/dm-[0-9]+$ ]]; then
-    pass "mapper.$verity_name=$verity_device"
+  if [[ "$expect_disabled_avb" == true ]]; then
+    mapper_name="${partition}_a"
+    dm_table=$(adb_shell dmctl table "$mapper_name" 2>&1 || true)
+    if [[ "$dm_table" == *verity* ]]; then
+      fail "dmctl.$mapper_name unexpectedly contains verity"
+    elif [[ "$dm_table" == *linear* ]]; then
+      pass "dmctl.$mapper_name contains linear and no verity target"
+    else
+      fail "dmctl.$mapper_name lacks a direct linear mapping: ${dm_table:-<empty>}"
+    fi
+    mapped_device=$(
+      adb_shell readlink -f "/dev/block/mapper/$mapper_name" 2>&1 || true
+    )
   else
-    fail "mapper.$verity_name is invalid: ${verity_device:-<empty>}"
+    mapper_name="${partition}-verity"
+    dm_table=$(adb_shell dmctl table "$mapper_name" 2>&1 || true)
+    check_contains "dmctl.$mapper_name" "$dm_table" verity
+    mapped_device=$(
+      adb_shell readlink -f "/dev/block/mapper/$mapper_name" 2>&1 || true
+    )
+  fi
+  if [[ "$mapped_device" =~ ^/dev/block/dm-[0-9]+$ ]]; then
+    pass "mapper.$mapper_name=$mapped_device"
+  else
+    fail "mapper.$mapper_name is invalid: ${mapped_device:-<empty>}"
   fi
 
   # The positional fields belong to awk, not this shell.
@@ -240,7 +272,7 @@ for index in "${!verity_partitions[@]}"; do
   mount_record=$(awk -v "mount_point=$mount_point" \
     '$2 == mount_point {print $1 " " $4}' <<<"$mounts_text")
   mount_source=${mount_record%% *}
-  check_equal "mount.$mount_point.source" "$mount_source" "$verity_device"
+  check_equal "mount.$mount_point.source" "$mount_source" "$mapped_device"
   mount_options=${mount_record#* }
   if [[ ",$mount_options," == *,ro,* ]]; then
     pass "mount.$mount_point is read-only"

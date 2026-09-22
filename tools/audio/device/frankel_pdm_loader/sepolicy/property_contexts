@@ -1,0 +1,3 @@
+vendor.powerphone.pdm.ready u:object_r:vendor_powerphone_pdm_prop:s0 exact bool
+vendor.powerphone.pdm.topology_ready u:object_r:vendor_powerphone_pdm_topology_prop:s0 exact bool
+vendor.powerphone.aoc_speaker_192k.ready u:object_r:vendor_powerphone_aoc_speaker_prop:s0 exact bool

@@ -1,0 +1,107 @@
+# This RC is installed in /system_ext/etc/init and is consequently parsed in
+# init's platform context.  Do not move these actions into the vendor RC:
+# init.svc.audioserver is a private platform property and is intentionally not
+# actionable from the vendor-init subcontext.
+
+on early-init
+    # Opt-in platform display gate: system_server/audio continue initializing,
+    # but the launcher and input are withheld until the research boot outcome.
+    setprop sys.powerphone.audio_boot pending
+    # `stop` marks the already-parsed class-core service disabled before its
+    # class starts.  The stock service definition and options remain intact.
+    stop audioserver
+
+# Start only once per boot, after init has launched AoC's late_start firmware
+# daemon, started the stock audio HAL, and published the initial audioserver
+# stop. Vendor post-fs-data arms both the boot-local attempted latch and the
+# typed `armed` phase. Claiming the latch is still the first command.
+#
+# Every certification or finalization process is started asynchronously. A
+# long `exec_start` here would suspend init's action queue, delaying unrelated
+# vendor.all.modules.ready property actions and the HALs SystemServer needs to
+# finish boot. Each completion transition below is instead a short action
+# guarded by an exact phase and exact oneshot-service state.
+on property:vendor.powerphone.bootstrap.attempted=0 && property:vendor.powerphone.bootstrap.phase=armed && property:vendor.powerphone.bootstrap.watchdog_expired=0 && property:init.svc.vendor.powerphone-bootstrap-watchdog=running && property:init.svc.aocd=running && property:init.svc.vendor.audio-hal-aidl=running && property:init.svc.audioserver=stopped
+    setprop vendor.powerphone.bootstrap.attempted 1
+    stop vendor.powerphone-bootstrap-watchdog
+
+    # The selected speaker helper retains the stock A32 allocator. The former
+    # early OUTPUTTER preparation and its 30-second warm-up are obsolete.
+    # Let Android's AudioService initialize its volume ranges against a live
+    # policy service. Starting audioserver only after DSP setup leaves those
+    # ranges at -1 despite successful PCM/API transport. Presentation remains
+    # gated, and native helpers retain their exact idle-PCM ownership guards.
+    stop vendor.audio-hal-powerphone
+    wait_for_prop init.svc.vendor.audio-hal-powerphone stopped
+    start vendor.audio-hal-powerphone
+    start audioserver
+    # Start the bounded native wait in this same action. A separate failure
+    # trigger on a new phase plus a service's old "stopped" value can already
+    # be queued before start publishes "running" and finalize a live attempt.
+    setprop vendor.powerphone.bootstrap.phase attempt1
+    start vendor.powerphone-d10-bootstrap
+
+# Completion actions deliberately contain only the unique phase edge and that
+# service's stopped state. Adding the stable attempted latch as a third trigger
+# lets its older queued property event match a fast service exit and duplicate
+# a transition. Publishing each next phase immediately before its start makes
+# these two-property transitions exactly once for long and failed services.
+on property:vendor.powerphone.bootstrap.phase=attempt1 && property:init.svc.vendor.powerphone-d10-bootstrap=stopped
+    setprop vendor.powerphone.bootstrap.phase attempt2
+    start vendor.powerphone-d10-bootstrap-retry-1
+
+on property:vendor.powerphone.bootstrap.phase=attempt2 && property:init.svc.vendor.powerphone-d10-bootstrap-retry-1=stopped
+    setprop vendor.powerphone.bootstrap.phase attempt3
+    start vendor.powerphone-d10-bootstrap-retry-2
+
+on property:vendor.powerphone.bootstrap.phase=attempt3 && property:init.svc.vendor.powerphone-d10-bootstrap-retry-2=stopped
+    setprop vendor.powerphone.bootstrap.phase finalizing
+    start vendor.powerphone-d10-bootstrap-finalize
+
+# The native finalizer always runs asynchronously. Its stopped transition is
+# the sole ordinary release point, whether certification succeeded, failed, or
+# a service start was denied. Reap both possible clients again, then create a
+# new sidecar before audioserver so no AIDL stream config crosses the boundary.
+on property:vendor.powerphone.bootstrap.phase=finalizing && property:init.svc.vendor.powerphone-d10-bootstrap-finalize=stopped
+    setprop vendor.powerphone.bootstrap.phase releasing
+    stop audioserver
+    wait_for_prop init.svc.audioserver stopped
+    stop vendor.audio-hal-powerphone
+    wait_for_prop init.svc.vendor.audio-hal-powerphone stopped
+    start vendor.audio-hal-powerphone
+    start audioserver
+    setprop vendor.powerphone.bootstrap.phase complete
+
+# "complete" also represents failure. Publish success to the platform display
+# gate only after both actual profiles and all released audio processes exist.
+# No long work runs in init's queue; WindowManager polls this bridge itself.
+on property:vendor.powerphone.bootstrap.phase=complete && property:vendor.powerphone.pdm.ready=1 && property:vendor.powerphone.aoc_speaker_192k.ready=1 && property:init.svc.audioserver=running && property:init.svc.vendor.audio-hal-aidl=running && property:init.svc.vendor.audio-hal-powerphone=running
+    setprop sys.powerphone.audio_boot ready
+
+# Preserve bounded recovery access without advertising a failed patch as ready.
+on property:vendor.powerphone.bootstrap.phase=complete && property:vendor.powerphone.pdm.ready=0
+    setprop sys.powerphone.audio_boot failed
+
+on property:vendor.powerphone.bootstrap.phase=complete && property:vendor.powerphone.aoc_speaker_192k.ready=0
+    setprop sys.powerphone.audio_boot failed
+
+# If the compound prerequisite never converges, the 60-second asynchronous
+# watchdog starts only the finalizer, using the same phase-before-start order.
+on property:vendor.powerphone.bootstrap.watchdog_expired=1 && property:vendor.powerphone.bootstrap.attempted=0 && property:vendor.powerphone.bootstrap.phase=armed
+    setprop vendor.powerphone.bootstrap.attempted 1
+    stop audioserver
+    wait_for_prop init.svc.audioserver stopped
+    stop vendor.audio-hal-powerphone
+    wait_for_prop init.svc.vendor.audio-hal-powerphone stopped
+    setprop vendor.powerphone.bootstrap.phase finalizing
+    start vendor.powerphone-d10-bootstrap-finalize
+
+# Treat an unexpected watchdog exit as the same asynchronous fail-open request.
+on property:init.svc.vendor.powerphone-bootstrap-watchdog=stopped && property:vendor.powerphone.bootstrap.attempted=0 && property:vendor.powerphone.bootstrap.watchdog_expired=0 && property:vendor.powerphone.bootstrap.phase=armed
+    setprop vendor.powerphone.bootstrap.attempted 1
+    stop audioserver
+    wait_for_prop init.svc.audioserver stopped
+    stop vendor.audio-hal-powerphone
+    wait_for_prop init.svc.vendor.audio-hal-powerphone stopped
+    setprop vendor.powerphone.bootstrap.phase finalizing
+    start vendor.powerphone-d10-bootstrap-finalize

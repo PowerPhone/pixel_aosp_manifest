@@ -126,7 +126,9 @@ logs/build-frankel.log
 
 artifacts/gsi/                                  legacy Cubs-bound GSI bundle
 artifacts/cubs/                                 Cubs complete-device bundle
-artifacts/frankel/device/                       Frankel complete-device bundle
+artifacts/frankel/device/                       Frankel baseline device bundle
+artifacts/frankel/powerphone/                   Frankel exact-profile research bundle
+artifacts/frankel/experimental-*/               Frankel partial-selection experiments
 
 .cache/recovery-anchor/                        legacy Cubs-only private state
 ```
@@ -135,8 +137,23 @@ Downloads, stock directories, generated source, build output, attestations,
 artifacts, logs, and recovery state are ignored local data. The source checkout
 is shared because both profiles use the same resolved manifest and combined
 patch closure. Build outputs and complete-device bundles are separated by
-codename. The download and attestation roots are flat today, but their
-filenames include the target identity.
+codename. Frankel also separates the stock-audio baseline from research
+selections: packaging publishes `powerphone` only when
+`POWERPHONE_AOC_ALSA_192K=true`, `POWERPHONE_AUDIO_SIDECAR=true`, and
+`POWERPHONE_CS35L43_192K=true` are all selected with the hardware-qualified
+`POWERPHONE_D0_PROGRESS_MODE=one-period-lag` and
+`POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock`, plus
+`POWERPHONE_D5_TIMER=false` and `POWERPHONE_PRIMARY_HAL_192K=true`. Any
+nonempty partial selection
+or other D0/firmware profile
+uses a distinct `experimental-powerphone-*` directory. None of those paths can
+replace the baseline `device` bundle. The download and attestation roots are
+flat today, but their filenames include the target identity.
+
+New complete-device targets follow `artifacts/<codename>/device/`; optional
+image variants use named siblings below the same codename. The existing
+`artifacts/cubs/` and `artifacts/gsi/` roots are compatibility exceptions, not
+a template for Pixel 9 or later ports.
 
 There is no implemented `artifacts/frankel/gsi/`, Frankel recovery-anchor
 directory, or Frankel runtime attestation path. Documentation must not imply

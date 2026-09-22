@@ -1,0 +1,77 @@
+service vendor.powerphone-d10-bootstrap /vendor/bin/frankel_powerphone_d10_bootstrap
+    disabled
+    oneshot
+    user root
+    group root audio
+    capabilities FOWNER
+    stdio_to_kmsg
+
+# Init cannot restart a oneshot service a bounded number of times. Two
+# separately named, otherwise identical services provide exactly two retries.
+# The system-ext gate publishes each typed phase immediately before starting
+# its service in the same short action, so long AoC transactions never block
+# init's action queue and stopped-state transitions remain exactly once.
+service vendor.powerphone-d10-bootstrap-retry-1 /vendor/bin/frankel_powerphone_d10_bootstrap
+    disabled
+    oneshot
+    user root
+    group root audio
+    capabilities FOWNER
+    stdio_to_kmsg
+
+service vendor.powerphone-d10-bootstrap-retry-2 /vendor/bin/frankel_powerphone_d10_bootstrap
+    disabled
+    oneshot
+    user root
+    group root audio
+    capabilities FOWNER
+    stdio_to_kmsg
+
+# Always run after the bounded certification attempts. The native finalizer
+# restores normal PCM modes only when both readiness certificates are absent;
+# after success it is an inert guard that preserves the research quarantine.
+# Its asynchronous stopped transition is the gate's only release event.
+service vendor.powerphone-d10-bootstrap-finalize /vendor/bin/frankel_powerphone_d10_bootstrap --finalize-fail-open
+    disabled
+    oneshot
+    user root
+    group root audio
+    capabilities FOWNER
+    stdio_to_kmsg
+
+# Bounds the pre-transaction wait that property-only init triggers cannot time
+# out themselves. The system-ext gate consumes its expiration property only
+# while the boot-local attempted latch is still zero.
+service vendor.powerphone-bootstrap-watchdog /vendor/bin/frankel_powerphone_d10_bootstrap --watchdog-fail-open
+    disabled
+    oneshot
+    user root
+    group root
+    stdio_to_kmsg
+
+on post-fs-data
+    # Root init has loaded /data/property before vendor post-fs-data actions
+    # run, while aocd is still waiting for class late_start. Force the stock
+    # daemon to request kernel VNOM before it loads AoC firmware on every
+    # PowerPhone boot, including a non-wipe boot carrying an older persisted
+    # value.
+    setprop persist.vendor.aoc.firmware.force_nominal_voltage 1
+
+    # Arm the system_ext boot gate exactly once for this boot. The gate action
+    # claims the latch before its first exec, so later
+    # deliberate audio-service stops cannot replay the boot transaction.
+    # Initialize watchdog expiration and the exact asynchronous state-machine
+    # phase before arming the latch, so no trigger can observe an incomplete
+    # boot-local transaction state.
+    setprop vendor.powerphone.bootstrap.watchdog_expired 0
+    setprop vendor.powerphone.bootstrap.phase armed
+    setprop vendor.powerphone.bootstrap.attempted 0
+
+    # Run asynchronously while init continues toward late_start/aocd. The main
+    # gate stops it immediately after claiming the attempted latch; otherwise
+    # it requests the platform-side fail-open path after 60 seconds.
+    start vendor.powerphone-bootstrap-watchdog
+
+    # The D10 and speaker AoC helpers serialize the single factory
+    # diagnostic response stream with this boot-safe, vendor-private lock.
+    mkdir /data/vendor/powerphone 0700 root root

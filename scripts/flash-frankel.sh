@@ -31,9 +31,10 @@ firmware_partitions=(
   "${bootloader_firmware_partitions[@]}"
   "${radio_firmware_partitions[@]}"
 )
-static_partitions=(
-  boot dtbo init_boot pvmfw vendor_boot vendor_kernel_boot vbmeta
+static_payload_partitions=(
+  boot dtbo init_boot pvmfw vendor_boot vendor_kernel_boot
 )
+static_partitions=("${static_payload_partitions[@]}" vbmeta)
 logical_partitions=(
   system system_dlkm system_ext product vendor vendor_dlkm
 )
@@ -285,14 +286,18 @@ done
 # Return directly to the bootloader without attempting an Android boot. The
 # source-built static set and its root vbmeta are committed together here;
 # vbmeta is last so an interrupted earlier write cannot authenticate a mixed
-# static set.
+# static set. The research userdebug image deliberately disables AVB
+# verification and hashtree enforcement at flash time so adb remount and
+# iterative on-device instrumentation do not require a second vbmeta write.
 fb reboot bootloader
 wait_for_fastboot no
 require_target_identity no
 note "flashing source-built static images to slot A"
-for partition in "${static_partitions[@]}"; do
+for partition in "${static_payload_partitions[@]}"; do
   fb --slot=a flash "$partition" "$script_dir/$partition.img"
 done
+fb --slot=a --disable-verity --disable-verification \
+  flash vbmeta "$script_dir/vbmeta.img"
 
 # Wipe only after every logical and static OS payload has committed.
 fb erase userdata

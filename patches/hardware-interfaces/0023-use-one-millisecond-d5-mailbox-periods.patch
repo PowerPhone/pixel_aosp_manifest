@@ -1,0 +1,141 @@
+From: PowerPhone research platform <powerphone@csr460.com>
+Subject: [PATCH] Use one-millisecond D5 mailbox periods and exact WRITEI progress
+
+Keep the 3840-frame ALSA ring and full-ring startup threshold, but notify
+and refill in native 192-frame quanta. Hardware showed intermittent EPIPE
+with 1920x2 even at FIFO/90; 192x20 retains 20 ms total buffering without
+10 ms consumed-pointer quantization. The 7680-frame FMQ queue and all
+capture geometry remain unchanged. Advance partial writes only by the
+frames actually accepted and preserve the exact untransferred suffix.
+
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -71,7 +71,8 @@
+ constexpr int32_t kRate = 192000;
+ constexpr size_t kCaptureAlsaPeriodFrames = 1920;
+ constexpr size_t kCaptureAlsaBufferFrames = 7680;
+-constexpr size_t kPlaybackAlsaPeriodFrames = 1920;
++// One native AoC quantum per mailbox notification; retain the full 20 ms ring.
++constexpr size_t kPlaybackAlsaPeriodFrames = 192;
+ constexpr size_t kPlaybackAlsaBufferFrames = 3840;
+ constexpr size_t kPlaybackAlsaStartThresholdFrames = kPlaybackAlsaBufferFrames;
+ constexpr size_t kCaptureFrameworkBufferFrames = 1920;
+@@ -1402,7 +1403,7 @@
+     }
+ 
+     // The framework/FMQ buffer is decoupled from the fixed AoC frontend ring.
+-    // Open PCM0,D5 at 1920x2 immediately after the final EP6 mixer write. The
++    // Open PCM0,D5 at 192x20 immediately after the final EP6 mixer write. The
+     // isolated facade retains libtinyalsa-v1's open/prepare transaction while
+     // exposing raw WRITEI for the hardware-qualified transfer path. Capture
+     // and mixer control deliberately remain on libtinyalsav2 in this process.
+@@ -1450,7 +1451,7 @@
+             openResult.buffer_size_frames == kPlaybackAlsaBufferFrames &&
+             powerphone_legacy_pcm_get_buffer_size(playbackPcm) == kPlaybackAlsaBufferFrames;
+     if (!exactGeometry) {
+-        LOG(ERROR) << __func__ << ": PCM 0,0 did not retain exact legacy 1920x2 geometry: "
++        LOG(ERROR) << __func__ << ": PCM 0,5 did not retain exact legacy 192x20 geometry: "
+                    << "period=" << openResult.period_size_frames
+                    << ", count=" << openResult.period_count
+                    << ", buffer=" << openResult.buffer_size_frames;
+@@ -1660,7 +1661,7 @@
+     }
+     // Reject a partial/overflowing client burst before the deferred route is
+     // bound. Once EP6 is active, AoC expects the first D5 transaction to be a
+-    // complete 1,920-frame period; opening on an invalid burst can strand the
++    // complete 3,840-frame ring; opening on an invalid burst can strand the
+     // asynchronous sink without enough producer headroom.
+     if (buffer == nullptr || mFrameSizeBytes != 2 * sizeof(int32_t) ||
+         frameCount % kPlaybackAlsaBufferFrames != 0 ||
+@@ -1743,16 +1744,13 @@
+     }
+     const size_t bytesToTransfer = frameCount * mFrameSizeBytes;
+     alsa::applyGain(buffer, mGain, bytesToTransfer, mConfig.value().format, mConfig->channels);
+-    // Match the physically qualified native-q192 transaction by feeding one
+-    // 1,920-frame period per raw blocking WRITEI. Two periods fill the complete
+-    // 3,840-frame ring before the explicit start threshold allows playback,
+-    // preserving one full period of scheduling headroom. Hardware observed
+-    // the transient EFAULT at byte
+-    // offset 15,360: the second period after the first was accepted. Give only
+-    // that startup write a bounded retry without pcm_prepare(), which would
+-    // reset the active AoC stream. The first and every later error remain
+-    // terminal, and a recovered EPIPE remains visible through the legacy
+-    // handle's xrun counter.
++    // Feed one native 192-frame/1 ms quantum per raw blocking WRITEI. Twenty
++    // periods fill the same 3,840-frame ring before playback starts. The old
++    // 1,920x2 geometry intermittently starved even at FIFO/90: its 10 ms
++    // mailbox quantization left much less refill margin. Keep the existing
++    // bounded second-write EFAULT retry without re-preparing the active PCM;
++    // all EPIPEs remain terminal. The facade handles positive short writes
++    // by advancing only the accepted frames and submitting their suffix.
+     const bool secondWriteRetryPending =
+             mPlaybackSecondWriteRetryPending.load(std::memory_order_acquire);
+     size_t transferredFrames = 0;
+@@ -1926,7 +1924,7 @@
+     if (sampleRateHz == kRate && exactOutput) {
+         // Aggregate two 20 ms ALSA rings into one 40 ms framework transaction.
+         // This gives the HAL worker scheduling margin while transfer() still
+-        // submits independently qualified 1,920-frame PCM0,D0 period writes.
++        // submits 192-frame PCM0,D5 period writes into its 20 ms ALSA ring.
+         *bufferSizeFrames = kPlaybackFrameworkBufferFrames;
+         return ndk::ScopedAStatus::ok();
+     }
+--- a/audio/aidl/default/powerphone/LegacyTinyalsaV1.c
++++ b/audio/aidl/default/powerphone/LegacyTinyalsaV1.c
+@@ -101,7 +101,7 @@
+     config.start_threshold = start_threshold_frames;
+     /*
+      * Frankel's native-q192 system path is qualified with an explicit
+-     * one-period start. Keep the remaining software fields at zero so
++     * full-ring start. Keep the remaining software fields at zero so
+      * libtinyalsa v1 resolves them to full-buffer stop, zero silence, and an
+      * avail_min of one frame.
+      */
+@@ -163,6 +163,7 @@
+                                         uint32_t efault_retry_sleep_us,
+                                         uint32_t* actual_efault_retries) {
+     uint32_t retries = 0;
++    uint32_t transferred_frames = 0;
+ 
+     if (actual_efault_retries != NULL) {
+         *actual_efault_retries = 0;
+@@ -175,18 +176,37 @@
+     if (fd < 0) {
+         return fd;
+     }
++    const uint32_t frame_bytes = pcm_frames_to_bytes(unwrap(pcm), 1);
++    if (frame_bytes == 0 || frame_count > SIZE_MAX / frame_bytes) {
++        return -EINVAL;
++    }
+     for (;;) {
+         struct snd_xferi transfer_request;
+         int write_result;
+         int write_errno;
+ 
+         memset(&transfer_request, 0, sizeof(transfer_request));
+-        transfer_request.buf = (void*)data;
+-        transfer_request.frames = frame_count;
++        transfer_request.result = -1;
++        transfer_request.buf = (uint8_t*)data + (size_t)transferred_frames * frame_bytes;
++        transfer_request.frames = frame_count - transferred_frames;
+         errno = 0;
+         write_result = powerphone_legacy_writei_ioctl(fd, &transfer_request);
+         write_errno = errno;
+         if (write_result == 0) {
++            /* A successful ioctl may have accepted only a prefix. Never
++             * count or replay the unaccepted suffix; zero progress and
++             * malformed results remain terminal instead of busy-looping. */
++            if (transfer_request.result <= 0 ||
++                (uint64_t)transfer_request.result > transfer_request.frames) {
++                if (actual_efault_retries != NULL) {
++                    *actual_efault_retries = retries;
++                }
++                return transfer_request.result < 0 ? (int)transfer_request.result : -EIO;
++            }
++            transferred_frames += (uint32_t)transfer_request.result;
++            if (transferred_frames != frame_count) {
++                continue;
++            }
+             if (actual_efault_retries != NULL) {
+                 *actual_efault_retries = retries;
+             }

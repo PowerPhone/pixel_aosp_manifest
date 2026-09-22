@@ -12,17 +12,91 @@ with `PIXEL_TARGET`; it is never inferred from an attached USB device.
 | Phone | Codename | Platform | Repository status |
 | --- | --- | --- | --- |
 | Pixel 11 | `cubs` | Malibu | Real-hardware boot qualified; broader functional qualification remains incomplete |
-| Pixel 10 | `frankel` | Laguna | Hardened complete bundle passed two real-hardware boots and two 66-pass/zero-failure runtime audits; broader end-to-end qualification remains partial |
+| Pixel 10 | `frankel` | Laguna | Native 192 kHz playback verified on both built-in speaker routes in the September 11 hardware/API tests; see the dated report for limits |
 | Pixel 9 | To be established from its own stock package | To be established | Future target; no build or qualification claim |
 
 Read [`docs/multi-target-layout.md`](docs/multi-target-layout.md) for the target
 boundary and output-isolation rules. Frankel work is documented in
 [`docs/frankel-baseline.md`](docs/frankel-baseline.md) and
 [`docs/frankel-build-and-flash.md`](docs/frankel-build-and-flash.md). The
+192 kHz Android application/HAL qualification boundary is documented in
+[`docs/frankel-audio-api.md`](docs/frankel-audio-api.md), and the permanent
+pre-audioserver D10 boot path is in
+[`docs/frankel-powerphone-image-integration.md`](docs/frankel-powerphone-image-integration.md).
+The final 192 kHz endpoint matrix and evidence boundary are in
+[`docs/frankel-powerphone-final-qualification.md`](docs/frankel-powerphone-final-qualification.md). The
 serial-free qualification record and exact final evidence are in
 [`docs/frankel-validation.md`](docs/frankel-validation.md).
 
-### Pixel 10 qualification status
+The [September 11 playback report](docs/frankel-playback192-20260911.md)
+supersedes earlier playback-rate claims: those missed wrong pitch and repeated
+samples inside AoC despite successful APIs and zero ALSA xruns. The corrected
+path uses PCM0,D5/source5/EP6, S32 stereo at 192 kHz, coherent
+192-frame DSP blocks, and a 12.288 MHz two-slot backend. Intermittent host
+underruns with 1920x2 ALSA periods led to 192x20 periods with the same
+3840-frame buffer and full-buffer start. A dedicated FIFO/95 kernel period
+worker, FIFO/90 playback writers and 960-frame framework bursts complete the
+host transport. The September 11 flashed image passed Java AudioTrack on both speaker
+routes, AAudio for 120 seconds on the bottom speaker and 30 seconds on the
+earpiece, and intended 54.283 kHz self-loop components through both speakers.
+The ordinary 48 kHz client reproduces 12 kHz at the correct pitch through the
+fixed 192 kHz backend. The direct ALSA results and all earlier failed trials
+remain in the report. This is not a calibrated flat-response claim through
+96 kHz or a sample-clock jitter measurement. Signed AoC firmware stays
+unchanged; guarded boot-time runtime patches apply the corrections. The
+retained unsigned firmware is not flashable.
+
+The [September 12 ordinary-audio investigation](docs/frankel-ordinary-audio-fix-20260912.md)
+addresses a subsequent report of inaudible UI sounds. The ordinary-speaker
+route had incorrectly overridden donor amplifier gain 17 with the earpiece's
+gain 6. Restoring the ordinary route's donor gain improves measured playback
+level; the report distinguishes live trials from post-flash results. The old
+66.547 kHz recording was weak evidence, not proof of airborne ultrasonic
+output. On-device tone correlation and amplifier-off controls alone do not
+fully separate acoustic output from electrical coupling.
+
+After the user confirmed the UI sound was working but quiet, the
+[UI-volume adjustment](docs/frankel-ui-volume-20260912.md) retained factory
+amplifier settings and raised only the SYSTEM/SPEAKER policy curve by 6 dB.
+This is custom compensation, not a factory curve. The measured click-level
+increase is larger than the nominal policy change; see the real recordings
+and limits in the report. Media and research gain settings remain unchanged.
+
+Completed research/ordinary playback handoffs pass after selecting the existing
+`ro.audio.flinger_standbytime_ms=0` setting, which removes a three-second idle
+hardware hold. **Simultaneously active primary and research BUS outputs are
+not supported**: they share hardware and are not mutually arbitrated. Use
+one output owner at a time. Capture uses its separate, unchanged D10 path.
+
+The current development bundle is
+[`artifacts/frankel/powerphone-playback192-bootready-20260912/flash-all.sh`](artifacts/frankel/powerphone-playback192-bootready-20260912/flash-all.sh),
+with all images alongside it. Its full-install script wipes userdata; see the
+bundle README. The [boot-streamlining report](docs/frankel-boot-streamline-20260912.md)
+records two consecutive boots with native audio preparation complete at about
+19.8 seconds and boot completion at about 21.1 seconds. Normal boot presentation
+and input wait for audio readiness; no manual post-launcher warm-up remains.
+First non-root app playback/recording at 192 kHz produced the correct recorded
+20 kHz tone without detected dropouts or phase jumps on both boots. All ten
+endpoint API checks and eight recorded UI clicks passed their scoped checks.
+Existing amplifier settings and UI-volume compensation are preserved.
+
+This revision incrementally flashed system, system_ext and vendor, retaining
+the RT kernel and userdata; it is not a new full-wipe run of every bundled image.
+No hashes or attestation were required. The previous UI-volume bundle remains
+available for recovery. Earlier research-route acoustic continuity limitations
+remain documented; these startup tests are not a renewed full-bandwidth or
+all-research-path qualification.
+Reproduction: [boot-ready image build](scripts/audio/frankel/BUILD_BOOT192.md)
+and [underlying audio build](scripts/audio/frankel/BUILD_PLAYBACK192.md).
+The [September 16 three-microphone experiment](docs/frankel-three-mic-192k.md)
+adds simultaneous interleaved D10 capture for direct acoustic measurements.
+It requires an additional kernel image and a reversible, exclusive RAW
+firmware profile; these changes are not included in the September 12 bundle
+and do not advertise three-channel Android API capture.
+The reusable [PowerPhone skill](skills/powerphone/SKILL.md) records the general
+hardware-to-API workflow and the measured failure modes.
+
+### Pixel 10 stock-compatible baseline qualification (historical)
 
 > **The hardened complete `frankel` bundle boots on real hardware.** Its
 > guarded runner flashed all 36 packaged A-only images, wiped data/metadata,
@@ -201,12 +275,14 @@ the downloaded binary package.
 The required Ubuntu package set installed by the script is:
 
 ```text
-android-sdk-libsparse-utils bison brotli build-essential ca-certificates ccache
+alsa-utils android-sdk-libsparse-utils binutils bison brotli build-essential ca-certificates ccache cpio
 curl device-tree-compiler diffutils e2fsprogs erofs-utils f2fs-tools flex
-fontconfig git-core git-lfs gnupg gperf lib32z1-dev libc6-dev-i386
+fontconfig git-core git-lfs gnupg gperf kmod lib32z1-dev libc6-dev-i386
 libgl1-mesa-dev libx11-dev libxml2-utils jq lz4 openssh-client openssl pkgconf
-protobuf-compiler python3 python3-protobuf repo rsync shellcheck unzip
-x11proto-core-dev util-linux xsltproc xxd zip zlib1g-dev zstd xz-utils 7zip
+protobuf-compiler python3 python-is-python3 python3-numpy python3-protobuf python3-scipy repo rsync
+python3-matplotlib libsndfile1
+shellcheck unzip x11proto-core-dev util-linux xsltproc xxd zip
+zlib1g-dev zstd xz-utils 7zip
 ```
 
 Node.js, Yarn, and Google Platform-Tools are installed separately under
@@ -242,10 +318,11 @@ PIXEL_TARGET=frankel scripts/extract-vendor.sh
 PIXEL_TARGET=frankel scripts/build-device.sh
 PIXEL_TARGET=frankel scripts/package-device.sh
 # After flashing and reaching Android over ADB:
+FRANKEL_EXPECT_DISABLED_AVB=true \
 PIXEL_TARGET=frankel scripts/validate-frankel-runtime.sh
 ```
 
-The standalone Frankel bundle is published under
+The default, stock-audio Frankel bundle is published under
 `artifacts/frankel/device/`; its runner is
 `artifacts/frankel/device/flash-all.sh`. The bundle is complete for the
 reviewed Frankel port: 23 donor firmware images, seven source-built physical OS
@@ -263,12 +340,89 @@ uses the authority expected by the extracted Pixel eUICC support app but is
 not a general Google Services Framework implementation; see the runbook for
 its caller and coexistence boundaries.
 
+Frankel acoustic-research builds have five boolean selections and two explicit
+profile selectors. `POWERPHONE_AOC_ALSA_192K=true` selects the exact paired kernel
+closure: the live-qualified AoC ALSA transformation for PCM0,D10 capture and
+PCM0,D0 / EP1 source-0 playback, plus the required `aoc_core.ko`
+zero-write-pointer reset.
+`POWERPHONE_D0_PROGRESS_MODE=mailbox|pure-timer|one-period-lag` chooses the D0
+progress source after that transform; it defaults to `mailbox`, while the
+publishable PowerPhone profile explicitly selects `one-period-lag`. That mode
+combines real mailbox progress with the 1 ms counter poll and conservatively
+reports one physical period behind the real counter. It is the
+hardware-qualified native-q192 path;
+selection alone still is not an acoustic-bandwidth claim.
+`POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock|source0-4s32-allocator-fallback`
+defaults to exact stock firmware; the retained second value is experimental and
+not bootable because GSA rejects the modified signed firmware.
+`POWERPHONE_AUDIO_SIDECAR=true` selects PCM0,D10 input, PCM0,D0 stereo-S32
+output, the bounded raw-WRITEI staged player, and the boot certifier, which
+certifies the F1 speaker profile first and the D10 capture profile last.
+Speaker certification retains stock A32 when its optional early cache-sync
+window is unavailable, warms Android audio, allocates/rebases four F1 speaker
+banks, applies rate/period-guarded
+H0 192/1536 geometry without changing stock DeepBuffer geometry,
+and connects the native-q192 F1 profile while leaving `UsfDefaultWorker` at
+stock priority. Real-device
+boots established this order: installing D10 first can prevent the subsequent
+speaker factory-mailbox transaction from completing. The sidecar gives both
+directions a 1,920-frame framework queue while preserving D10's 1,920-by-four
+ALSA ring and D0's 1,920-by-two ALSA ring. Its companion tinyALSA patch exposes
+the cumulative xrun count, including internally recovered EPIPEs, so the HAL
+can fail client streams closed. `POWERPHONE_CS35L43_192K=true`
+selects the narrow high-rate amplifier transform.
+`POWERPHONE_D5_TIMER=false` retains the real-mailbox D5 implementation.
+`POWERPHONE_PRIMARY_HAL_192K=true` advertises ordinary primary/deep physical
+output at 192 kHz so AudioFlinger resamples ordinary clients, redirects both
+proprietary playback selectors to D5/source 5, and connects the speaker TDM
+backend to EP6. It also marks the secondary deep-buffer port `DIRECT`, leaving
+one persistent primary mixer for UI and media instead of two AudioFlinger
+threads racing the same AoC source-5 ring. The older `rate-only` value is
+retained only for historical
+comparison; pairing its source-1 route with the native-q192 profile can assert
+AMixSPKR and must not be used as the normal profile. Use the same explicit values
+for vendor sanitization, attestation, build, and packaging. Returning the AoC
+flag to `false` with `POWERPHONE_D0_PROGRESS_MODE=mailbox` and
+`POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE=stock` restores both paired modules and
+the signed firmware to their exact stock bytes without rerunning extraction; see
+[`docs/frankel-audio-api.md`](docs/frankel-audio-api.md).
+
+Packaging with the exact seven-selector profile publishes the research bundle at
+`artifacts/frankel/powerphone/flash-all.sh`; it never overwrites the
+boot-qualified baseline in `artifacts/frankel/device/`. A deliberately
+partial selection, mailbox progress, or modified cold-firmware experiment is
+isolated under its own
+`artifacts/frankel/experimental-*` directory. `BUNDLE_INFO.txt` records the
+profile and all seven selection values so a copied bundle remains
+self-describing. On the exact integrated image, both individual D0 output
+routes and all three D10 logical input routes passed direct 192 kHz transport.
+Java `AudioTrack`/AAudio passed both outputs and Java
+`AudioRecord`/AAudio passed all three UNPROCESSED inputs while the HAL
+reported exact 192 kHz hardware geometry and AoC counters remained stable.
+The final single-output source-5/EP6 image survived five UI lock/unlock cycles
+and opened Sound Settings in 273 ms with AoC restart/coredump counters at 0/0.
+Three ordinary 48 kHz `AudioTrack` runs, deliberately overlapped with
+lock/unlock, Settings, and volume-key sonification, were converted onto the
+same 192 kHz primary thread. They completed 384,000 client frames in 8.005,
+8.015, and 8.008 seconds with zero underruns. Their simultaneous 192 kHz D10
+captures contain uninterrupted physical 15 kHz speaker responses: every run
+had zero missing 20 ms windows between the first and last detected response.
+The earlier source-1 crash, source-0 transport-only silence, and dual-output
+source-5 timing corruption remain documented as rejected experiments.
+Independently calibrated acoustic qualification remains separate: a
+characterized external ultrasonic source/receiver is still required to assign
+physical bandwidth to each speaker and enclosure microphone.
+
 Hardware evidence is candidate-specific: a later rebuild or repack is not
 qualified merely because this exact bundle passed. Follow the real slot-A and
 post-boot procedure in
 [`docs/frankel-build-and-flash.md`](docs/frankel-build-and-flash.md), and bind
 each new result to the evidence fields in
 [`docs/frankel-validation.md`](docs/frankel-validation.md).
+The Frankel bundle runner writes root `vbmeta` last with fastboot's
+`--disable-verity --disable-verification` options. Its packaged `vbmeta.img`
+remains the signed flags-0 source image; runtime validation of a runner-flashed
+candidate must explicitly set `FRANKEL_EXPECT_DISABLED_AVB=true`.
 
 For the already boot-qualified Pixel 11 (`cubs`) device product:
 
@@ -476,17 +630,28 @@ archive is itself ignored and is not an input to later builds.
   allowlist and loads exactly one profile.
 - `scripts/`: shared setup/sync orchestration plus target-aware extraction,
   build, packaging, validation, flash, and recovery entry points.
+- [`scripts/audio/frankel/`](scripts/audio/frankel/README.md): guarded,
+  target-scoped tinyALSA speaker/PDM probes and deterministic high-rate WAV
+  generation for Frankel acoustic-sensing work.
 - `docs/`: shared architecture plus explicitly device-scoped baselines,
   flashing runbooks, recovery policy, and validation records.
 - `skills/android-gsi-device-port/`: reusable Codex guidance for bringing AOSP
   to other bootloader-unlocked phones without maintained OEM device support.
+- `skills/powerphone/`: reusable layered workflow for maximizing built-in
+  Android speaker/microphone transport rates and separately qualifying
+  physical acoustic bandwidth.
 - `work/`: ignored source, toolchains, extraction state, and build outputs
   (`work/aosp/out_pixel/gsi/`, `work/aosp/out_pixel/cubs/`, and
   `work/aosp/out_pixel/frankel/`).
 - `downloads/`, `artifacts/`, `logs/`: ignored proprietary inputs, local image
   bundles, and host-specific build/validation logs. Current device bundle roots
   are the legacy `artifacts/cubs/` and the target-scoped
-  `artifacts/frankel/device/`.
+  `artifacts/frankel/device/` (baseline) and
+  `artifacts/frankel/powerphone/` (forced-primary-192 research build). The
+  local `artifacts/frankel/powerphone-audio192-dev/` tested rate-only build is
+  an intentionally unhashed, unattested bundle with audible 192 kHz primary
+  audio and 192 kHz research BUS endpoints; it is ignored by Git like all image
+  artifacts.
 - `.cache/`: ignored private recovery journals and attestations; never publish
   or copy this state between devices.
 

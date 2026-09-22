@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Fri, 4 Sep 2026 10:45:00 +0000
+Subject: [PATCH] audio: split PowerPhone output probe ports
+
+AudioPolicy probes every address-distinguished attached output during module
+startup. When both PowerPhone BUS sinks route from one mix port, the AIDL
+mapper reuses its first mix-port config and the generic module rejects the
+second stream because that config already owns a stream. Neither output then
+survives reachability validation, so both remain declared without framework
+port IDs.
+
+Create one otherwise-identical normal mixer port per fixed BUS sink. This gives
+the two startup probes distinct mix-port and port-config identities while
+retaining the exact addresses, S32/stereo/192 kHz profile, float-client
+conversion, and the process-wide lease which serializes their shared PCM0,D0
+hardware endpoint.
+---
+ audio/aidl/default/powerphone/Powerphone.cpp | 29 ++++++++++++++++++-----------
+ 1 file changed, 18 insertions(+), 11 deletions(-)
+
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -981,18 +981,25 @@ std::unique_ptr<Module::Configuration> makeConfiguration() {
+         config->routes.push_back(std::move(route));
+     }
+ 
+-    AudioPort outputMixPort;
+-    outputMixPort.id = config->nextPortId++;
+-    outputMixPort.name = "PowerPhone PCM0,0 192k stereo S32 output";
+-    // A normal mixer port lets AudioTrack/AAudio use PCM_FLOAT clients while
+-    // AudioFlinger converts to the exact S32 backend. DIRECT/FAST/RAW would
+-    // either require exact client format or select an unrelated vendor path.
+-    outputMixPort.flags = AudioIoFlags::make<AudioIoFlags::Tag::output>(0);
+-    outputMixPort.profiles = {outputProfile};
+-    outputMixPort.ext = makeMixExt();
+-    config->ports.push_back(outputMixPort);
+-
++    // Android's startup reachability probe opens one stream for every
++    // address-distinguished attached output. If both BUS devices share one mix
++    // port, Hal2AidlMapper reuses its first port config and the generic module
++    // rejects the second stream as already open. Give each fixed BUS sink a
++    // distinct normal mix port/config while the process-wide playback lease
++    // below continues to serialize their common PCM0,D0 hardware endpoint.
+     for (int32_t devicePortId : outputDevicePortIds) {
++        AudioPort outputMixPort;
++        outputMixPort.id = config->nextPortId++;
++        outputMixPort.name = "PowerPhone PCM0,0 192k stereo S32 output to device port " +
++                std::to_string(devicePortId);
++        // A normal mixer port lets AudioTrack/AAudio use PCM_FLOAT clients while
++        // AudioFlinger converts to the exact S32 backend. DIRECT/FAST/RAW would
++        // either require exact client format or select an unrelated vendor path.
++        outputMixPort.flags = AudioIoFlags::make<AudioIoFlags::Tag::output>(0);
++        outputMixPort.profiles = {outputProfile};
++        outputMixPort.ext = makeMixExt();
++        config->ports.push_back(outputMixPort);
++
+         AudioRoute route;
+         route.sourcePortIds = {outputMixPort.id};
+         route.sinkPortId = devicePortId;
+-- 
+2.43.0

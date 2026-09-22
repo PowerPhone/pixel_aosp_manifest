@@ -1,0 +1,1294 @@
+diff --git a/audio/aidl/default/Android.bp b/audio/aidl/default/Android.bp
+index 4c5fb47acb2ea7929beebabd1f81526302744956..b71c99661f01f40f4a965f558df7eb75f2505ae6 100644
+--- a/audio/aidl/default/Android.bp
++++ b/audio/aidl/default/Android.bp
+@@ -209,9 +209,9 @@ cc_binary {
+     installable: false, //installed in apex com.android.hardware.audio
+ }
+ 
+-// Opt-in research module for direct, exact-rate capture from Frankel's
+-// controller-backed ALSA card. This is intentionally a separate IModule: it
+-// does not replace the vendor primary module or register IConfig/effects.
++// Opt-in research module for direct, exact-rate Frankel capture and PCM0,28
++// speaker output. This is intentionally a separate IModule: it does not
++// replace the vendor primary module or register IConfig/effects.
+ cc_binary {
+     name: "android.hardware.audio.service-aidl.powerphone",
+     relative_install_path: "hw",
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+index 3653ad8131e5328da53d6617cd25461201669409..5e055d135223a961cd3656cf8d902e8ce889e4af 100644
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -18,11 +18,21 @@
+ 
+ #include "Powerphone.h"
+ 
++#include <algorithm>
+ #include <array>
+-#include <cstdio>
++#include <cstdint>
++#include <limits>
++#include <memory>
+ #include <string>
++#include <utility>
++#include <vector>
+ 
+ #include <Log.h>
++#include <android-base/properties.h>
++
++extern "C" {
++#include <tinyalsa/asoundlib.h>
++}
+ 
+ using aidl::android::hardware::audio::common::SinkMetadata;
+ using aidl::android::hardware::audio::common::SourceMetadata;
+@@ -48,183 +58,938 @@ using aidl::android::media::audio::common::PcmType;
+ namespace aidl::android::hardware::audio::core::powerphone {
+ namespace {
+ 
+-constexpr int32_t kCard = 1;
++constexpr int32_t kCaptureCard = 1;
++constexpr int32_t kPlaybackCard = 0;
++constexpr int32_t kPlaybackDevice = 28;
+ constexpr int32_t kRate = 192000;
++constexpr char kCaptureReadyProperty[] = "vendor.powerphone.pdm.ready";
++constexpr char kSpeakerReadyProperty[] =
++    "vendor.powerphone.aoc_speaker_192k.ready";
+ 
+ struct Endpoint {
+-    const char* name;
+-    const char* address;
+-    AudioDeviceType type;
+-    int32_t device;
++  const char *name;
++  const char *address;
++  AudioDeviceType type;
++  int32_t card;
++  int32_t device;
++  int direction;
++  std::optional<PlaybackEndpoint> playback;
+ };
+ 
+-// PDM wiring is established, but enclosure-hole mapping is not. The two
+-// Android device types below merely keep three logical built-in routes
+-// distinguishable until live acoustic calibration supplies physical names.
+-constexpr std::array<Endpoint, 3> kEndpoints{{
+-        {"PowerPhone DMIC1 (PDM0)", "CARD_1_DEV_0", AudioDeviceType::IN_MICROPHONE, 0},
+-        {"PowerPhone DMIC2 (PDM2)", "CARD_1_DEV_2", AudioDeviceType::IN_MICROPHONE, 2},
+-        {"PowerPhone DMIC3 (PDM3)", "CARD_1_DEV_3", AudioDeviceType::IN_MICROPHONE_BACK, 3},
++// PDM wiring is established, but enclosure-hole mapping is not. Every research
++// endpoint deliberately uses an addressed IN_BUS or OUT_BUS port: these are
++// internal physical endpoints, while remaining invisible to the default
++// media, ring, call, and record strategies. Only an app that selects the exact
++// PowerPhone address may activate one.
++constexpr std::array<Endpoint, 6> kEndpoints{{
++    {"PowerPhone DMIC1 (PDM0)", "POWERPHONE_CARD_1_DEV_0_PDM0",
++     AudioDeviceType::IN_BUS, kCaptureCard, 0, PCM_IN, std::nullopt},
++    {"PowerPhone DMIC2 (PDM2)", "POWERPHONE_CARD_1_DEV_2_PDM2",
++     AudioDeviceType::IN_BUS, kCaptureCard, 2, PCM_IN, std::nullopt},
++    {"PowerPhone DMIC3 (PDM3)", "POWERPHONE_CARD_1_DEV_3_PDM3",
++     AudioDeviceType::IN_BUS, kCaptureCard, 3, PCM_IN, std::nullopt},
++    {"PowerPhone earpiece 192k", "POWERPHONE_C0_D28_EARPIECE",
++     AudioDeviceType::OUT_BUS, kPlaybackCard, kPlaybackDevice, PCM_OUT,
++     PlaybackEndpoint::EARPIECE},
++    // Frankel's mixer paths identify this as the R amplifier. Enclosure-hole
++    // mapping still requires an acoustic check, so keep that uncertainty in
++    // the port name.
++    {"PowerPhone R amp (bottom candidate) 192k", "POWERPHONE_C0_D28_BOTTOM",
++     AudioDeviceType::OUT_BUS, kPlaybackCard, kPlaybackDevice, PCM_OUT,
++     PlaybackEndpoint::BOTTOM_CANDIDATE},
++    {"PowerPhone both speakers 192k", "POWERPHONE_C0_D28_BOTH",
++     AudioDeviceType::OUT_BUS, kPlaybackCard, kPlaybackDevice, PCM_OUT,
++     PlaybackEndpoint::BOTH},
+ }};
+ 
+-AudioDevice makeAudioDevice(const Endpoint& endpoint) {
+-    AudioDevice device;
+-    device.type.type = endpoint.type;
+-    device.type.connection = "";
+-    device.address = AudioDeviceAddress::make<AudioDeviceAddress::Tag::id>(endpoint.address);
+-    return device;
++AudioDevice makeAudioDevice(const Endpoint &endpoint) {
++  AudioDevice device;
++  device.type.type = endpoint.type;
++  device.type.connection = "";
++  device.address =
++      AudioDeviceAddress::make<AudioDeviceAddress::Tag::id>(endpoint.address);
++  return device;
+ }
+ 
+-AudioPortExt makeDeviceExt(const Endpoint& endpoint) {
+-    AudioPortDeviceExt deviceExt;
+-    deviceExt.device = makeAudioDevice(endpoint);
+-    return AudioPortExt::make<AudioPortExt::Tag::device>(std::move(deviceExt));
++AudioPortExt makeDeviceExt(const Endpoint &endpoint) {
++  AudioPortDeviceExt deviceExt;
++  deviceExt.device = makeAudioDevice(endpoint);
++  return AudioPortExt::make<AudioPortExt::Tag::device>(std::move(deviceExt));
+ }
+ 
+ AudioPortExt makeMixExt() {
+-    AudioPortMixExt mixExt;
+-    mixExt.maxOpenStreamCount = 1;
+-    mixExt.maxActiveStreamCount = 1;
+-    return AudioPortExt::make<AudioPortExt::Tag::mix>(std::move(mixExt));
++  AudioPortMixExt mixExt;
++  mixExt.maxOpenStreamCount = 1;
++  mixExt.maxActiveStreamCount = 1;
++  return AudioPortExt::make<AudioPortExt::Tag::mix>(std::move(mixExt));
++}
++
++AudioProfile makeInputProfile() {
++  return AudioProfile{
++      .format = AudioFormatDescription{.type = AudioFormatType::PCM,
++                                       .pcm = PcmType::INT_32_BIT},
++      .channelMasks =
++          {AudioChannelLayout::make<AudioChannelLayout::Tag::layoutMask>(
++              AudioChannelLayout::LAYOUT_MONO)},
++      .sampleRates = {kRate},
++  };
+ }
+ 
+-AudioProfile makeProfile() {
+-    return AudioProfile{
+-            .format = AudioFormatDescription{.type = AudioFormatType::PCM,
+-                                             .pcm = PcmType::INT_32_BIT},
+-            .channelMasks = {AudioChannelLayout::make<AudioChannelLayout::Tag::layoutMask>(
+-                    AudioChannelLayout::LAYOUT_MONO)},
+-            .sampleRates = {kRate},
+-    };
++AudioProfile makeOutputProfile() {
++  return AudioProfile{
++      .format = AudioFormatDescription{.type = AudioFormatType::PCM,
++                                       .pcm = PcmType::INT_32_BIT},
++      // PCM 0,28 and TDM_0_RX have only been qualified with the exact
++      // four-slot geometry. An index mask avoids inventing positional
++      // speaker semantics for those transport slots.
++      .channelMasks =
++          {AudioChannelLayout::make<AudioChannelLayout::Tag::indexMask>(
++              AudioChannelLayout::INDEX_MASK_4)},
++      .sampleRates = {kRate},
++  };
+ }
+ 
+-bool isEndpoint(int32_t card, int32_t device) {
+-    if (card != kCard) return false;
+-    for (const auto& endpoint : kEndpoints) {
+-        if (endpoint.device == device) return true;
++const Endpoint *parseDevice(const AudioDevice &device, bool input) {
++  if (device.address.getTag() != AudioDeviceAddress::Tag::id)
++    return nullptr;
++  const std::string &address =
++      device.address.get<AudioDeviceAddress::Tag::id>();
++  for (const auto &endpoint : kEndpoints) {
++    if ((endpoint.direction == PCM_IN) != input ||
++        address != endpoint.address || device.type.type != endpoint.type ||
++        !device.type.connection.empty()) {
++      continue;
+     }
++    return &endpoint;
++  }
++  return nullptr;
++}
++
++std::mutex gPlaybackLeaseLock;
++const StreamPowerphone *
++    gPlaybackLeaseOwner GUARDED_BY(gPlaybackLeaseLock) = nullptr;
++
++bool acquirePlaybackLease(const StreamPowerphone *owner) {
++  std::lock_guard lock(gPlaybackLeaseLock);
++  if (gPlaybackLeaseOwner != nullptr && gPlaybackLeaseOwner != owner)
+     return false;
++  gPlaybackLeaseOwner = owner;
++  return true;
+ }
+ 
+-std::optional<alsa::DeviceProfile> parseDevice(const AudioDevice& device) {
+-    if (device.address.getTag() != AudioDeviceAddress::Tag::id) return std::nullopt;
+-    const std::string& address = device.address.get<AudioDeviceAddress::Tag::id>();
+-    int32_t card = -1;
+-    int32_t pcmDevice = -1;
+-    int consumed = 0;
+-    if (std::sscanf(address.c_str(), "CARD_%d_DEV_%d%n", &card, &pcmDevice, &consumed) != 2 ||
+-        consumed != static_cast<int>(address.size()) || !isEndpoint(card, pcmDevice)) {
+-        return std::nullopt;
+-    }
+-    return alsa::DeviceProfile{
+-            .card = card,
+-            .device = pcmDevice,
+-            .direction = PCM_IN,
+-            .isExternal = false,
+-    };
++void releasePlaybackLease(const StreamPowerphone *owner) {
++  std::lock_guard lock(gPlaybackLeaseLock);
++  if (gPlaybackLeaseOwner == owner)
++    gPlaybackLeaseOwner = nullptr;
+ }
+ 
+-}  // namespace
++constexpr std::array<const char *, 12> kConflictingTdmRoutes{{
++    "TDM_0_RX Mixer EP1",
++    "TDM_0_RX Mixer EP2",
++    "TDM_0_RX Mixer EP3",
++    "TDM_0_RX Mixer EP4",
++    "TDM_0_RX Mixer EP5",
++    "TDM_0_RX Mixer EP6",
++    "TDM_0_RX Mixer EP7",
++    "TDM_0_RX Mixer EP8",
++    "TDM_0_RX Mixer IMSV",
++    "TDM_0_RX Mixer NoHost1",
++    "TDM_0_RX Mixer RAW",
++    "TDM_0_RX Mixer VOIP",
++}};
+ 
+-std::unique_ptr<Module::Configuration> makeConfiguration() {
+-    auto config = std::make_unique<Module::Configuration>();
+-    const AudioProfile profile = makeProfile();
+-
+-    for (const auto& endpoint : kEndpoints) {
+-        AudioPort devicePort;
+-        devicePort.id = config->nextPortId++;
+-        devicePort.name = endpoint.name;
+-        devicePort.flags = AudioIoFlags::make<AudioIoFlags::Tag::input>(0);
+-        devicePort.profiles = {profile};
+-        devicePort.ext = makeDeviceExt(endpoint);
+-        config->ports.push_back(devicePort);
+-
+-        AudioPortConfig deviceConfig;
+-        deviceConfig.id = devicePort.id;
+-        deviceConfig.portId = devicePort.id;
+-        deviceConfig.format = AudioFormatDescription{};
+-        deviceConfig.channelMask = AudioChannelLayout{};
+-        deviceConfig.sampleRate = Int{.value = 0};
+-        deviceConfig.gain = AudioGainConfig{};
+-        deviceConfig.flags = devicePort.flags;
+-        deviceConfig.ext = devicePort.ext;
+-        config->initialConfigs.push_back(deviceConfig);
+-
+-        AudioPort mixPort;
+-        mixPort.id = config->nextPortId++;
+-        mixPort.name = std::string(endpoint.name) + " 192k input";
+-        // UNPROCESSED is carried as source metadata. Keep the mix flags at
+-        // NONE so blocking Java AudioRecord and non-low-latency AAudio can use
+-        // the same exact-rate route; FAST/RAW requests are retried without
+-        // optional flags by AudioPolicyManager.
+-        mixPort.flags = AudioIoFlags::make<AudioIoFlags::Tag::input>(0);
+-        mixPort.profiles = {profile};
+-        mixPort.ext = makeMixExt();
+-        config->ports.push_back(mixPort);
+-
+-        AudioRoute route;
+-        route.sourcePortIds = {devicePort.id};
+-        route.sinkPortId = mixPort.id;
+-        config->routes.push_back(std::move(route));
+-    }
+-
+-    config->portConfigs = config->initialConfigs;
+-    return config;
+-}
+-
+-StreamPowerphone::StreamPowerphone(StreamContext* context, const Metadata& metadata)
+-    : StreamAlsa(context, metadata, 1 /* readWriteRetries */) {}
++struct SavedMixerValue {
++  std::string name;
++  int value;
++};
++
++struct OwnedMixerValue {
++  std::string name;
++  int value;
++};
++
++} // namespace
+ 
+-ndk::ScopedAStatus StreamPowerphone::setConnectedDevices(const ConnectedDevices& devices) {
+-    if (devices.size() > 1) {
+-        LOG(ERROR) << __func__ << ": expected at most one input device, got " << devices.size();
+-        return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++class PlaybackRoute {
++public:
++  ~PlaybackRoute() { cleanup(); }
++
++  bool configure(PlaybackEndpoint endpoint) {
++    cleanup();
++    mEndpoint = endpoint;
++    mMixer = mixer_open(kPlaybackCard);
++    if (mMixer == nullptr) {
++      LOG(ERROR) << __func__ << ": failed to open mixer card " << kPlaybackCard;
++      return false;
++    }
++
++    // A stock/proprietary stream owns these controls whenever any one is
++    // active. Never steal its TDM bus or power down its amplifier.
++    if (!requireValue("Main AMP Enable Switch", 0) ||
++        !requireValue("R Main AMP Enable Switch", 0) ||
++        !requireValue("TDM_0_RX Mixer US", 0) ||
++        !requireEnum("Ultrasonic Mode", "Disabled") ||
++        !requireEnum("R Ultrasonic Mode", "Disabled")) {
++      closeWithoutPowerCleanup();
++      return false;
++    }
++    for (const char *name : kConflictingTdmRoutes) {
++      if (!requireValue(name, 0)) {
++        closeWithoutPowerCleanup();
++        return false;
++      }
+     }
+ 
+-    std::vector<alsa::DeviceProfile> profiles;
+-    if (!devices.empty()) {
+-        auto profile = parseDevice(devices.front());
+-        if (!profile.has_value()) {
+-            LOG(ERROR) << __func__ << ": rejected device " << devices.front().toString();
+-            return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
++    if (!snapshotAndSetEnum("TDM_0_RX Sample Rate", "SR_192K") ||
++        !snapshotAndSetEnum("TDM_0_RX Format", "S32_LE") ||
++        !snapshotAndSetEnum("TDM_0_RX Chan", "Four") ||
++        !snapshotAndSetEnum("TDM_0_RX nSlot", "Four") ||
++        !snapshotAndSetEnum("TDM_0_RX SlotFmt", "S32_LE")) {
++      cleanup();
++      return false;
++    }
++    for (const char *prefix : {"", "R "}) {
++      if (!snapshotAndSetEnum(std::string(prefix) + "DSP RX1 Source",
++                              "ASPRX1") ||
++          !snapshotAndSetEnum(std::string(prefix) + "DSP RX2 Source",
++                              "ASPRX1") ||
++          !snapshotAndSetEnum(std::string(prefix) + "PCM Source", "ASPRX1") ||
++          !snapshotAndSetEnum(std::string(prefix) + "High Rate PCM Source",
++                              "ASPRX1") ||
++          !snapshotAndSetValue(std::string(prefix) + "Amp Gain", 0)) {
++        cleanup();
++        return false;
++      }
++    }
++
++    // From this point onward an error path must force the route and both
++    // amplifiers off. Enable the amplifier(s) only after every bus/codec
++    // setting and the dedicated US source route have succeeded.
++    mPowerControlsTouched = true;
++    if (!setEnum("Ultrasonic Mode", "In Band") ||
++        !setEnum("R Ultrasonic Mode", "In Band") ||
++        !setValue("TDM_0_RX Mixer US", 1)) {
++      cleanup();
++      return false;
++    }
++    const bool main = endpoint == PlaybackEndpoint::EARPIECE ||
++                      endpoint == PlaybackEndpoint::BOTH;
++    const bool right = endpoint == PlaybackEndpoint::BOTTOM_CANDIDATE ||
++                       endpoint == PlaybackEndpoint::BOTH;
++    if ((main && !setValue("Main AMP Enable Switch", 1)) ||
++        (right && !setValue("R Main AMP Enable Switch", 1))) {
++      cleanup();
++      return false;
++    }
++    mSetupComplete = true;
++    return verifyOwnership();
++  }
++
++  bool verifyOwnership() {
++    if (mMixer == nullptr || !mSetupComplete || mOwnershipLost)
++      return false;
++    if (!matchesOwnedState()) {
++      mOwnershipLost = true;
++      LOG(ERROR) << "PowerPhone speaker mixer ownership drifted; latching "
++                    "fault and refusing all cleanup writes";
++      return false;
++    }
++    return true;
++  }
++
++  void cleanup() {
++    if (mMixer == nullptr)
++      return;
++    bool safeToRestore = false;
++    if (mPowerControlsTouched) {
++      // The sidecar cannot lock Google's separate primary HAL process. Never
++      // power down or restore over a route that changed after our last check.
++      // A partial local setup may be rolled back only while every competing
++      // TDM source still reads idle. Live qualification must stop other audio
++      // clients to minimize the unavoidable cross-process check/write race.
++      const bool mayPowerDown =
++          mSetupComplete ? verifyOwnership() : expectedStateMatches();
++      if (mayPowerDown) {
++        // Attempt every hard-off control even if an earlier write fails.
++        // Short-circuiting here could leave a second amp or the US route on.
++        bool poweredDown = true;
++        if (!setValueBestEffort("Main AMP Enable Switch", 0))
++          poweredDown = false;
++        if (!setValueBestEffort("R Main AMP Enable Switch", 0))
++          poweredDown = false;
++        if (!setValueBestEffort("TDM_0_RX Mixer US", 0))
++          poweredDown = false;
++        if (!setEnumBestEffort("Ultrasonic Mode", "Disabled"))
++          poweredDown = false;
++        if (!setEnumBestEffort("R Ultrasonic Mode", "Disabled"))
++          poweredDown = false;
++        safeToRestore = poweredDown && idlePowerAndRoutes();
++      } else {
++        LOG(ERROR) << "skipping speaker hard-off after ownership loss; "
++                      "reboot or audited manual recovery is required";
++      }
++    } else {
++      // Partial setup can already have changed clock/source controls. Restore
++      // them only if every value checked or written by this sidecar still
++      // matches the expected snapshot.
++      safeToRestore = expectedStateMatches() && idlePowerAndRoutes();
++    }
++    if (safeToRestore) {
++      for (auto it = mSavedValues.rbegin(); it != mSavedValues.rend(); ++it) {
++        if (!setValueBestEffort(it->name, it->value)) {
++          LOG(ERROR) << "mixer restore failed; remaining values are left "
++                        "unchanged for audited recovery";
++          break;
+         }
+-        profiles.push_back(*profile);
++      }
++    } else if (!mSavedValues.empty()) {
++      LOG(ERROR) << "skipping mixer restore because exclusive sidecar "
++                    "ownership is not proved";
++    }
++    closeMixer();
++  }
++
++private:
++  mixer_ctl *control(const std::string &name) const {
++    mixer_ctl *ctl = mixer_get_ctl_by_name(mMixer, name.c_str());
++    if (ctl == nullptr) {
++      LOG(ERROR) << "missing required mixer control: " << name;
++      return nullptr;
++    }
++    if (mixer_ctl_get_num_values(ctl) != 1) {
++      LOG(ERROR) << "mixer control is not scalar: " << name;
++      return nullptr;
++    }
++    return ctl;
++  }
++
++  bool requireValue(const std::string &name, int expected) {
++    mixer_ctl *ctl = control(name);
++    if (ctl == nullptr)
++      return false;
++    const int actual = mixer_ctl_get_value(ctl, 0);
++    if (actual != expected) {
++      LOG(ERROR) << "refusing busy mixer control " << name << ": expected "
++                 << expected << ", got " << actual;
++      return false;
++    }
++    rememberExpected(name, actual);
++    return true;
++  }
++
++  bool requireEnum(const std::string &name, const char *expected) {
++    mixer_ctl *ctl = control(name);
++    if (ctl == nullptr)
++      return false;
++    const int index = mixer_ctl_get_value(ctl, 0);
++    const char *actual =
++        index < 0 ? nullptr : mixer_ctl_get_enum_string(ctl, index);
++    if (actual == nullptr || std::string(actual) != expected) {
++      LOG(ERROR) << "refusing busy mixer control " << name << ": expected "
++                 << expected << ", got "
++                 << (actual == nullptr ? "<error>" : actual);
++      return false;
++    }
++    rememberExpected(name, index);
++    return true;
++  }
++
++  void rememberExpected(const std::string &name, int value) {
++    const auto existing = std::find_if(
++        mOwnedValues.begin(), mOwnedValues.end(),
++        [&name](const OwnedMixerValue &entry) { return entry.name == name; });
++    if (existing == mOwnedValues.end()) {
++      mOwnedValues.push_back({name, value});
++    } else {
++      existing->value = value;
++    }
++  }
++
++  bool expectedStateMatches() const {
++    if (mOwnershipLost)
++      return false;
++    for (const auto &entry : mOwnedValues) {
++      if (!valueMatches(entry.name, entry.value))
++        return false;
++    }
++    return true;
++  }
++
++  bool valueMatches(const std::string &name, int expected) const {
++    mixer_ctl *ctl = control(name);
++    if (ctl == nullptr)
++      return false;
++    const int actual = mixer_ctl_get_value(ctl, 0);
++    if (actual != expected) {
++      LOG(ERROR) << "mixer ownership mismatch " << name << ": expected "
++                 << expected << ", got " << actual;
++      return false;
++    }
++    return true;
++  }
++
++  bool enumMatches(const std::string &name, const char *expected) const {
++    mixer_ctl *ctl = control(name);
++    if (ctl == nullptr)
++      return false;
++    const int index = mixer_ctl_get_value(ctl, 0);
++    const char *actual =
++        index < 0 ? nullptr : mixer_ctl_get_enum_string(ctl, index);
++    if (actual == nullptr || std::string(actual) != expected) {
++      LOG(ERROR) << "mixer ownership mismatch " << name << ": expected "
++                 << expected << ", got "
++                 << (actual == nullptr ? "<error>" : actual);
++      return false;
++    }
++    return true;
++  }
++
++  bool conflictingRoutesAreIdle() const {
++    for (const char *name : kConflictingTdmRoutes) {
++      if (!valueMatches(name, 0))
++        return false;
++    }
++    return true;
++  }
++
++  bool idlePowerAndRoutes() const {
++    return conflictingRoutesAreIdle() &&
++           valueMatches("Main AMP Enable Switch", 0) &&
++           valueMatches("R Main AMP Enable Switch", 0) &&
++           valueMatches("TDM_0_RX Mixer US", 0) &&
++           enumMatches("Ultrasonic Mode", "Disabled") &&
++           enumMatches("R Ultrasonic Mode", "Disabled");
++  }
++
++  bool matchesOwnedState() const {
++    if (!mEndpoint.has_value() || !conflictingRoutesAreIdle())
++      return false;
++    const bool main = *mEndpoint == PlaybackEndpoint::EARPIECE ||
++                      *mEndpoint == PlaybackEndpoint::BOTH;
++    const bool right = *mEndpoint == PlaybackEndpoint::BOTTOM_CANDIDATE ||
++                       *mEndpoint == PlaybackEndpoint::BOTH;
++    if (!valueMatches("Main AMP Enable Switch", main ? 1 : 0) ||
++        !valueMatches("R Main AMP Enable Switch", right ? 1 : 0) ||
++        !valueMatches("TDM_0_RX Mixer US", 1) ||
++        !enumMatches("Ultrasonic Mode", "In Band") ||
++        !enumMatches("R Ultrasonic Mode", "In Band") ||
++        !enumMatches("TDM_0_RX Sample Rate", "SR_192K") ||
++        !enumMatches("TDM_0_RX Format", "S32_LE") ||
++        !enumMatches("TDM_0_RX Chan", "Four") ||
++        !enumMatches("TDM_0_RX nSlot", "Four") ||
++        !enumMatches("TDM_0_RX SlotFmt", "S32_LE")) {
++      return false;
++    }
++    for (const char *prefix : {"", "R "}) {
++      if (!enumMatches(std::string(prefix) + "DSP RX1 Source", "ASPRX1") ||
++          !enumMatches(std::string(prefix) + "DSP RX2 Source", "ASPRX1") ||
++          !enumMatches(std::string(prefix) + "PCM Source", "ASPRX1") ||
++          !enumMatches(std::string(prefix) + "High Rate PCM Source",
++                       "ASPRX1") ||
++          !valueMatches(std::string(prefix) + "Amp Gain", 0)) {
++        return false;
++      }
++    }
++    return true;
++  }
++
++  bool save(const std::string &name, mixer_ctl **ctl) {
++    *ctl = control(name);
++    if (*ctl == nullptr)
++      return false;
++    const int value = mixer_ctl_get_value(*ctl, 0);
++    if (value < 0) {
++      LOG(ERROR) << "failed to read mixer control " << name << ": " << value;
++      return false;
++    }
++    mSavedValues.push_back({name, value});
++    return true;
++  }
++
++  bool snapshotAndSetValue(const std::string &name, int value) {
++    mixer_ctl *ctl = nullptr;
++    if (!save(name, &ctl))
++      return false;
++    if (mixer_ctl_set_value(ctl, 0, value) != 0) {
++      LOG(ERROR) << "failed to set mixer control " << name << " to " << value;
++      mOwnershipLost = true;
++      return false;
++    }
++    const int actual = mixer_ctl_get_value(ctl, 0);
++    if (actual != value) {
++      LOG(ERROR) << "mixer control did not retain " << name << '=' << value
++                 << "; got " << actual;
++      mOwnershipLost = true;
++      return false;
++    }
++    rememberExpected(name, actual);
++    return true;
++  }
++
++  bool snapshotAndSetEnum(const std::string &name, const char *value) {
++    mixer_ctl *ctl = nullptr;
++    if (!save(name, &ctl))
++      return false;
++    if (mixer_ctl_set_enum_by_string(ctl, value) != 0) {
++      LOG(ERROR) << "failed to set mixer control " << name << " to " << value;
++      mOwnershipLost = true;
++      return false;
++    }
++    const int actual = mixer_ctl_get_value(ctl, 0);
++    const char *actualName =
++        actual < 0 ? nullptr : mixer_ctl_get_enum_string(ctl, actual);
++    if (actualName == nullptr || std::string(actualName) != value) {
++      LOG(ERROR) << "mixer control did not retain " << name << '=' << value
++                 << "; got "
++                 << (actualName == nullptr ? "<error>" : actualName);
++      mOwnershipLost = true;
++      return false;
++    }
++    rememberExpected(name, actual);
++    return true;
++  }
++
++  bool setValue(const std::string &name, int value) {
++    mixer_ctl *ctl = control(name);
++    if (ctl == nullptr || mixer_ctl_set_value(ctl, 0, value) != 0) {
++      LOG(ERROR) << "failed to set mixer control " << name << " to " << value;
++      mOwnershipLost = true;
++      return false;
++    }
++    const int actual = mixer_ctl_get_value(ctl, 0);
++    if (actual != value) {
++      LOG(ERROR) << "mixer control did not retain " << name << '=' << value
++                 << "; got " << actual;
++      mOwnershipLost = true;
++      return false;
+     }
+-    RETURN_STATUS_IF_ERROR(StreamCommonImpl::setConnectedDevices(devices));
++    rememberExpected(name, actual);
++    return true;
++  }
++
++  bool setEnum(const std::string &name, const char *value) {
++    mixer_ctl *ctl = control(name);
++    if (ctl == nullptr || mixer_ctl_set_enum_by_string(ctl, value) != 0) {
++      LOG(ERROR) << "failed to set mixer control " << name << " to " << value;
++      mOwnershipLost = true;
++      return false;
++    }
++    const int actual = mixer_ctl_get_value(ctl, 0);
++    const char *actualName =
++        actual < 0 ? nullptr : mixer_ctl_get_enum_string(ctl, actual);
++    if (actualName == nullptr || std::string(actualName) != value) {
++      LOG(ERROR) << "mixer control did not retain " << name << '=' << value
++                 << "; got "
++                 << (actualName == nullptr ? "<error>" : actualName);
++      mOwnershipLost = true;
++      return false;
++    }
++    rememberExpected(name, actual);
++    return true;
++  }
++
++  bool setValueBestEffort(const std::string &name, int value) {
++    mixer_ctl *ctl = mixer_get_ctl_by_name(mMixer, name.c_str());
++    if (ctl == nullptr || mixer_ctl_set_value(ctl, 0, value) != 0) {
++      LOG(ERROR) << "cleanup failed for mixer control " << name;
++      return false;
++    }
++    return true;
++  }
++
++  bool setEnumBestEffort(const std::string &name, const char *value) {
++    mixer_ctl *ctl = mixer_get_ctl_by_name(mMixer, name.c_str());
++    if (ctl == nullptr || mixer_ctl_set_enum_by_string(ctl, value) != 0) {
++      LOG(ERROR) << "cleanup failed for mixer control " << name;
++      return false;
++    }
++    return true;
++  }
++
++  void closeWithoutPowerCleanup() {
++    mSavedValues.clear();
++    mOwnedValues.clear();
++    mEndpoint.reset();
++    mixer_close(mMixer);
++    mMixer = nullptr;
++  }
++
++  void closeMixer() {
++    mSavedValues.clear();
++    mOwnedValues.clear();
++    mEndpoint.reset();
++    mPowerControlsTouched = false;
++    mSetupComplete = false;
++    mOwnershipLost = false;
++    mixer_close(mMixer);
++    mMixer = nullptr;
++  }
++
++  mixer *mMixer = nullptr;
++  std::vector<SavedMixerValue> mSavedValues;
++  std::vector<OwnedMixerValue> mOwnedValues;
++  std::optional<PlaybackEndpoint> mEndpoint;
++  bool mPowerControlsTouched = false;
++  bool mSetupComplete = false;
++  bool mOwnershipLost = false;
++};
++
++std::unique_ptr<Module::Configuration> makeConfiguration() {
++  auto config = std::make_unique<Module::Configuration>();
++  const AudioProfile inputProfile = makeInputProfile();
++  const AudioProfile outputProfile = makeOutputProfile();
++  std::vector<int32_t> outputDevicePortIds;
++
++  for (const auto &endpoint : kEndpoints) {
++    const bool input = endpoint.direction == PCM_IN;
++    AudioPort devicePort;
++    devicePort.id = config->nextPortId++;
++    devicePort.name = endpoint.name;
++    devicePort.flags = input ? AudioIoFlags::make<AudioIoFlags::Tag::input>(0)
++                             : AudioIoFlags::make<AudioIoFlags::Tag::output>(0);
++    devicePort.profiles = {input ? inputProfile : outputProfile};
++    devicePort.ext = makeDeviceExt(endpoint);
++    config->ports.push_back(devicePort);
++
++    AudioPortConfig deviceConfig;
++    deviceConfig.id = devicePort.id;
++    deviceConfig.portId = devicePort.id;
++    deviceConfig.format = AudioFormatDescription{};
++    deviceConfig.channelMask = AudioChannelLayout{};
++    deviceConfig.sampleRate = Int{.value = 0};
++    deviceConfig.gain = AudioGainConfig{};
++    deviceConfig.flags = devicePort.flags;
++    deviceConfig.ext = devicePort.ext;
++    config->initialConfigs.push_back(deviceConfig);
++
++    if (!input) {
++      outputDevicePortIds.push_back(devicePort.id);
++      continue;
++    }
++
++    AudioPort mixPort;
++    mixPort.id = config->nextPortId++;
++    mixPort.name = std::string(endpoint.name) + " 192k input";
++    // UNPROCESSED is carried as source metadata. Keep the mix flags at
++    // NONE so blocking Java AudioRecord and non-low-latency AAudio can use
++    // the same exact-rate route; FAST/RAW requests are retried without
++    // optional flags by AudioPolicyManager.
++    mixPort.flags = AudioIoFlags::make<AudioIoFlags::Tag::input>(0);
++    mixPort.profiles = {inputProfile};
++    mixPort.ext = makeMixExt();
++    config->ports.push_back(mixPort);
++
++    AudioRoute route;
++    route.sourcePortIds = {devicePort.id};
++    route.sinkPortId = mixPort.id;
++    config->routes.push_back(std::move(route));
++  }
++
++  AudioPort outputMixPort;
++  outputMixPort.id = config->nextPortId++;
++  outputMixPort.name = "PowerPhone PCM0,28 192k four-slot output";
++  // A normal mixer port lets AudioTrack/AAudio use PCM_FLOAT clients while
++  // AudioFlinger converts to the exact S32 backend. DIRECT/FAST/RAW would
++  // either require exact client format or select an unrelated vendor path.
++  outputMixPort.flags = AudioIoFlags::make<AudioIoFlags::Tag::output>(0);
++  outputMixPort.profiles = {outputProfile};
++  outputMixPort.ext = makeMixExt();
++  config->ports.push_back(outputMixPort);
++
++  for (int32_t devicePortId : outputDevicePortIds) {
++    AudioRoute route;
++    route.sourcePortIds = {outputMixPort.id};
++    route.sinkPortId = devicePortId;
++    config->routes.push_back(std::move(route));
++  }
++
++  config->portConfigs = config->initialConfigs;
++  return config;
++}
++
++StreamPowerphone::StreamPowerphone(StreamContext *context,
++                                   const Metadata &metadata)
++    : StreamAlsa(context, metadata, 1 /* readWriteRetries */) {}
++
++StreamPowerphone::~StreamPowerphone() {
++  cleanupWorker();
++  // Never tear the route down while its PCM proxy is still open.
++  StreamAlsa::standby();
++  std::lock_guard lock(mLock);
++  cleanupPlaybackRouteLocked();
++}
++
++ndk::ScopedAStatus
++StreamPowerphone::setConnectedDevices(const ConnectedDevices &devices) {
++  if (devices.size() > 1) {
++    LOG(ERROR) << __func__ << ": expected at most one device, got "
++               << devices.size();
++    return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++  }
++
++  std::vector<alsa::DeviceProfile> profiles;
++  std::optional<PlaybackEndpoint> playbackEndpoint;
++  if (!devices.empty()) {
++    const Endpoint *endpoint = parseDevice(devices.front(), mIsInput);
++    if (endpoint == nullptr) {
++      LOG(ERROR) << __func__ << ": rejected device "
++                 << devices.front().toString();
++      return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
++    }
++    profiles.push_back(alsa::DeviceProfile{
++        .card = endpoint->card,
++        .device = endpoint->device,
++        .direction = endpoint->direction,
++        .isExternal = false,
++    });
++    playbackEndpoint = endpoint->playback;
++  }
++  {
+     std::lock_guard lock(mLock);
+-    mDeviceProfiles = std::move(profiles);
+-    return ndk::ScopedAStatus::ok();
++    if (!mIsInput && mPlaybackRoute != nullptr &&
++        playbackEndpoint != mPlaybackEndpoint) {
++      LOG(ERROR) << __func__ << ": refusing an active speaker route change";
++      return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++    }
++  }
++  RETURN_STATUS_IF_ERROR(StreamCommonImpl::setConnectedDevices(devices));
++  std::lock_guard lock(mLock);
++  mDeviceProfiles = std::move(profiles);
++  mPlaybackEndpoint = playbackEndpoint;
++  return ndk::ScopedAStatus::ok();
+ }
+ 
+ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
++  std::lock_guard lock(mLock);
++  return mDeviceProfiles;
++}
++
++::android::status_t StreamPowerphone::start() {
++  if (mIsInput) {
++    if (!::android::base::GetBoolProperty(kCaptureReadyProperty, false)) {
++      LOG(ERROR) << __func__ << ": " << kCaptureReadyProperty
++                 << " is absent or false; the PDM data path is not certified";
++      StreamAlsa::standby();
++      return ::android::PERMISSION_DENIED;
++    }
++    return StreamAlsa::start();
++  }
++
++  bool resumedRoute = false;
++  bool resumedReady = false;
++  bool resumedOwnership = false;
++  {
++    std::lock_guard lock(mLock);
++    if (mPlaybackRoute != nullptr) {
++      // Resume after pause; the PCM proxy and owned route remain active.
++      resumedRoute = true;
++      resumedReady =
++          ::android::base::GetBoolProperty(kSpeakerReadyProperty, false);
++      resumedOwnership = mPlaybackRoute->verifyOwnership();
++    } else if (!mPlaybackEndpoint.has_value() || mDeviceProfiles.size() != 1) {
++      LOG(ERROR) << __func__ << ": no unique PowerPhone output is connected";
++      return ::android::NO_INIT;
++    } else if (!::android::base::GetBoolProperty(kSpeakerReadyProperty,
++                                                 false)) {
++      LOG(ERROR) << __func__ << ": " << kSpeakerReadyProperty
++                 << " is absent or false; volatile AoC patch is not certified";
++      return ::android::PERMISSION_DENIED;
++    } else if (!acquirePlaybackLease(this)) {
++      LOG(ERROR) << __func__
++                 << ": PCM 0,28 is already owned by another sidecar stream";
++      return ::android::WOULD_BLOCK;
++    } else {
++      mOwnsPlaybackLease = true;
++      mPlaybackRoute = std::make_unique<PlaybackRoute>();
++      if (!mPlaybackRoute->configure(*mPlaybackEndpoint)) {
++        cleanupPlaybackRouteLocked();
++        return ::android::INVALID_OPERATION;
++      }
++    }
++  }
++
++  if (resumedRoute) {
++    if (resumedReady && resumedOwnership)
++      return ::android::OK;
++    LOG(ERROR) << __func__ << ": refusing speaker resume: "
++               << (resumedReady ? "mixer ownership lost" : "readiness revoked");
++    StreamAlsa::standby();
++    std::lock_guard lock(mLock);
++    cleanupPlaybackRouteLocked();
++    return resumedReady ? ::android::INVALID_OPERATION
++                        : ::android::PERMISSION_DENIED;
++  }
++
++  const ::android::status_t status = StreamAlsa::start();
++  if (status != ::android::OK || mAlsaDeviceProxies.size() != 1) {
++    StreamAlsa::standby();
++    std::lock_guard lock(mLock);
++    cleanupPlaybackRouteLocked();
++    return status == ::android::OK ? ::android::NO_INIT : status;
++  }
++  const bool ready =
++      ::android::base::GetBoolProperty(kSpeakerReadyProperty, false);
++  bool ownsRoute = false;
++  {
++    std::lock_guard lock(mLock);
++    ownsRoute = mPlaybackRoute != nullptr && mPlaybackRoute->verifyOwnership();
++  }
++  if (!ready || !ownsRoute) {
++    LOG(ERROR) << __func__ << ": speaker state changed while opening PCM: "
++               << (ready ? "mixer ownership lost" : "readiness revoked");
++    StreamAlsa::standby();
++    std::lock_guard lock(mLock);
++    cleanupPlaybackRouteLocked();
++    return ready ? ::android::INVALID_OPERATION : ::android::PERMISSION_DENIED;
++  }
++  return ::android::OK;
++}
++
++::android::status_t StreamPowerphone::standby() {
++  const ::android::status_t status = StreamAlsa::standby();
++  if (!mIsInput) {
+     std::lock_guard lock(mLock);
+-    return mDeviceProfiles;
++    cleanupPlaybackRouteLocked();
++  }
++  return status;
++}
++
++::android::status_t StreamPowerphone::transfer(void *buffer, size_t frameCount,
++                                               size_t *actualFrameCount,
++                                               int32_t *latencyMs) {
++  if (mIsInput) {
++    if (!::android::base::GetBoolProperty(kCaptureReadyProperty, false)) {
++      LOG(ERROR) << __func__ << ": " << kCaptureReadyProperty
++                 << " was revoked; closing capture PCM";
++      StreamAlsa::standby();
++      *actualFrameCount = 0;
++      return ::android::PERMISSION_DENIED;
++    }
++    return StreamAlsa::transfer(buffer, frameCount, actualFrameCount,
++                                latencyMs);
++  }
++  if (mAlsaDeviceProxies.size() != 1 ||
++      mAlsaDeviceProxies.front().get() == nullptr) {
++    LOG(ERROR) << __func__ << ": no unique opened playback device";
++    return ::android::NO_INIT;
++  }
++
++  const size_t bytesToTransfer = frameCount * mFrameSizeBytes;
++  alsa::applyGain(buffer, mGain, bytesToTransfer, mConfig.value().format,
++                  mConfig->channels);
++  const size_t periodFrames = std::max<size_t>(
++      1, proxy_get_period_size(mAlsaDeviceProxies.front().get()));
++  size_t transferredFrames = 0;
++  while (transferredFrames < frameCount) {
++    const bool ready =
++        ::android::base::GetBoolProperty(kSpeakerReadyProperty, false);
++    bool ownsRoute = false;
++    {
++      std::lock_guard lock(mLock);
++      ownsRoute =
++          mPlaybackRoute != nullptr && mPlaybackRoute->verifyOwnership();
++    }
++    if (!ready || !ownsRoute) {
++      LOG(ERROR) << __func__ << ": aborting before the next ALSA period: "
++                 << (ready ? "mixer ownership lost"
++                           : "speaker readiness revoked");
++      StreamAlsa::standby();
++      {
++        std::lock_guard lock(mLock);
++        cleanupPlaybackRouteLocked();
++      }
++      *actualFrameCount = transferredFrames;
++      return ready ? ::android::INVALID_OPERATION
++                   : ::android::PERMISSION_DENIED;
++    }
++    const size_t chunkFrames =
++        std::min(periodFrames, frameCount - transferredFrames);
++    const size_t chunkBytes = chunkFrames * mFrameSizeBytes;
++    auto *chunk =
++        static_cast<uint8_t *>(buffer) + transferredFrames * mFrameSizeBytes;
++    if (chunkBytes > std::numeric_limits<unsigned int>::max() ||
++        proxy_write_with_retries(mAlsaDeviceProxies.front().get(), chunk,
++                                 static_cast<unsigned int>(chunkBytes),
++                                 mReadWriteRetries) != 0) {
++      LOG(ERROR) << __func__ << ": period-sized PCM write failed after "
++                 << transferredFrames << " frames";
++      StreamAlsa::standby();
++      {
++        std::lock_guard lock(mLock);
++        cleanupPlaybackRouteLocked();
++      }
++      *actualFrameCount = transferredFrames;
++      return ::android::INVALID_OPERATION;
++    }
++    transferredFrames += chunkFrames;
++  }
++  *actualFrameCount = transferredFrames;
++  const unsigned latency = proxy_get_latency(mAlsaDeviceProxies.front().get());
++  *latencyMs = static_cast<int32_t>(std::min(
++      latency, static_cast<unsigned>(std::numeric_limits<int32_t>::max())));
++  return ::android::OK;
+ }
+ 
+-StreamInPowerphone::StreamInPowerphone(StreamContext&& context, const SinkMetadata& sinkMetadata,
+-                                       const std::vector<MicrophoneInfo>& microphones)
++void StreamPowerphone::shutdown() {
++  StreamAlsa::shutdown();
++  if (!mIsInput) {
++    std::lock_guard lock(mLock);
++    cleanupPlaybackRouteLocked();
++  }
++}
++
++void StreamPowerphone::cleanupPlaybackRouteLocked() {
++  if (mPlaybackRoute != nullptr) {
++    mPlaybackRoute->cleanup();
++    mPlaybackRoute.reset();
++  }
++  if (mOwnsPlaybackLease) {
++    releasePlaybackLease(this);
++    mOwnsPlaybackLease = false;
++  }
++}
++
++StreamInPowerphone::StreamInPowerphone(
++    StreamContext &&context, const SinkMetadata &sinkMetadata,
++    const std::vector<MicrophoneInfo> &microphones)
+     : StreamIn(std::move(context), microphones),
+       StreamPowerphone(&mContextInstance, sinkMetadata) {}
+ 
++StreamOutPowerphone::StreamOutPowerphone(
++    StreamContext &&context, const SourceMetadata &sourceMetadata,
++    const std::optional<AudioOffloadInfo> &offloadInfo)
++    : StreamOut(std::move(context), offloadInfo),
++      StreamPowerphone(&mContextInstance, sourceMetadata) {}
++
+ ndk::ScopedAStatus ModulePowerphone::createInputStream(
+-        StreamContext&& context, const SinkMetadata& sinkMetadata,
+-        const std::vector<MicrophoneInfo>& microphones, std::shared_ptr<StreamIn>* result) {
+-    return createStreamInstance<StreamInPowerphone>(result, std::move(context), sinkMetadata,
+-                                                    microphones);
++    StreamContext &&context, const SinkMetadata &sinkMetadata,
++    const std::vector<MicrophoneInfo> &microphones,
++    std::shared_ptr<StreamIn> *result) {
++  // AudioPolicyManager probes attached profiles at startup. Construction is
++  // intentionally inert: StreamAlsa does not open a PCM until its FMQ start
++  // command. The start/transfer gates below therefore preserve discoverability
++  // without touching unavailable hardware.
++  return createStreamInstance<StreamInPowerphone>(result, std::move(context),
++                                                  sinkMetadata, microphones);
+ }
+ 
+ ndk::ScopedAStatus ModulePowerphone::createOutputStream(
+-        StreamContext&& context __unused, const SourceMetadata& sourceMetadata __unused,
+-        const std::optional<AudioOffloadInfo>& offloadInfo __unused,
+-        std::shared_ptr<StreamOut>* result __unused) {
+-    return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++    StreamContext &&context, const SourceMetadata &sourceMetadata,
++    const std::optional<AudioOffloadInfo> &offloadInfo,
++    std::shared_ptr<StreamOut> *result) {
++  if (offloadInfo.has_value()) {
++    LOG(ERROR) << __func__ << ": offload is not supported";
++    return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
++  }
++  return createStreamInstance<StreamOutPowerphone>(result, std::move(context),
++                                                   sourceMetadata, offloadInfo);
+ }
+ 
+-int32_t ModulePowerphone::getNominalLatencyMs(const AudioPortConfig&) {
+-    // 20 ms rounds to a 4096-frame ALSA buffer at 192 kHz. This gives the
+-    // research path enough scheduling margin without a global tinyalsa property
+-    // that would also alter Google's primary HAL.
+-    return 20;
++int32_t ModulePowerphone::getNominalLatencyMs(const AudioPortConfig &) {
++  // 20 ms rounds to a 4096-frame ALSA buffer at 192 kHz. This gives the
++  // research path enough scheduling margin without a global tinyalsa property
++  // that would also alter Google's primary HAL.
++  return 20;
+ }
+ 
+-}  // namespace aidl::android::hardware::audio::core::powerphone
++} // namespace aidl::android::hardware::audio::core::powerphone
+diff --git a/audio/aidl/default/powerphone/Powerphone.h b/audio/aidl/default/powerphone/Powerphone.h
+index b44101c1da65eeebd24c8f5d3da223aa560dd48d..da3aa94fdcc11f83839ca6404726dc7800e8750f 100644
+--- a/audio/aidl/default/powerphone/Powerphone.h
++++ b/audio/aidl/default/powerphone/Powerphone.h
+@@ -16,7 +16,9 @@
+ 
+ #pragma once
+ 
++#include <memory>
+ #include <mutex>
++#include <optional>
+ #include <vector>
+ 
+ #include "core-impl/Module.h"
+@@ -26,50 +28,94 @@ namespace aidl::android::hardware::audio::core::powerphone {
+ 
+ std::unique_ptr<Module::Configuration> makeConfiguration();
+ 
++enum class PlaybackEndpoint {
++  EARPIECE,
++  BOTTOM_CANDIDATE,
++  BOTH,
++};
++
++class PlaybackRoute;
++
+ class StreamPowerphone : public StreamAlsa {
+-  public:
+-    StreamPowerphone(StreamContext* context, const Metadata& metadata);
++public:
++  StreamPowerphone(StreamContext *context, const Metadata &metadata);
++  ~StreamPowerphone();
++
++  ndk::ScopedAStatus
++  setConnectedDevices(const ConnectedDevices &devices) override;
++
++  ::android::status_t standby() override;
++  ::android::status_t start() override;
++  ::android::status_t transfer(void *buffer, size_t frameCount,
++                               size_t *actualFrameCount,
++                               int32_t *latencyMs) override;
++  void shutdown() override;
+ 
+-    ndk::ScopedAStatus setConnectedDevices(const ConnectedDevices& devices) override;
++protected:
++  std::vector<alsa::DeviceProfile> getDeviceProfiles() override;
+ 
+-  protected:
+-    std::vector<alsa::DeviceProfile> getDeviceProfiles() override;
++private:
++  void cleanupPlaybackRouteLocked() REQUIRES(mLock);
+ 
+-  private:
+-    std::mutex mLock;
+-    std::vector<alsa::DeviceProfile> mDeviceProfiles GUARDED_BY(mLock);
++  std::mutex mLock;
++  std::vector<alsa::DeviceProfile> mDeviceProfiles GUARDED_BY(mLock);
++  std::optional<PlaybackEndpoint> mPlaybackEndpoint GUARDED_BY(mLock);
++  std::unique_ptr<PlaybackRoute> mPlaybackRoute GUARDED_BY(mLock);
++  bool mOwnsPlaybackLease GUARDED_BY(mLock) = false;
+ };
+ 
+ class StreamInPowerphone final : public StreamIn, public StreamPowerphone {
+-  public:
+-    friend class ndk::SharedRefBase;
+-    StreamInPowerphone(
+-            StreamContext&& context,
+-            const ::aidl::android::hardware::audio::common::SinkMetadata& sinkMetadata,
+-            const std::vector<::aidl::android::media::audio::common::MicrophoneInfo>& microphones);
+-
+-  private:
+-    void onClose(StreamDescriptor::State) override { defaultOnClose(); }
++public:
++  friend class ndk::SharedRefBase;
++  StreamInPowerphone(
++      StreamContext &&context,
++      const ::aidl::android::hardware::audio::common::SinkMetadata
++          &sinkMetadata,
++      const std::vector<::aidl::android::media::audio::common::MicrophoneInfo>
++          &microphones);
++
++private:
++  void onClose(StreamDescriptor::State) override { defaultOnClose(); }
++};
++
++class StreamOutPowerphone final : public StreamOut, public StreamPowerphone {
++public:
++  friend class ndk::SharedRefBase;
++  StreamOutPowerphone(
++      StreamContext &&context,
++      const ::aidl::android::hardware::audio::common::SourceMetadata
++          &sourceMetadata,
++      const std::optional<
++          ::aidl::android::media::audio::common::AudioOffloadInfo>
++          &offloadInfo);
++
++private:
++  void onClose(StreamDescriptor::State) override { defaultOnClose(); }
+ };
+ 
+ class ModulePowerphone final : public Module {
+-  public:
+-    explicit ModulePowerphone(std::unique_ptr<Configuration>&& config)
+-        : Module(Type::DEFAULT, std::move(config)) {}
+-
+-  protected:
+-    ndk::ScopedAStatus createInputStream(
+-            StreamContext&& context,
+-            const ::aidl::android::hardware::audio::common::SinkMetadata& sinkMetadata,
+-            const std::vector<::aidl::android::media::audio::common::MicrophoneInfo>& microphones,
+-            std::shared_ptr<StreamIn>* result) override;
+-    ndk::ScopedAStatus createOutputStream(
+-            StreamContext&& context,
+-            const ::aidl::android::hardware::audio::common::SourceMetadata& sourceMetadata,
+-            const std::optional<::aidl::android::media::audio::common::AudioOffloadInfo>& offloadInfo,
+-            std::shared_ptr<StreamOut>* result) override;
+-    int32_t getNominalLatencyMs(
+-            const ::aidl::android::media::audio::common::AudioPortConfig& portConfig) override;
++public:
++  explicit ModulePowerphone(std::unique_ptr<Configuration> &&config)
++      : Module(Type::DEFAULT, std::move(config)) {}
++
++protected:
++  ndk::ScopedAStatus createInputStream(
++      StreamContext &&context,
++      const ::aidl::android::hardware::audio::common::SinkMetadata
++          &sinkMetadata,
++      const std::vector<::aidl::android::media::audio::common::MicrophoneInfo>
++          &microphones,
++      std::shared_ptr<StreamIn> *result) override;
++  ndk::ScopedAStatus createOutputStream(
++      StreamContext &&context,
++      const ::aidl::android::hardware::audio::common::SourceMetadata
++          &sourceMetadata,
++      const std::optional<
++          ::aidl::android::media::audio::common::AudioOffloadInfo> &offloadInfo,
++      std::shared_ptr<StreamOut> *result) override;
++  int32_t getNominalLatencyMs(
++      const ::aidl::android::media::audio::common::AudioPortConfig &portConfig)
++      override;
+ };
+ 
+-}  // namespace aidl::android::hardware::audio::core::powerphone
++} // namespace aidl::android::hardware::audio::core::powerphone
+diff --git a/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc b/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc
+index 90050e9a6e3942bf64fad030cf63a0e6c50a4b6b..c86b26cb3a6c2aa7bb51602348b990f376a820c9 100644
+--- a/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc
++++ b/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc
+@@ -1,6 +1,5 @@
+ service vendor.audio-hal-powerphone /vendor/bin/hw/android.hardware.audio.service-aidl.powerphone
+     class hal
+-    disabled
+     user audioserver
+     group audio
+     capabilities BLOCK_SUSPEND SYS_NICE
+@@ -9,11 +8,13 @@ service vendor.audio-hal-powerphone /vendor/bin/hw/android.hardware.audio.servic
+     task_profiles ProcessCapacityHigh HighPerformance
+     onrestart restart audioserver
+ 
+-# A dedicated, fail-closed loader owns this property. It may set the value to
+-# one only after validating the stock card 0, exact frankel_pdm_alsa module
+-# parameters, polling_enabled=0, and the fixed card-1 PCM topology.
+-on property:vendor.powerphone.pdm.ready=0
+-    stop vendor.audio-hal-powerphone
+-
+-on property:vendor.powerphone.pdm.ready=1
+-    start vendor.audio-hal-powerphone
++# Audio HAL discovery waits for every VINTF-declared IModule. Keep the binder
++# process registered from boot, even when neither research path is ready.
++# AudioPolicyManager may construct inert STANDBY streams, but PCM open/start
++# and every transfer are independently fail-closed on these volatile flags.
++# The inert PDM topology loader may not set the first; a future lease broker
++# must own it. The speaker flag must remain zero until a post-boot helper
++# validates the volatile AoC patch and PCM0,28.
++on early-init
++    setprop vendor.powerphone.pdm.ready 0
++    setprop vendor.powerphone.aoc_speaker_192k.ready 0

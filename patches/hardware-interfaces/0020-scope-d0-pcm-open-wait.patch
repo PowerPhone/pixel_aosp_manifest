@@ -1,0 +1,163 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Fri, 4 Sep 2026 13:10:00 +0000
+Subject: [PATCH] audio: scope D0 PCM open wait override
+
+Raw D0 trials fail their first write when the PCM substream is opened with
+the stock card-wide wait value, while the same earpiece and bottom sequences
+remain stable when tinyplay sets "PCM Stream Wait Time in MSec" to 200 before
+opening PCM0,D0. The driver snapshots this setting during hw_params; retaining
+the card-wide override after open would unnecessarily change every ALSA
+client on the card.
+
+Save the prior mixer value, set 200 before the final EP1 bind, and leave that
+bind as the final mixer transaction before the legacy pcm_open. Restore the
+card-wide value as soon as pcm_open returns, before inspecting the result or
+issuing another ALSA operation. Retry restoration from every route-cleanup
+path and fail closed when the prior value cannot be restored.
+
+This is a startup-stability fix only. The q48/source0 transport consumed a
+nominal five-second 192 kHz payload in 19.98 seconds, so it remains a
+quarter-rate compatibility path; physical 192 kHz remains unqualified.
+---
+ audio/aidl/default/powerphone/Powerphone.cpp | 81 ++++++++++++++++++++++
+ 1 file changed, 81 insertions(+)
+
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -74,6 +74,8 @@ constexpr size_t kPlaybackAlsaBufferFrames = 1920;
+ constexpr size_t kCaptureFrameworkBufferFrames = 1920;
+ constexpr size_t kPlaybackFrameworkBufferFrames = 7680;
+ constexpr int kPlaybackRtPriority = 90;
++constexpr int kPlaybackPcmOpenWaitMs = 200;
++constexpr char kPcmStreamWaitControl[] = "PCM Stream Wait Time in MSec";
+ constexpr int32_t kPlaybackLatencyMs =
+         (kPlaybackAlsaBufferFrames * 1000 + kRate - 1) / kRate;
+ constexpr char kCaptureReadyProperty[] = "vendor.powerphone.pdm.ready";
+@@ -526,6 +528,10 @@ class PlaybackRoute {
+ 
+     bool configure(PlaybackEndpoint endpoint) {
+         cleanup();
++        if (mSavedPcmOpenWait.has_value()) {
++            LOG(ERROR) << __func__ << ": refusing reuse after card-wide PCM wait restore failure";
++            return false;
++        }
+         mEndpoint = endpoint;
+         mMixer = mixer_open(kPlaybackCard);
+         if (mMixer == nullptr) {
+@@ -589,6 +595,15 @@ class PlaybackRoute {
+             cleanup();
+             return false;
+         }
++        // The vendor PCM driver snapshots this card-wide control during
++        // hw_params. A value of 200 is the shortest live-stable D0 open wait:
++        // the driver's double jiffies conversion makes it roughly 52 ms on
++        // Frankel's HZ=250 kernel. Keep the override window narrow and leave
++        // EP1 activation as the final mixer transaction before pcm_open().
++        if (!setPcmOpenWait()) {
++            cleanup();
++            return false;
++        }
+         if (!setFinalRouteValue("TDM_0_RX Mixer EP1", 1)) {
+             cleanup();
+             return false;
+@@ -612,8 +627,29 @@ class PlaybackRoute {
+         return true;
+     }
+ 
++    bool restorePcmOpenWait() {
++        if (!mSavedPcmOpenWait.has_value()) return true;
++        mixer_ctl* ctl = control(kPcmStreamWaitControl);
++        const int saved = *mSavedPcmOpenWait;
++        if (ctl == nullptr || mixer_ctl_set_value(ctl, 0, saved) != 0 ||
++            mixer_ctl_get_value(ctl, 0) != saved) {
++            LOG(ERROR) << "failed to restore card-wide " << kPcmStreamWaitControl << '='
++                       << saved;
++            return false;
++        }
++        mSavedPcmOpenWait.reset();
++        return true;
++    }
++
+     void cleanup() {
+         if (mMixer == nullptr) return;
++        // The PCM-open override is independent of route ownership. Always
++        // attempt to restore it before any route cleanup decision, including
++        // failures between EP1 activation and pcm_open/hw_params completion.
++        if (!restorePcmOpenWait()) {
++            LOG(ERROR) << "card-wide PCM wait remains overridden; reboot or audited "
++                          "manual recovery is required";
++        }
+         bool safeToRestore = false;
+         if (mPowerControlsTouched) {
+             // The sidecar cannot lock Google's separate primary HAL process. Never
+@@ -817,6 +853,31 @@ class PlaybackRoute {
+         return true;
+     }
+ 
++    bool setPcmOpenWait() {
++        if (mSavedPcmOpenWait.has_value()) {
++            LOG(ERROR) << "card-wide PCM wait override is already active";
++            return false;
++        }
++        mixer_ctl* ctl = control(kPcmStreamWaitControl);
++        if (ctl == nullptr) return false;
++        const int saved = mixer_ctl_get_value(ctl, 0);
++        if (saved < 0) {
++            LOG(ERROR) << "failed to read card-wide " << kPcmStreamWaitControl << ": " << saved;
++            return false;
++        }
++        // Save before the write: even a failing mixer transaction may have
++        // changed hardware state, so every subsequent error path must try to
++        // put the prior value back.
++        mSavedPcmOpenWait = saved;
++        if (mixer_ctl_set_value(ctl, 0, kPlaybackPcmOpenWaitMs) != 0 ||
++            mixer_ctl_get_value(ctl, 0) != kPlaybackPcmOpenWaitMs) {
++            LOG(ERROR) << "failed to set card-wide " << kPcmStreamWaitControl << '='
++                       << kPlaybackPcmOpenWaitMs;
++            return false;
++        }
++        return true;
++    }
++
+     bool snapshotAndSetEnum(const std::string& name, const char* value) {
+         mixer_ctl* ctl = nullptr;
+         if (!save(name, &ctl)) return false;
+@@ -926,6 +987,7 @@ class PlaybackRoute {
+     mixer* mMixer = nullptr;
+     std::vector<SavedMixerValue> mSavedValues;
+     std::vector<OwnedMixerValue> mOwnedValues;
++    std::optional<int> mSavedPcmOpenWait;
+     std::optional<PlaybackEndpoint> mEndpoint;
+     bool mPowerControlsTouched = false;
+     bool mSetupComplete = false;
+@@ -1274,6 +1336,25 @@ ::android::status_t PowerphoneStreamIn::openPlaybackForFirstTransfer() {
+             kPlaybackCard, kPlaybackDevice, 2, kRate, kPlaybackAlsaPeriodFrames,
+             kPlaybackAlsaBufferFrames / kPlaybackAlsaPeriodFrames,
+             POWERPHONE_LEGACY_PCM_FORMAT_S32_LE, &openResult);
++    bool pcmOpenWaitRestored = false;
++    {
++        std::lock_guard lock(mLock);
++        // The pcm_open() attempt has returned. If hw_params succeeded, this
++        // substream now owns its private copy; either way, restore the
++        // card-wide default before inspecting the result or issuing another
++        // ALSA operation.
++        pcmOpenWaitRestored =
++                mPlaybackRoute != nullptr && mPlaybackRoute->restorePcmOpenWait();
++    }
++    if (!pcmOpenWaitRestored) {
++        if (playbackPcm != nullptr) {
++            powerphone_legacy_pcm_close(playbackPcm);
++        }
++        LOG(ERROR) << __func__ << ": failed to restore the card-wide PCM open wait";
++        std::lock_guard lock(mLock);
++        cleanupPlaybackRouteLocked();
++        return ::android::INVALID_OPERATION;
++    }
+     if (playbackPcm == nullptr || !powerphone_legacy_pcm_is_ready(playbackPcm)) {
+         const std::string error = playbackPcm == nullptr
+                 ? "legacy PCM facade returned null"
+
+-- 
+2.43.0

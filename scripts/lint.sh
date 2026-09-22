@@ -6,12 +6,30 @@ project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$project_root"
 
 bash -n config/cubs-dexpreopt.env config/targets/*/release.env \
-  scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh
-shellcheck -x scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh
+  scripts/*.sh scripts/audio/*/*.sh scripts/lib/*.sh scripts/tests/*.sh
+shellcheck -x scripts/*.sh scripts/audio/*/*.sh scripts/lib/*.sh scripts/tests/*.sh
+for python_script in scripts/audio/*.py scripts/audio/frankel/*.py tools/audio/*.py; do
+  python3 -c \
+    'import pathlib, sys; path = pathlib.Path(sys.argv[1]); compile(path.read_text(encoding="utf-8"), str(path), "exec")' \
+    "$python_script"
+  if head -n 1 "$python_script" | grep -q '^#!' && [[ ! -x "$python_script" ]]; then
+    printf 'error: directly executable Python script lacks executable mode: %s\n' \
+      "$python_script" >&2
+    exit 1
+  fi
+done
 scripts/tests/simulate-cubs-fstab-avb-mapping.sh
 scripts/tests/simulate-usbipd-win-provenance.sh
 scripts/tests/simulate-stock-adb-shell-gate.sh
 bash scripts/tests/simulate-frankel-bundle-integrity.sh
+scripts/tests/simulate-frankel-vbmeta-flash-policy.sh
+scripts/tests/simulate-frankel-pdm-provenance.sh
+scripts/tests/simulate-frankel-powerphone-build-closure.sh
+scripts/tests/simulate-frankel-powerphone-d10-bootstrap-policy.sh
+scripts/tests/simulate-powerphone-speaker-sidecar-policy.sh
+scripts/tests/simulate-powerphone-runtime-policy.sh
+python3 tools/audio/test_frankel_a32_raw_pdm.py
+python3 tools/audio/test_patch_frankel_aoc_192k.py
 for profile_target in cubs frankel; do
   PIXEL_TARGET=$profile_target bash -c \
     'source "$1/scripts/lib/common.sh"' _ "$project_root"

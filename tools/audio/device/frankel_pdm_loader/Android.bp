@@ -1,0 +1,16 @@
+// Opt-in Frankel research-image loader. The generated-device sanitizer copies
+// this directory into vendor/google_devices/frankel only when the complete
+// PowerPhone sidecar is explicitly selected.
+cc_binary {
+    name: "powerphone_pdm_loader",
+    vendor: true,
+    srcs: ["powerphone_pdm_loader.cpp"],
+    shared_libs: ["libtinyalsa"],
+    init_rc: ["powerphone_pdm_loader.rc"],
+    cpp_std: "c++20",
+    cflags: [
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    ],
+}

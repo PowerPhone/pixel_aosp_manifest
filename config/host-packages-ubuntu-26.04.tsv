@@ -4,7 +4,9 @@
 # reports them. git provides the install script's git-core virtual package.
 package	version
 7zip	26.00+dfsg-1
+alsa-utils	1.2.15.2-1ubuntu1
 android-sdk-libsparse-utils	1:34.0.5-12build1
+binutils	2.46-3ubuntu2
 bison	2:3.8.2+dfsg-1build4
 brotli	1.2.0-3build1
 build-essential	12.12ubuntu2.26.04.2
@@ -23,6 +25,7 @@ git-lfs	3.7.1-1
 gnupg	2.4.8-4ubuntu3
 gperf	3.3-1
 jq	1.8.1-4ubuntu2
+kmod	34.2-2ubuntu2
 lib32z1-dev	1:1.3.dfsg+really1.3.1-1ubuntu3
 libc6-dev-i386	2.43-2ubuntu2.3
 libgl1-mesa-dev:amd64	26.0.8-1ubuntu0.3
@@ -33,7 +36,9 @@ openssh-client	1:10.2p1-2ubuntu3.5
 openssl	3.5.5-1ubuntu3.4
 pkgconf:amd64	2.5.1-4
 protobuf-compiler	3.21.12-15ubuntu1
+python3-numpy	1:2.3.5+ds-3ubuntu1
 python3-protobuf	3.21.12-15ubuntu1
+python3-scipy	1.16.3-4build1
 repo	2.58-4
 rsync	3.4.1+ds1-7ubuntu0.3
 shellcheck	0.11.0-2

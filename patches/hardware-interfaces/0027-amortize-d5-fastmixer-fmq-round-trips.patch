@@ -1,0 +1,57 @@
+From: PowerPhone research platform <powerphone@csr460.com>
+Subject: [PATCH] Amortize D5 FastMixer FMQ round trips over five native quanta
+
+The FMQ192 candidate selected FastMixer as intended. One real hardware run
+stopped during active playback after2.334 seconds; a fresh repeat sustained
+the full7.85-second active interval with zero measured phase/dropout events
+and no HAL errors through the quiet tail. The first error in the failed run
+was lost to the log storm, so its exact cause is not established.
+
+Use FMQ960/5 ms to reduce command/reply frequency fivefold while retaining
+HAL960 < normal3840 and therefore the same existing static FastMixer.
+Every FMQ still submits blocking192-frame native writes into the unchanged
+192x20/full3840 ALSA ring. Keep the cross-call accepted-frame startup
+counter, positional stereo, flagsNONE, and terminal active EPIPE checks.
+This is a direct-hardware candidate, not a claim of qualification.
+Capture remains unchanged.
+
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -76,9 +76,10 @@
+ constexpr size_t kPlaybackAlsaBufferFrames = 3840;
+ constexpr size_t kPlaybackAlsaStartThresholdFrames = kPlaybackAlsaBufferFrames;
+ constexpr size_t kCaptureFrameworkBufferFrames = 1920;
+-// A 1 ms HAL burst selects AudioFlinger's existing static FastMixer beneath
+-// its 20 ms normal mixer. The independent physical ring remains 20 ms.
+-constexpr size_t kPlaybackFrameworkBufferFrames = kPlaybackAlsaPeriodFrames;
++// A 5 ms HAL burst still selects the existing static FastMixer beneath the
++// 20 ms normal mixer, with fivefold fewer command/reply round trips than 1 ms.
++// The independent physical ring remains 20 ms with native 1 ms PCM writes.
++constexpr size_t kPlaybackFrameworkBufferFrames = 5 * kPlaybackAlsaPeriodFrames;
+ constexpr uint32_t kPlaybackSecondWriteEfaultRetries = 32;
+ constexpr uint32_t kPlaybackSecondWriteEfaultRetrySleepUs = 1000;
+ constexpr int kPlaybackRtPriority = 90;
+@@ -1758,8 +1759,8 @@
+                 std::min(kPlaybackAlsaPeriodFrames, frameCount - transferredFrames);
+         auto* chunk = static_cast<uint8_t*>(buffer) + transferredFrames * mFrameSizeBytes;
+         const bool oversized = chunkFrames > std::numeric_limits<uint32_t>::max();
+-        // Count accepted frames across FMQ calls: FastMixer submits one
+-        // quantum per call, so a call-local offset cannot identify WRITEI #2.
++        // Count accepted frames across FMQ calls: valid bursts can be one
++        // quantum, so a call-local offset cannot always identify WRITEI #2.
+         const size_t startupAcceptedFrames =
+                 mPlaybackStartupAcceptedFrames.load(std::memory_order_acquire);
+         const bool retryStartupSecondWrite =
+@@ -1927,9 +1928,9 @@
+         return ndk::ScopedAStatus::ok();
+     }
+     if (sampleRateHz == kRate && exactOutput) {
+-        // HAL 1 ms < normal mixer 20 ms selects the existing static FastMixer
++        // HAL 5 ms < normal mixer 20 ms selects the existing static FastMixer
+         // without a FAST output flag. It paces active audio and idle silence
+-        // through blocking 192-frame writes, independently of the unchanged
++        // through five blocking 192-frame writes per FMQ, independently of the
+         // 192x20 ALSA ring and its full 3,840-frame startup threshold.
+         *bufferSizeFrames = kPlaybackFrameworkBufferFrames;
+         return ndk::ScopedAStatus::ok();
+

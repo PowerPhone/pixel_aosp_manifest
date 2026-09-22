@@ -43,14 +43,138 @@ case "$DEVICE_CODENAME" in
     sanitizer="$script_dir/sanitize-generated-vendor.sh"
     target_sanitizer_library="$script_dir/lib/cubs-fstab.sh"
     target_sanitizer_library_path=scripts/lib/cubs-fstab.sh
+    powerphone_audio_sidecar=not-applicable
+    powerphone_cs35l43_192k=not-applicable
+    powerphone_d0_progress_mode=not-applicable
+    powerphone_d5_timer=not-applicable
+    powerphone_primary_hal_192k=not-applicable
+    powerphone_signed_aoc_firmware_profile=not-applicable
+    powerphone_aoc_patcher_sha256=not-applicable
+    powerphone_d0_progress_patcher_sha256=not-applicable
+    powerphone_ep6_patcher_sha256=not-applicable
+    powerphone_d5_timer_patcher_sha256=not-applicable
+    powerphone_primary_hal_patcher_sha256=not-applicable
+    powerphone_aoc_firmware_patcher_sha256=not-applicable
+    powerphone_signed_aoc_firmware_sha256=not-applicable
+    frankel_pdm_provenance_lock=
     ;;
   frankel)
     sanitizer="$script_dir/sanitize-generated-vendor-frankel.sh"
     target_sanitizer_library="$sanitizer"
     target_sanitizer_library_path=scripts/sanitize-generated-vendor-frankel.sh
+    powerphone_aoc_alsa_192k=${POWERPHONE_AOC_ALSA_192K:-false}
+    powerphone_audio_sidecar=${POWERPHONE_AUDIO_SIDECAR:-false}
+    powerphone_cs35l43_192k=${POWERPHONE_CS35L43_192K:-false}
+    powerphone_d0_progress_mode=${POWERPHONE_D0_PROGRESS_MODE:-mailbox}
+    powerphone_d5_timer=${POWERPHONE_D5_TIMER:-false}
+    if [[ -n ${POWERPHONE_PRIMARY_HAL_192K:-} ]]; then
+      powerphone_primary_hal_192k=$POWERPHONE_PRIMARY_HAL_192K
+    elif [[ "$powerphone_aoc_alsa_192k" == true ]]; then
+      powerphone_primary_hal_192k=true
+    else
+      powerphone_primary_hal_192k=false
+    fi
+    powerphone_signed_aoc_firmware_profile=${POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE:-stock}
+    case "$powerphone_aoc_alsa_192k" in
+      true|false) ;;
+      *) die "POWERPHONE_AOC_ALSA_192K must be true or false" ;;
+    esac
+    case "$powerphone_audio_sidecar" in
+      true|false) frankel_pdm_provenance_lock= ;;
+      *) die "POWERPHONE_AUDIO_SIDECAR must be true or false" ;;
+    esac
+    case "$powerphone_cs35l43_192k" in
+      true|false) ;;
+      *) die "POWERPHONE_CS35L43_192K must be true or false" ;;
+    esac
+    case "$powerphone_d0_progress_mode" in
+      mailbox|pure-timer|one-period-lag) ;;
+      *) die "POWERPHONE_D0_PROGRESS_MODE must be mailbox, pure-timer, or one-period-lag" ;;
+    esac
+    case "$powerphone_d5_timer" in
+      true|false) ;;
+      *) die "POWERPHONE_D5_TIMER must be true or false" ;;
+    esac
+    case "$powerphone_primary_hal_192k" in
+      true|rate-only|false) ;;
+      *) die "POWERPHONE_PRIMARY_HAL_192K must be true, rate-only, or false" ;;
+    esac
+    case "$powerphone_signed_aoc_firmware_profile" in
+      stock|source0-4s32-allocator-fallback) ;;
+      *) die "POWERPHONE_SIGNED_AOC_FIRMWARE_PROFILE must be stock or source0-4s32-allocator-fallback" ;;
+    esac
+    if [[ "$powerphone_aoc_alsa_192k" == false && \
+          ( "$powerphone_d0_progress_mode" != mailbox || \
+            "$powerphone_signed_aoc_firmware_profile" != stock || \
+            "$powerphone_d5_timer" == true || \
+            "$powerphone_primary_hal_192k" != false ) ]]; then
+      die "non-default AoC selections require POWERPHONE_AOC_ALSA_192K=true"
+    fi
+    [[ "$powerphone_d5_timer" != true || \
+       "$powerphone_d0_progress_mode" == one-period-lag ]] || \
+      die "POWERPHONE_D5_TIMER=true requires one-period-lag"
     ;;
   *) die "no generated-vendor attestation policy for $DEVICE_CODENAME" ;;
 esac
+
+if [[ "$DEVICE_CODENAME" == frankel ]]; then
+  powerphone_aoc_patcher="$project_root/tools/audio/patch_frankel_aoc_192k.py"
+  powerphone_d0_progress_patcher="$project_root/tools/audio/patch_frankel_aoc_d0_progress_mode.py"
+  powerphone_ep6_patcher="$project_root/tools/audio/patch_frankel_aoc_ep6_speaker_192k.py"
+  powerphone_d5_timer_patcher="$project_root/tools/audio/patch_frankel_aoc_pcm_d5_timer_mode.py"
+  powerphone_primary_hal_patcher="$project_root/tools/audio/patch_frankel_primary_hal_192k.py"
+  powerphone_aoc_firmware_patcher="$project_root/tools/audio/patch_frankel_aoc_firmware_speaker_192k.py"
+  powerphone_signed_aoc_firmware="$generated_dir/proprietary/vendor/firmware/aoc.bin"
+  for powerphone_helper in \
+    "$powerphone_aoc_patcher" \
+    "$powerphone_d0_progress_patcher" \
+    "$powerphone_ep6_patcher" \
+    "$powerphone_d5_timer_patcher" \
+    "$powerphone_primary_hal_patcher" \
+    "$powerphone_aoc_firmware_patcher"; do
+    require_file "$powerphone_helper"
+    [[ ! -L "$powerphone_helper" && -x "$powerphone_helper" ]] || \
+      die "PowerPhone patch helper is unsafe or not executable: $powerphone_helper"
+  done
+  require_file "$powerphone_signed_aoc_firmware"
+  [[ ! -L "$powerphone_signed_aoc_firmware" ]] || \
+    die "selected signed AoC firmware must not be a symlink"
+  verify_sha256 \
+    1c96487c0cfa3505f881824adbb084126bbf30eaafc7e8346d8818f2625b5e1d \
+    "$powerphone_aoc_patcher"
+  verify_sha256 \
+    3deb57c943d0015b410aac8fdf2611b8569f0af378b0e1cb22e059f82115198a \
+    "$powerphone_d0_progress_patcher"
+  verify_sha256 \
+    c5bf1fc07decf7f9c9c94d55b7f12c80253eafb18a6e9b884efc9337b670020d \
+    "$powerphone_ep6_patcher"
+  verify_sha256 \
+    1ed1d9507155587b554ca3031a6882e5f4bcb9beaf1923dec93ea0496b32a987 \
+    "$powerphone_d5_timer_patcher"
+  verify_sha256 \
+    6390132493ddf7894f1e5621b5f5e6c47010f6b7005cbefd7983070258a5f04f \
+    "$powerphone_primary_hal_patcher"
+  verify_sha256 \
+    d5e8f5edc1ffe2901efbc807d434b308794c7588e57b47111118be85445bf0c2 \
+    "$powerphone_aoc_firmware_patcher"
+  powerphone_aoc_patcher_sha256=$(sha256sum "$powerphone_aoc_patcher")
+  powerphone_aoc_patcher_sha256=${powerphone_aoc_patcher_sha256%% *}
+  powerphone_d0_progress_patcher_sha256=$(sha256sum \
+    "$powerphone_d0_progress_patcher")
+  powerphone_d0_progress_patcher_sha256=${powerphone_d0_progress_patcher_sha256%% *}
+  powerphone_ep6_patcher_sha256=$(sha256sum "$powerphone_ep6_patcher")
+  powerphone_ep6_patcher_sha256=${powerphone_ep6_patcher_sha256%% *}
+  powerphone_d5_timer_patcher_sha256=$(sha256sum "$powerphone_d5_timer_patcher")
+  powerphone_d5_timer_patcher_sha256=${powerphone_d5_timer_patcher_sha256%% *}
+  powerphone_primary_hal_patcher_sha256=$(sha256sum "$powerphone_primary_hal_patcher")
+  powerphone_primary_hal_patcher_sha256=${powerphone_primary_hal_patcher_sha256%% *}
+  powerphone_aoc_firmware_patcher_sha256=$(sha256sum \
+    "$powerphone_aoc_firmware_patcher")
+  powerphone_aoc_firmware_patcher_sha256=${powerphone_aoc_firmware_patcher_sha256%% *}
+  powerphone_signed_aoc_firmware_sha256=$(sha256sum \
+    "$powerphone_signed_aoc_firmware")
+  powerphone_signed_aoc_firmware_sha256=${powerphone_signed_aoc_firmware_sha256%% *}
+fi
 attestation_dir="$project_root/work/attestations"
 attestation="$attestation_dir/${DEVICE_CODENAME}-generated-vendor.attestation"
 
@@ -75,6 +199,11 @@ require_file "$adevtool_yarn_lock"
 require_file "$vendor_spec"
 require_file "$sanitizer"
 require_file "$target_sanitizer_library"
+if [[ -n "$frankel_pdm_provenance_lock" ]]; then
+  require_file "$frankel_pdm_provenance_lock"
+  [[ ! -L "$frankel_pdm_provenance_lock" ]] || \
+    die "Frankel PDM provenance lock must not be a symlink"
+fi
 [[ ! -L "$target_sanitizer_library" ]] || \
   die "target sanitizer library must not be a symlink"
 for input_directory in \
@@ -149,6 +278,14 @@ sanitizer_sha256=$(sha256sum "$sanitizer")
 sanitizer_sha256=${sanitizer_sha256%% *}
 target_sanitizer_library_sha256=$(sha256sum "$target_sanitizer_library")
 target_sanitizer_library_sha256=${target_sanitizer_library_sha256%% *}
+if [[ -n "$frankel_pdm_provenance_lock" ]]; then
+  frankel_pdm_provenance_lock_sha256=$(
+    sha256sum "$frankel_pdm_provenance_lock"
+  )
+  frankel_pdm_provenance_lock_sha256=${frankel_pdm_provenance_lock_sha256%% *}
+else
+  frankel_pdm_provenance_lock_sha256=absent
+fi
 
 mkdir -p "$attestation_dir"
 [[ -d "$attestation_dir" && ! -L "$attestation_dir" ]] || \
@@ -271,6 +408,36 @@ entry_count=1
     "$target_sanitizer_library_path"
   printf 'target_sanitizer_library_sha256=%s\n' \
     "$target_sanitizer_library_sha256"
+  if [[ "$DEVICE_CODENAME" == frankel ]]; then
+    printf 'powerphone_aoc_alsa_192k=%s\n' "$powerphone_aoc_alsa_192k"
+    printf 'powerphone_d0_progress_mode=%s\n' "$powerphone_d0_progress_mode"
+    printf 'powerphone_d5_timer=%s\n' "$powerphone_d5_timer"
+    printf 'powerphone_primary_hal_192k=%s\n' "$powerphone_primary_hal_192k"
+    printf 'powerphone_signed_aoc_firmware_profile=%s\n' \
+      "$powerphone_signed_aoc_firmware_profile"
+    printf 'powerphone_signed_aoc_firmware_sha256=%s\n' \
+      "$powerphone_signed_aoc_firmware_sha256"
+    printf 'powerphone_aoc_patcher_sha256=%s\n' \
+      "$powerphone_aoc_patcher_sha256"
+    printf 'powerphone_d0_progress_patcher_sha256=%s\n' \
+      "$powerphone_d0_progress_patcher_sha256"
+    printf 'powerphone_ep6_patcher_sha256=%s\n' \
+      "$powerphone_ep6_patcher_sha256"
+    printf 'powerphone_d5_timer_patcher_sha256=%s\n' \
+      "$powerphone_d5_timer_patcher_sha256"
+    printf 'powerphone_primary_hal_patcher_sha256=%s\n' \
+      "$powerphone_primary_hal_patcher_sha256"
+    printf 'powerphone_aoc_firmware_patcher_sha256=%s\n' \
+      "$powerphone_aoc_firmware_patcher_sha256"
+    printf 'powerphone_cs35l43_192k=%s\n' "$powerphone_cs35l43_192k"
+  fi
+  printf 'powerphone_audio_sidecar=%s\n' "$powerphone_audio_sidecar"
+  printf 'frankel_pdm_provenance_lock_path=%s\n' \
+    "$([[ -n "$frankel_pdm_provenance_lock" ]] && \
+      printf 'config/targets/frankel/powerphone-pdm.SHA256SUMS' || \
+      printf absent)"
+  printf 'frankel_pdm_provenance_lock_sha256=%s\n' \
+    "$frankel_pdm_provenance_lock_sha256"
   printf 'strict_neverallows=true\n'
   printf 'duplicate_rules_strict=true\n'
   printf 'tree_path=vendor/google_devices/%s\n' "$DEVICE_CODENAME"

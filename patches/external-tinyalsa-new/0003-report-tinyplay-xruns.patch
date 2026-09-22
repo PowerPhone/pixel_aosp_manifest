@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Thu, 4 Sep 2026 07:21:00 +0000
+Subject: [PATCH] tinyalsa: report recovered xruns from tinyplay
+
+Include the PCM handle's cumulative xrun count in tinyplay's completion
+summary. Direct hardware qualification can then reject a nominally completed
+stream when tinyalsa internally recovered EPIPE.
+---
+diff --git a/utils/tinyplay.c b/utils/tinyplay.c
+index da3c5e7..f41d941 100644
+--- a/utils/tinyplay.c
++++ b/utils/tinyplay.c
+@@ -524,7 +524,8 @@ int play_sample(struct ctx *ctx)
+         }
+     } while (!close && num_read > 0 && remaining_data_size > 0);
+ 
+-    printf("Played %zu bytes. ", played_data_size);
++    printf("Played %zu bytes with %d xrun(s). ", played_data_size,
++            pcm_get_xruns(ctx->pcm));
+     if (is_stdin_source) {
+         printf("\n");
+     } else {
+@@ -536,4 +537,3 @@ int play_sample(struct ctx *ctx)
+     free(buffer);
+     return 0;
+ }
+-
+-- 
+2.43.0
+

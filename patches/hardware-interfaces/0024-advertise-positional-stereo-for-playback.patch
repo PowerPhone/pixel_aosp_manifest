@@ -1,0 +1,24 @@
+From: PowerPhone research platform <powerphone@csr460.com>
+Subject: [PATCH] Advertise positional stereo for Java and AAudio playback
+
+Match normal stereo clients directly instead of invoking a downmixer that
+rejects index-mask output. The physical PCM remains two-channel S32 at192k.
+No capture, gain, transfer, or PCM lifecycle changes.
+
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -158,10 +158,10 @@
+     return AudioProfile{
+             .format = AudioFormatDescription{.type = AudioFormatType::PCM,
+                                              .pcm = PcmType::INT_32_BIT},
+-            // PCM 0,0 is a stereo S32 frontend. The AoC converts that stream
+-            // to the independently qualified two-S32-slot TDM_0_RX bus.
+-            .channelMasks = {AudioChannelLayout::make<AudioChannelLayout::Tag::indexMask>(
+-                    AudioChannelLayout::INDEX_MASK_2)},
++            // Match Java/AAudio positional stereo directly. INDEX_MASK_2
++            // unnecessarily invoked a downmixer that rejects indexed output.
++            .channelMasks = {AudioChannelLayout::make<AudioChannelLayout::Tag::layoutMask>(
++                    AudioChannelLayout::LAYOUT_STEREO)},
+             .sampleRates = {kRate},
+     };
+ }

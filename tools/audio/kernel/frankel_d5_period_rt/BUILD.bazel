@@ -1,0 +1,11 @@
+load("@kleaf//build/kernel/kleaf:kernel.bzl", "ddk_module")
+
+package(default_visibility = ["//visibility:public"])
+
+ddk_module(
+    name = "frankel_d5_period_rt",
+    deps = ["@kleaf//common:all_headers_aarch64"],
+    srcs = ["frankel_d5_period_rt.c"],
+    out = "frankel_d5_period_rt.ko",
+    kernel_build = "@gki_prebuilts//kernel_aarch64",
+)

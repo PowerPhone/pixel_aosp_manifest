@@ -1,0 +1,118 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Thu, 4 Sep 2026 06:10:00 +0000
+Subject: [PATCH] audio: require clocked speaker startup prime
+
+AoC can accept silent D0 writes immediately before the asynchronous speaker
+sink has begun consuming them. A period-count-only gate therefore hands the
+first client buffer to a stopped sink and underruns. Reject faster-than-clock
+streaks until a 100 ms warm-up has elapsed and 32 clean periods span at
+least 60 ms of their nominal 80 ms duration.
+---
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -25,6 +25,7 @@
+ #include <limits>
+ #include <memory>
+ #include <string>
++#include <thread>
+ #include <utility>
+ #include <vector>
+ 
+@@ -69,7 +70,10 @@ constexpr size_t kCaptureAlsaBufferFrames = 7680;
+ constexpr size_t kPlaybackAlsaPeriodFrames = 480;
+ constexpr size_t kPlaybackAlsaBufferFrames = 1920;
+ constexpr size_t kPlaybackPrimeStablePeriods = 32;
+-constexpr std::chrono::milliseconds kPlaybackPrimeTimeout{6000};
++constexpr std::chrono::milliseconds kPlaybackPrimeMinimumWallTime{100};
++constexpr std::chrono::milliseconds kPlaybackPrimeMinimumStableSpan{60};
++constexpr std::chrono::milliseconds kPlaybackPrimeRetryDelay{5};
++constexpr std::chrono::milliseconds kPlaybackPrimeTimeout{10000};
+ constexpr size_t kFrameworkBufferFrames = 1920;
+ constexpr char kCaptureReadyProperty[] = "vendor.powerphone.pdm.ready";
+ constexpr char kSpeakerReadyProperty[] = "vendor.powerphone.aoc_speaker_192k.ready";
+@@ -1246,23 +1250,48 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+ 
+     // Starting D0 also starts the asynchronous AoC speaker sink. Its initial
+     // lock/setup interval is longer than the four-period kernel ring, so prime
+-    // with silence and discard startup xruns until 80 ms of consecutive full
+-    // hardware periods have transferred cleanly. Client audio is not consumed
+-    // until this completes, and all later xruns remain fatal.
++    // with silence and discard startup xruns until consecutive full hardware
++    // periods take real playback time to transfer. Before its sink is running,
++    // AoC can accept many writes immediately; counting those writes alone gives
++    // a false-positive and the first client period then underruns. Require both
++    // a 100 ms warm-up and at least 60 ms across a clean 32-period streak
++    // (nominally 80 ms). Client audio is not consumed until this completes, and
++    // all later xruns remain fatal.
+     alsa_device_proxy* playbackProxy = mAlsaDeviceProxies.front().get();
+     std::array<int32_t, kPlaybackAlsaPeriodFrames * 2> silence{};
+     size_t stablePeriods = 0;
+     size_t startupReopens = 0;
+-    const auto primeDeadline = std::chrono::steady_clock::now() + kPlaybackPrimeTimeout;
+-    while (stablePeriods < kPlaybackPrimeStablePeriods &&
+-           std::chrono::steady_clock::now() < primeDeadline) {
++    size_t fastStreaks = 0;
++    bool playbackStable = false;
++    const auto primeStarted = std::chrono::steady_clock::now();
++    auto stableStarted = primeStarted;
++    const auto primeDeadline = primeStarted + kPlaybackPrimeTimeout;
++    while (!playbackStable && std::chrono::steady_clock::now() < primeDeadline) {
++        const auto writeStarted = std::chrono::steady_clock::now();
+         const int xrunsBefore = pcm_get_xruns(playbackProxy->pcm);
+         const int writtenFrames =
+                 pcm_writei(playbackProxy->pcm, silence.data(), kPlaybackAlsaPeriodFrames);
+         const int xrunsAfter = pcm_get_xruns(playbackProxy->pcm);
+         if (writtenFrames == static_cast<int>(kPlaybackAlsaPeriodFrames) &&
+             xrunsAfter == xrunsBefore) {
++            if (stablePeriods == 0) stableStarted = writeStarted;
+             ++stablePeriods;
++            if (stablePeriods == kPlaybackPrimeStablePeriods) {
++                const auto now = std::chrono::steady_clock::now();
++                const auto totalSpan = now - primeStarted;
++                const auto stableSpan = now - stableStarted;
++                if (totalSpan >= kPlaybackPrimeMinimumWallTime &&
++                    stableSpan >= kPlaybackPrimeMinimumStableSpan) {
++                    playbackStable = true;
++                } else {
++                    // The frontend is still accepting silence faster than the
++                    // 192 kHz hardware clock can consume it. Start an entirely
++                    // new measured streak; the delay is outside that streak.
++                    ++fastStreaks;
++                    stablePeriods = 0;
++                    std::this_thread::sleep_for(kPlaybackPrimeRetryDelay);
++                }
++            }
+         } else {
+             stablePeriods = 0;
+             // AoC may report EIO, rather than EPIPE, while the sink is still
+@@ -1277,7 +1306,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+             }
+         }
+     }
+-    if (stablePeriods != kPlaybackPrimeStablePeriods) {
++    if (!playbackStable) {
+         const char* error =
+                 playbackProxy->pcm == nullptr ? nullptr : pcm_get_error(playbackProxy->pcm);
+         const int xruns =
+@@ -1285,6 +1314,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         LOG(ERROR) << __func__ << ": speaker PCM did not stabilize during silent priming: "
+                    << "stable_periods=" << stablePeriods
+                    << ", reopens=" << startupReopens
++                   << ", fast_streaks=" << fastStreaks
+                    << ", xruns=" << xruns
+                    << ", pcm_error=" << (error == nullptr ? "<none>" : error);
+         StreamAlsa::standby();
+@@ -1296,7 +1326,8 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+     mPlaybackXrunsBaseline.store(startupXruns, std::memory_order_release);
+     LOG(INFO) << __func__ << ": speaker PCM primed with " << startupXruns
+               << " startup xrun(s) and " << startupReopens
+-              << " EIO reopen(s); steady-state transfers are now strict";
++              << " EIO reopen(s) after rejecting " << fastStreaks
++              << " faster-than-hardware streak(s); steady-state transfers are now strict";
+     return ::android::OK;
+ }
+ 
+-- 
+2.43.0

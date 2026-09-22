@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+cc_binary {
+    name: "usf_flicker_capture",
+    vendor: true,
+    srcs: ["usf_flicker_capture.cpp"],
+    cpp_std: "c++20",
+    cflags: [
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Wno-unused-parameter",
+    ],
+    shared_libs: ["libdl"],
+}

@@ -1,0 +1,118 @@
+Subject: [PATCH] Opt-in asynchronous PowerPhone audio boot presentation gate
+
+diff --git a/services/core/java/com/android/server/wm/WindowManagerService.java b/services/core/java/com/android/server/wm/WindowManagerService.java
+index b50c541b8329..48ddba9618a5 100644
+--- a/services/core/java/com/android/server/wm/WindowManagerService.java
++++ b/services/core/java/com/android/server/wm/WindowManagerService.java
+@@ -435,6 +435,12 @@ public class WindowManagerService extends IWindowManager.Stub
+     // The name of the boot animation service in init.rc.
+     private static final String BOOT_ANIMATION_SERVICE = "bootanim";
+ 
++    // Opt-in, system-owned bridge from the device's asynchronous audio bootstrap.
++    // An absent property preserves the normal boot behavior on every other target.
++    private static final String POWERPHONE_AUDIO_BOOT_PROPERTY = "sys.powerphone.audio_boot";
++    private static final long POWERPHONE_AUDIO_BOOT_TIMEOUT_MS = 180_000;
++    private static final long POWERPHONE_AUDIO_BOOT_POLL_MS = 250;
++
+     static final int UPDATE_FOCUS_NORMAL = 0;
+     /** Caller will assign layers */
+     static final int UPDATE_FOCUS_WILL_ASSIGN_LAYERS = 1;
+@@ -718,6 +724,10 @@ public class WindowManagerService extends IWindowManager.Stub
+     boolean mSystemReady = false;
+     boolean mBootAnimationStopped = false;
+     long mBootWaitForWindowsStartTime = -1;
++    @GuardedBy("mGlobalLock")
++    private long mPowerphoneAudioBootWaitStart = -1;
++    @GuardedBy("mGlobalLock")
++    private boolean mPowerphoneAudioBootGateReleased;
+     boolean mThemeReady = true;
+ 
+     // Cache whether to Magnify the IME.
+@@ -4333,6 +4343,74 @@ public class WindowManagerService extends IWindowManager.Stub
+         mPolicy.onSystemUiStarted();
+     }
+ 
++    /**
++     * Holds only presentation and input enablement, never SystemServer or init's action queue.
++     * In particular, the bootstrap must not depend on sys.boot_completed, which is published
++     * after bootAnimationComplete(). The normal 30-second display timeout must not bypass this
++     * opt-in gate; its independent deadline deliberately fails open without certifying audio.
++     */
++    @GuardedBy("mGlobalLock")
++    private boolean shouldWaitForPowerphoneAudioBootLocked() {
++        if (mPowerphoneAudioBootGateReleased || mShowingBootMessages || mSafeMode
++                || "recovery".equals(SystemProperties.get("ro.bootmode"))) {
++            return false;
++        }
++        final String state = SystemProperties.get(POWERPHONE_AUDIO_BOOT_PROPERTY);
++        if (!"pending".equals(state) && !"ready".equals(state)) {
++            if ("failed".equals(state)) {
++                Slog.e(TAG, "PowerPhone audio bootstrap failed; releasing display without audio"
++                        + " readiness certification");
++                mPowerphoneAudioBootGateReleased = true;
++            } else if (mPowerphoneAudioBootWaitStart >= 0) {
++                Slog.i(TAG, "PowerPhone audio display gate released: state=" + state
++                        + " waited_ms=" + (SystemClock.elapsedRealtime()
++                                - mPowerphoneAudioBootWaitStart));
++                mPowerphoneAudioBootGateReleased = true;
++            }
++            return false;
++        }
++        if ("ready".equals(state)) {
++            // Init's "running" state is published before audioserver creates its policy.
++            // These services are registered only after AudioPolicyManager initialization.
++            // checkService does not wait for publication or open a PCM. Do not use
++            // waitForService/getService/AudioSystem calls from this display-gate path.
++            // Neither name is in the Java startup service cache; every retry queries the
++            // current registration after the bootstrap's deliberate audioserver restart.
++            final IBinder policy = ServiceManager.checkService("media.audio_policy");
++            final IBinder flinger = ServiceManager.checkService("media.audio_flinger");
++            if (policy != null && policy.isBinderAlive()
++                    && flinger != null && flinger.isBinderAlive()) {
++                mPowerphoneAudioBootGateReleased = true;
++                final long waited = mPowerphoneAudioBootWaitStart < 0 ? 0
++                        : SystemClock.elapsedRealtime() - mPowerphoneAudioBootWaitStart;
++                Slog.i(TAG, "PowerPhone audio display gate released: state=ready"
++                        + " AudioPolicy/AudioFlinger published waited_ms=" + waited);
++                return false;
++            }
++        }
++        final long now = SystemClock.elapsedRealtime();
++        if (mPowerphoneAudioBootWaitStart < 0) {
++            mPowerphoneAudioBootWaitStart = now;
++            Slog.i(TAG, "PowerPhone audio bootstrap/API publication pending; state=" + state
++                    + "; holding boot animation and input"
++                    + " for at most " + POWERPHONE_AUDIO_BOOT_TIMEOUT_MS + " ms");
++        }
++        final long remaining = POWERPHONE_AUDIO_BOOT_TIMEOUT_MS
++                - (now - mPowerphoneAudioBootWaitStart);
++        if (remaining <= 0) {
++            mPowerphoneAudioBootGateReleased = true;
++            Slog.e(TAG, "PowerPhone audio bootstrap/API publication timed out after "
++                    + POWERPHONE_AUDIO_BOOT_TIMEOUT_MS + " ms; state=" + state
++                    + "; failing open without audio"
++                    + " readiness certification");
++            return false;
++        }
++        mH.removeMessages(H.ENABLE_SCREEN);
++        mH.sendEmptyMessageDelayed(H.ENABLE_SCREEN,
++                Math.min(POWERPHONE_AUDIO_BOOT_POLL_MS, remaining));
++        return true;
++    }
++
+     private void performEnableScreen() {
+         synchronized (mGlobalLock) {
+             ProtoLog.i(WM_DEBUG_BOOT, "performEnableScreen: mDisplayEnabled=%b"
+@@ -4346,6 +4424,12 @@ public class WindowManagerService extends IWindowManager.Stub
+                 return;
+             }
+ 
++            // Keep this before bootanim.exit and the mForceDisplayEnabled fallback: otherwise
++            // the stock timeout would enable input behind the still-visible boot animation.
++            if (shouldWaitForPowerphoneAudioBootLocked()) {
++                return;
++            }
++
+             if (!mShowingBootMessages && !mPolicy.canDismissBootAnimation()) {
+                 return;
+             }

@@ -1,0 +1,38 @@
+From: PowerPhone research platform <powerphone@csr460.com>
+Subject: [PATCH] Retain refill headroom during normal mixer idle silence
+
+AudioFlinger MixerThread keeps sending zero buffers before its three-second
+standby, sleeping for half the advertised HAL buffer duration between idle
+writes. A 7680-frame/40 ms FMQ caused a 20 ms sleep against the entire
+3840-frame/20 ms physical ALSA ring, producing a real EPIPE just after track
+stop. Advertise 3840 framework frames so idle sleeps 10 ms, retaining 10 ms
+refill margin. Physical 192x20/full3840 geometry and every active EPIPE check
+remain unchanged. No capture or framework source changes.
+
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -76,7 +76,9 @@
+ constexpr size_t kPlaybackAlsaBufferFrames = 3840;
+ constexpr size_t kPlaybackAlsaStartThresholdFrames = kPlaybackAlsaBufferFrames;
+ constexpr size_t kCaptureFrameworkBufferFrames = 1920;
+-constexpr size_t kPlaybackFrameworkBufferFrames = 7680;
++// MixerThread sleeps for half this duration while feeding idle silence.
++// 40 ms advertised a 20 ms sleep: the entire physical ring, causing EPIPE.
++constexpr size_t kPlaybackFrameworkBufferFrames = kPlaybackAlsaBufferFrames;
+ constexpr uint32_t kPlaybackSecondWriteEfaultRetries = 32;
+ constexpr uint32_t kPlaybackSecondWriteEfaultRetrySleepUs = 1000;
+ constexpr int kPlaybackRtPriority = 90;
+@@ -1938,9 +1940,10 @@
+         return ndk::ScopedAStatus::ok();
+     }
+     if (sampleRateHz == kRate && exactOutput) {
+-        // Aggregate two 20 ms ALSA rings into one 40 ms framework transaction.
+-        // This gives the HAL worker scheduling margin while transfer() still
+-        // submits 192-frame PCM0,D5 period writes into its 20 ms ALSA ring.
++        // Match the 20 ms ALSA ring. MixerThread's idle silence sleep is half
++        // this advertised duration, leaving 10 ms to refill instead of
++        // sleeping the whole ring empty before pause/standby is requested.
++        // transfer() still submits native 192-frame/1 ms PCM0,D5 writes.
+         *bufferSizeFrames = kPlaybackFrameworkBufferFrames;
+         return ndk::ScopedAStatus::ok();
+     }

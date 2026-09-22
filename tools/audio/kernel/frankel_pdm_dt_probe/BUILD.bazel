@@ -1,0 +1,11 @@
+load("@kleaf//build/kernel/kleaf:kernel.bzl", "ddk_module")
+
+package(default_visibility = ["//visibility:public"])
+
+ddk_module(
+    name = "frankel_pdm_dt_probe",
+    deps = ["@kleaf//common:all_headers_aarch64"],
+    srcs = ["frankel_pdm_dt_probe.c"],
+    out = "frankel_pdm_dt_probe.ko",
+    kernel_build = "@gki_prebuilts//kernel_aarch64",
+)

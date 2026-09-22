@@ -1,0 +1,5 @@
+/vendor/bin/frankel_aoc_d10_patch u:object_r:frankel_powerphone_d10_bootstrap_exec:s0
+/vendor/bin/frankel_aoc_speaker_patch u:object_r:frankel_powerphone_d10_bootstrap_exec:s0
+/vendor/bin/frankel_powerphone_d10_bootstrap u:object_r:frankel_powerphone_d10_bootstrap_exec:s0
+/dev/acd-factory_diag u:object_r:aoc_device:s0
+/data/vendor/powerphone(/.*)? u:object_r:powerphone_vendor_data_file:s0

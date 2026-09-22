@@ -18,12 +18,15 @@ source "$project_root/scripts/lib/host-toolchain.sh"
 # AOSP supplies its own JDK, Python, Make, Clang, Ninja, and most Android image
 # utilities as prebuilts; host packages below cover the remaining dependencies.
 packages=(
+  alsa-utils
   android-sdk-libsparse-utils
+  binutils
   bison
   brotli
   build-essential
   ca-certificates
   ccache
+  cpio
   curl
   device-tree-compiler
   diffutils
@@ -37,6 +40,7 @@ packages=(
   gnupg
   gperf
   jq
+  kmod
   lib32z1-dev
   libc6-dev-i386
   libgl1-mesa-dev
@@ -48,7 +52,12 @@ packages=(
   pkgconf
   protobuf-compiler
   python3
+  python-is-python3
+  python3-numpy
   python3-protobuf
+  python3-scipy
+  python3-matplotlib
+  libsndfile1
   repo
   rsync
   shellcheck

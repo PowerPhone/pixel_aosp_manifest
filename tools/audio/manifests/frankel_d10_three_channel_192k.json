@@ -1,0 +1,74 @@
+{
+  "profile": "frankel-d10-three-channel192-raw-s16-experimental-v4-raw-enable",
+  "status": "Four real three-channel measurements completed on 2026-09-16; see docs/frankel-three-mic-192k.md for startup transients and weak-channel phase limits. Requires the extended RAW kernel bound, exclusive RAW D10, microphone list0,1,2, spatial processing off, native enum7 and current22-site mono192 base. Both present and missing RAW three-channel lanes are S16-packed. Unused normal-AP destination2 is skipped for Three/native192 before any bank access; other destinations retain S32. RAW queued command112 admits channels1..3, retaining zero/4+ rejection. Not a default multi-client or Android API profile. Supersedes v3 and unsafe v2.",
+  "patches": [
+    {
+      "name": "raw_enable_bound",
+      "address": "0x403da908",
+      "before_hex": "bf286a140a008413",
+      "after_hex": "bf386a140a008413"
+    },
+    {
+      "name": "producer_body",
+      "address": "0x403baa98",
+      "before_hex": "fcc191815e9599ea9ec9de022deedfc89e41aa300a774e21b6050961a221128e022844d7607f1046050a50861742211b2202969d0a9c",
+      "after_hex": "22212666322666a323604620c06c20f05a11505bc022a00676870b32160132550040668052c50622a00c8611003e9338599ac9c60a00"
+    },
+    {
+      "name": "direct_body",
+      "address": "0x403db6c2",
+      "before_hex": "ad0725b2003e41a00208835aa7bd043e41a88e0f9380cf63811957e008007f1c661034088413c023112e202b88d2d0769310280432c21f2032b33025212e14a1110221bf0a550839048413280440b42032c21f2032b330252122640022240152c5ffc2c21f20c2b3c025212264012e64a41301616eed3a8b0f21de8d784897c7eea529d597953f424d03ef483e173e7ba92c02614e5bad2e0821683b5ee23e2c01614e2ba88802c75ee636",
+      "after_hex": "000022a52420378042a12076840b221a00225300a2ca0232c302222106322107a2220fb22300c2a240222a0022220ee0020082a003c67601663502c64cfe5ed1a5950db786c5fd0000000eab3b403aab3b4022212666322066a31df02a11204bc022a006e0303176870532540042c40622a00c51f5ffa0050030232051f4ffa0050030aa3b4021aa3b4022070066221166a30e22210e220290667205c1faffa00c00220700c1f7ffa00c00"
+    },
+    {
+      "name": "near_bridges",
+      "address": "0x403baa84",
+      "before_hex": "509808013884133f169218cdec80180613004e94",
+      "after_hex": "14b73d404cb73d4021feffa0020021fdffa00200"
+    },
+    {
+      "name": "destination_hook",
+      "address": "0x403baa2d",
+      "before_hex": "220700",
+      "after_hex": "461800"
+    },
+    {
+      "name": "main_return_hook",
+      "address": "0x403dae1a",
+      "before_hex": "5ed1a5950db7",
+      "after_hex": "063702f02000"
+    },
+    {
+      "name": "producer_hook",
+      "address": "0x403baaf4",
+      "before_hex": "3e9338599ac9",
+      "after_hex": "06e8fff02000"
+    },
+    {
+      "name": "missing_hook",
+      "address": "0x403bab37",
+      "before_hex": "302320",
+      "after_hex": "46d4ff"
+    },
+    {
+      "name": "stage_gate",
+      "address": "0x403db6ba",
+      "before_hex": "7f0a241c3e088413",
+      "after_hex": "d851263604463500"
+    }
+  ],
+  "guards": [
+    {
+      "address": "0x403baad5",
+      "expected_hex": "9e61b4870461fe61ae010381ed04"
+    },
+    {
+      "address": "0x403bab0c",
+      "expected_hex": "6d04ae2a200706613d024bbb3f5cae1305844317"
+    },
+    {
+      "address": "0x403dbcd6",
+      "expected_hex": "4e1730a20fb7ae04b6110985"
+    }
+  ]
+}

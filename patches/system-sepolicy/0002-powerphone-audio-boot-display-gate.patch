@@ -1,0 +1,54 @@
+Subject: [PATCH] Label system-owned PowerPhone audio bootstrap bridge
+
+diff --git a/private/property.te b/private/property.te
+index 59d8f9f31..4253afba0 100644
+--- a/private/property.te
++++ b/private/property.te
+@@ -55,6 +55,7 @@ system_internal_prop(odsign_prop)
+ system_internal_prop(misctrl_prop)
+ system_internal_prop(perf_drop_caches_prop)
+ system_internal_prop(pm_prop)
++system_internal_prop(powerphone_audio_boot_prop)
+ system_internal_prop(prefetch_service_prop)
+ system_internal_prop(profcollectd_enabled_prop)
+ system_internal_prop(profcollectd_node_id_prop)
+diff --git a/private/property_contexts b/private/property_contexts
+index 0bd43ef9d..54e9c5d3a 100644
+--- a/private/property_contexts
++++ b/private/property_contexts
+@@ -1364,6 +1364,7 @@ ro.property_service.async_persist_writes u:object_r:build_config_prop:s0 exact b
+ ro.vendor.redirect_socket_calls u:object_r:vendor_socket_hook_prop:s0 exact bool
+ 
+ service.bootanim.exit       u:object_r:bootanim_system_prop:s0 exact int
++sys.powerphone.audio_boot   u:object_r:powerphone_audio_boot_prop:s0 exact enum pending ready failed
+ service.bootanim.progress   u:object_r:bootanim_system_prop:s0 exact int
+ persist.bootanim.color1     u:object_r:bootanim_system_prop:s0 exact int
+ persist.bootanim.color2     u:object_r:bootanim_system_prop:s0 exact int
+diff --git a/private/shell.te b/private/shell.te
+index 5d3cabc39..2a682fbb5 100644
+--- a/private/shell.te
++++ b/private/shell.te
+@@ -222,6 +222,9 @@ get_prop(shell, bootloader_boot_reason_prop)
+ get_prop(shell, last_boot_reason_prop)
+ get_prop(shell, system_boot_reason_prop)
+ 
++# Read the single platform audio-boot bridge without exposing vendor internals.
++get_prop(shell, powerphone_audio_boot_prop)
++
+ # Allow shell to execute the remote key provisioning factory tool
+ binder_call(shell, hal_keymint)
+ # Allow shell to run the AVF RKP HAL during the execution of the remote key
+diff --git a/private/system_server.te b/private/system_server.te
+index 355e5b9a2..44734734c 100644
+--- a/private/system_server.te
++++ b/private/system_server.te
+@@ -819,6 +819,9 @@ allow system_server server_configurable_flags_data_file:dir r_dir_perms;
+ allow system_server server_configurable_flags_data_file:file r_file_perms;
+ 
+ # Property Service write
++# Read the platform-init bridge, not vendor-internal audio readiness properties.
++get_prop(system_server, powerphone_audio_boot_prop)
++
+ set_prop(system_server, system_prop)
+ set_prop(system_server, bootanim_system_prop)
+ set_prop(system_server, bluetooth_prop)

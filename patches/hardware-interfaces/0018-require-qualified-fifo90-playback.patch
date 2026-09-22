@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Fri, 4 Sep 2026 11:20:00 +0000
+Subject: [PATCH] audio: require qualified FIFO/90 playback
+
+The direct PCM0,D0 hardware trial sustained 60 seconds at S32_LE/stereo/
+192 kHz without an xrun only when tinyplay's producer ran at SCHED_FIFO
+priority 90.  Its otherwise identical SCHED_OTHER trial transferred every
+byte but recovered an EPIPE.  The AIDL worker inherited SCHED_OTHER and the
+first real AudioTrack run likewise recovered an EPIPE after 5,760 frames,
+putting the stream into permanent ERROR; later apparently fast writes were
+only AudioFlinger discarding client frames through that failed persistent
+output.
+
+Require the hardware-qualified FIFO/90 policy before playback acquires or
+binds the asynchronous AoC route, and fail closed if the promotion is not
+available.  Raise the service RT-priority limit accordingly.  Keep capture
+at its independently qualified FIFO/3 setting and preserve all existing
+write-status and cumulative-xrun checks.
+---
+ audio/aidl/default/powerphone/Powerphone.cpp                | 24 +++++++++++++++++++++---
+ .../android.hardware.audio.service-aidl.powerphone.rc        |  2 +-
+ 2 files changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -73,6 +73,7 @@ constexpr size_t kPlaybackAlsaPeriodFrames = 480;
+ constexpr size_t kPlaybackAlsaBufferFrames = 1920;
+ constexpr size_t kCaptureFrameworkBufferFrames = 1920;
+ constexpr size_t kPlaybackFrameworkBufferFrames = 7680;
++constexpr int kPlaybackRtPriority = 90;
+ constexpr int32_t kPlaybackLatencyMs =
+         (kPlaybackAlsaBufferFrames * 1000 + kRate - 1) / kRate;
+ constexpr char kCaptureReadyProperty[] = "vendor.powerphone.pdm.ready";
+@@ -1070,9 +1071,26 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+ }
+ 
+ ::android::status_t StreamPowerphone::start() {
+-    // Capture was qualified with the blocking worker at FIFO/3.  Do not apply
+-    // that policy to playback: clean-device PCM0,D0 trials showed FIFO/3
+-    // stalls and fails earlier than the otherwise identical SCHED_OTHER path.
++    // The direct PCM0,D0 hardware trial completed 60 seconds without an xrun
++    // only when its producer ran at FIFO/90; the otherwise identical
++    // SCHED_OTHER run recovered one EPIPE. Require that proven scheduling
++    // contract before playback can own or bind the asynchronous AoC route.
++    // A lower priority is not a safe fallback: the legacy transport exposes
++    // recovered xruns, and every such discontinuity is intentionally fatal.
++    if (!mIsInput) {
++        sched_param schedulerParameters{};
++        schedulerParameters.sched_priority = kPlaybackRtPriority;
++        if (sched_setscheduler(0, SCHED_FIFO | SCHED_RESET_ON_FORK,
++                               &schedulerParameters) != 0) {
++            const int schedulerErrno = errno;
++            LOG(ERROR) << __func__ << ": refusing playback because the ALSA worker could not "
++                       << "enter SCHED_FIFO/" << kPlaybackRtPriority
++                       << ": errno=" << schedulerErrno;
++            return ::android::PERMISSION_DENIED;
++        }
++    }
++
++    // Capture was independently qualified with its blocking worker at FIFO/3.
+     if (mIsInput) {
+         sched_param schedulerParameters{};
+         schedulerParameters.sched_priority = 3;
+diff --git a/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc b/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc
+--- a/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc
++++ b/audio/aidl/default/powerphone/android.hardware.audio.service-aidl.powerphone.rc
+@@ -3,7 +3,7 @@ service vendor.audio-hal-powerphone /vendor/bin/hw/android.hardware.audio.servic
+     user audioserver
+     group audio
+     capabilities BLOCK_SUSPEND SYS_NICE
+-    rlimit rtprio 10 10
++    rlimit rtprio 90 90
+     ioprio rt 4
+     task_profiles ProcessCapacityHigh HighPerformance
+ 
+-- 
+2.43.0

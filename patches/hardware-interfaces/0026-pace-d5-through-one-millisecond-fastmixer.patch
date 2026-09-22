@@ -1,0 +1,133 @@
+From: PowerPhone research platform <powerphone@csr460.com>
+Subject: [PATCH] Pace native D5 through AudioFlinger's existing FastMixer
+
+The 0025 FMQ3840 candidate preserved clean active 192 kHz output but real
+fmq20-aaudio-bottom-12037-20260911 hardware logs still report idle EPIPE
+1.629 seconds after the tone ended, before three-second standby. Retain
+that candidate's history and replace normal-MixerThread refill timing with
+the existing static FastMixer path: HAL192 is smaller than normal3840.
+No FAST output flag or framework source modification is required.
+
+Advertise a 192-frame FMQ and accept complete native192-frame quanta.
+The independently qualified ALSA192x20 ring and full3840 startup threshold
+are unchanged. Count accepted startup frames across FMQ calls so the
+existing bounded second-WRITEI EFAULT retry still applies exactly at
+absolute frame192. Positive short writes remain handled by the facade;
+active EPIPE remains terminal. Capture and lifecycle code are untouched.
+
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -76,9 +76,9 @@
+ constexpr size_t kPlaybackAlsaBufferFrames = 3840;
+ constexpr size_t kPlaybackAlsaStartThresholdFrames = kPlaybackAlsaBufferFrames;
+ constexpr size_t kCaptureFrameworkBufferFrames = 1920;
+-// MixerThread sleeps for half this duration while feeding idle silence.
+-// 40 ms advertised a 20 ms sleep: the entire physical ring, causing EPIPE.
+-constexpr size_t kPlaybackFrameworkBufferFrames = kPlaybackAlsaBufferFrames;
++// A 1 ms HAL burst selects AudioFlinger's existing static FastMixer beneath
++// its 20 ms normal mixer. The independent physical ring remains 20 ms.
++constexpr size_t kPlaybackFrameworkBufferFrames = kPlaybackAlsaPeriodFrames;
+ constexpr uint32_t kPlaybackSecondWriteEfaultRetries = 32;
+ constexpr uint32_t kPlaybackSecondWriteEfaultRetrySleepUs = 1000;
+ constexpr int kPlaybackRtPriority = 90;
+@@ -1485,7 +1485,7 @@
+             playbackPcm = nullptr;
+             mPlaybackOpenPending = false;
+             mPlaybackXrunsBaseline.store(initialXruns, std::memory_order_release);
+-            mPlaybackSecondWriteRetryPending.store(true, std::memory_order_release);
++            mPlaybackStartupAcceptedFrames.store(0, std::memory_order_release);
+         }
+     }
+     if (!ready || !ownsRoute) {
+@@ -1661,12 +1661,11 @@
+         *latencyMs = kPlaybackLatencyMs;
+         return ::android::OK;
+     }
+-    // Reject a partial/overflowing client burst before the deferred route is
+-    // bound. Once EP6 is active, AoC expects the first D5 transaction to be a
+-    // complete 3,840-frame ring; opening on an invalid burst can strand the
+-    // asynchronous sink without enough producer headroom.
++    // Reject a partial quantum/overflowing client burst before binding EP6.
++    // The full 3,840-frame ALSA start threshold accumulates across successive
++    // 192-frame FastMixer transactions; it does not require one full-ring FMQ.
+     if (buffer == nullptr || mFrameSizeBytes != 2 * sizeof(int32_t) ||
+-        frameCount % kPlaybackAlsaBufferFrames != 0 ||
++        frameCount % kPlaybackAlsaPeriodFrames != 0 ||
+         frameCount > std::numeric_limits<size_t>::max() / mFrameSizeBytes) {
+         LOG(ERROR) << __func__ << ": refusing invalid playback burst before open: frames="
+                    << frameCount << ", frame_size=" << mFrameSizeBytes;
+@@ -1753,16 +1752,18 @@
+     // bounded second-write EFAULT retry without re-preparing the active PCM;
+     // all EPIPEs remain terminal. The facade handles positive short writes
+     // by advancing only the accepted frames and submitting their suffix.
+-    const bool secondWriteRetryPending =
+-            mPlaybackSecondWriteRetryPending.load(std::memory_order_acquire);
+     size_t transferredFrames = 0;
+     while (transferredFrames < frameCount) {
+         const size_t chunkFrames =
+                 std::min(kPlaybackAlsaPeriodFrames, frameCount - transferredFrames);
+         auto* chunk = static_cast<uint8_t*>(buffer) + transferredFrames * mFrameSizeBytes;
+         const bool oversized = chunkFrames > std::numeric_limits<uint32_t>::max();
+-        const bool retryStartupSecondWrite = secondWriteRetryPending &&
+-                transferredFrames == kPlaybackAlsaPeriodFrames;
++        // Count accepted frames across FMQ calls: FastMixer submits one
++        // quantum per call, so a call-local offset cannot identify WRITEI #2.
++        const size_t startupAcceptedFrames =
++                mPlaybackStartupAcceptedFrames.load(std::memory_order_acquire);
++        const bool retryStartupSecondWrite =
++                startupAcceptedFrames == kPlaybackAlsaPeriodFrames;
+         uint32_t efaultRetries = 0;
+         const int writeStatus =
+                 oversized ? -1
+@@ -1792,9 +1793,11 @@
+             LOG(INFO) << __func__ << ": startup second WRITEI resumed after "
+                       << efaultRetries << " EFAULT retries";
+         }
+-        if (retryStartupSecondWrite) {
+-            mPlaybackSecondWriteRetryPending.store(false, std::memory_order_release);
+-        }
++        // The facade returns success only after accepting the entire chunk,
++        // including any positive short-write suffix. Saturate after prefill.
++        mPlaybackStartupAcceptedFrames.store(
++                std::min(kPlaybackAlsaBufferFrames, startupAcceptedFrames + chunkFrames),
++                std::memory_order_release);
+         transferredFrames += chunkFrames;
+     }
+     *actualFrameCount = transferredFrames;
+@@ -1854,7 +1857,7 @@
+         mLegacyPlaybackPcm = nullptr;
+     }
+     mPlaybackXrunsBaseline.store(0, std::memory_order_release);
+-    mPlaybackSecondWriteRetryPending.store(false, std::memory_order_release);
++    mPlaybackStartupAcceptedFrames.store(0, std::memory_order_release);
+     mPlaybackOpenPending = false;
+     if (mPlaybackRoute != nullptr) {
+         mPlaybackRoute->cleanup();
+@@ -1924,10 +1927,10 @@
+         return ndk::ScopedAStatus::ok();
+     }
+     if (sampleRateHz == kRate && exactOutput) {
+-        // Match the 20 ms ALSA ring. MixerThread's idle silence sleep is half
+-        // this advertised duration, leaving 10 ms to refill instead of
+-        // sleeping the whole ring empty before pause/standby is requested.
+-        // transfer() still submits native 192-frame/1 ms PCM0,D5 writes.
++        // HAL 1 ms < normal mixer 20 ms selects the existing static FastMixer
++        // without a FAST output flag. It paces active audio and idle silence
++        // through blocking 192-frame writes, independently of the unchanged
++        // 192x20 ALSA ring and its full 3,840-frame startup threshold.
+         *bufferSizeFrames = kPlaybackFrameworkBufferFrames;
+         return ndk::ScopedAStatus::ok();
+     }
+--- a/audio/aidl/default/powerphone/Powerphone.h
++++ b/audio/aidl/default/powerphone/Powerphone.h
+@@ -80,7 +80,8 @@
+     bool mPlaybackOpenPending GUARDED_BY(mLock) = false;
+     struct powerphone_legacy_pcm* mLegacyPlaybackPcm GUARDED_BY(mLock) = nullptr;
+     std::atomic<int> mPlaybackXrunsBaseline{0};
+-    std::atomic<bool> mPlaybackSecondWriteRetryPending{false};
++    // Accepted startup frames across FMQ calls, saturated after one ring.
++    std::atomic<size_t> mPlaybackStartupAcceptedFrames{0};
+ };
+ 
+ class StreamInPowerphone final : public StreamIn, public StreamPowerphone {
+

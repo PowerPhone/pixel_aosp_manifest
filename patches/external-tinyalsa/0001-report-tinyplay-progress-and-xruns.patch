@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Fri, 4 Sep 2026 05:15:00 +0000
+Subject: [PATCH] tinyplay: report byte progress and playback xruns
+
+Make direct-hardware playback trials report the exact byte offset of a failed
+write, the underlying PCM error, and every cumulative xrun transition.  Print
+the same counters on normal completion so a nominally successful run cannot
+hide an internally recovered underrun.
+---
+ tinyplay.c | 20 +++++++++++++++++---
+ 1 file changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/tinyplay.c b/tinyplay.c
+index c5bb71f..4d87af9 100644
+--- a/tinyplay.c
++++ b/tinyplay.c
+@@ -219,6 +219,8 @@ void play_sample(FILE *file, unsigned int card, unsigned int device, unsigned in
+     struct pcm *pcm;
+     char *buffer;
+     unsigned int size, read_sz;
++    uint64_t played_sz = 0;
++    int last_xruns = 0;
+     int num_read;
+ 
+     memset(&config, 0, sizeof(config));
+@@ -265,14 +267,27 @@ void play_sample(FILE *file, unsigned int card, unsigned int device, unsigned in
+         read_sz = size < data_sz ? size : data_sz;
+         num_read = fread(buffer, 1, read_sz, file);
+         if (num_read > 0) {
+-            if (pcm_write(pcm, buffer, num_read)) {
+-                fprintf(stderr, "Error playing sample\n");
++            const int write_status = pcm_write(pcm, buffer, num_read);
++            if (write_status != 0) {
++                fprintf(stderr,
++                        "Error playing sample after %llu bytes: status=%d, pcm_error=%s\n",
++                        (unsigned long long)played_sz, write_status, pcm_get_error(pcm));
+                 break;
+             }
+             data_sz -= num_read;
++            played_sz += num_read;
++            const int xruns = pcm_get_xruns(pcm);
++            if (xruns != last_xruns) {
++                fprintf(stderr, "Playback xrun count changed %d -> %d after %llu bytes\n",
++                        last_xruns, xruns, (unsigned long long)played_sz);
++                last_xruns = xruns;
++            }
+         }
+     } while (!closing && num_read > 0 && data_sz > 0);
+ 
++    printf("Played %llu bytes with %d xrun(s). Remains %u bytes.\n",
++           (unsigned long long)played_sz, pcm_get_xruns(pcm), data_sz);
++
+     if (!closing) {
+         // drain the data in the ALSA ring buffer before closing the PCM device
+         unsigned long sleep_time_in_us =
+@@ -284,4 +299,3 @@ void play_sample(FILE *file, unsigned int card, unsigned int device, unsigned in
+     free(buffer);
+     pcm_close(pcm);
+ }
+-
+-- 
+2.43.0

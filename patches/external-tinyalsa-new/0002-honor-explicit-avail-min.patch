@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Thu, 4 Sep 2026 07:20:00 +0000
+Subject: [PATCH] tinyalsa: honor an explicit PCM avail-min
+
+The public pcm_config carries an avail_min override, but the v2 RW setup
+always replaced it with one complete period. Honor a nonzero caller value
+while preserving the period-sized default for every existing zero-valued
+configuration.
+---
+diff --git a/src/pcm.c b/src/pcm.c
+index de22098..399e90a 100644
+--- a/src/pcm.c
++++ b/src/pcm.c
+@@ -507,7 +507,11 @@ int pcm_set_config(struct pcm *pcm, const struct pcm_config *config)
+     memset(&sparams, 0, sizeof(sparams));
+     sparams.tstamp_mode = SNDRV_PCM_TSTAMP_ENABLE;
+     sparams.period_step = 1;
+-    sparams.avail_min = config->period_size;
++    /* Honor the public override.  PowerPhone uses the legacy tinyalsa RW
++     * value of one frame; retain tinyalsa v2's period-sized default for every
++     * caller that leaves this field zero. */
++    pcm->config.avail_min = sparams.avail_min =
++        config->avail_min ? config->avail_min : config->period_size;
+ 
+     if (!config->start_threshold) {
+         if (pcm->flags & PCM_IN)
+-- 
+2.43.0
+

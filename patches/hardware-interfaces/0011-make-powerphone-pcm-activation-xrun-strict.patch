@@ -1,0 +1,363 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PowerPhone Build <powerphone@example.invalid>
+Date: Thu, 4 Sep 2026 02:40:00 +0000
+Subject: [PATCH] audio: make PowerPhone PCM activation xrun-strict
+
+Zero-initialize ALSA profiles and PCM configurations so tinyalsa never consumes
+indeterminate software-threshold fields. Bind each timing-sensitive AoC route
+with the final mixer ioctl before opening PCM, and defer full ownership audits
+until PCM has closed.
+
+Keep the 40 ms framework queue decoupled from PCM0,D0's fixed 480x4 hardware
+buffer, but submit one 480-frame period at a time. Treat any tinyalsa xrun,
+including an internally recovered one, as an integrity failure and report both
+the xrun transition and PCM error.
+---
+diff --git a/audio/aidl/default/alsa/UtilsAlsa.cpp b/audio/aidl/default/alsa/UtilsAlsa.cpp
+--- a/audio/aidl/default/alsa/UtilsAlsa.cpp
++++ b/audio/aidl/default/alsa/UtilsAlsa.cpp
+@@ -44,7 +44,7 @@
+ DeviceProxy::DeviceProxy() : mProfile(nullptr), mProxy(nullptr, alsaProxyDeleter) {}
+ 
+ DeviceProxy::DeviceProxy(const DeviceProfile& deviceProfile)
+-    : mProfile(new alsa_device_profile), mProxy(new alsa_device_proxy, alsaProxyDeleter) {
++    : mProfile(new alsa_device_profile{}), mProxy(new alsa_device_proxy, alsaProxyDeleter) {
+     profile_init(mProfile.get(), deviceProfile.direction);
+     mProfile->card = deviceProfile.card;
+     mProfile->device = deviceProfile.device;
+@@ -374,7 +374,7 @@
+ }
+ 
+ std::optional<struct pcm_config> getPcmConfig(const StreamContext& context, bool isInput) {
+-    struct pcm_config config;
++    struct pcm_config config{};
+     config.channels = alsa::getChannelCountFromChannelMask(context.getChannelLayout(), isInput);
+     if (config.channels == 0) {
+         LOG(ERROR) << __func__ << ": invalid channel=" << context.getChannelLayout().toString();
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -63,6 +63,7 @@
+ constexpr int32_t kPlaybackCard = 0;
+ constexpr int32_t kPlaybackDevice = 0;
+ constexpr int32_t kRate = 192000;
++constexpr size_t kPlaybackAlsaPeriodFrames = 480;
+ constexpr size_t kPlaybackAlsaBufferFrames = 1920;
+ constexpr char kCaptureReadyProperty[] = "vendor.powerphone.pdm.ready";
+ constexpr char kSpeakerReadyProperty[] = "vendor.powerphone.aoc_speaker_192k.ready";
+@@ -286,12 +287,19 @@
+         }
+ 
+         mRouteTouched = true;
+-        if (!setValue(kCaptureRoute, 1)) {
++        // Binding the AoC source starts the timing-sensitive route. Make this
++        // the final mixer operation before PCM open; the successful ioctl is
++        // the activation result, and ownership is audited only after PCM close.
++        if (!setFinalRouteValue(kCaptureRoute, 1)) {
+             cleanup();
+             return false;
+         }
+         mSetupComplete = true;
+-        return verifyOwnership();
++        return true;
++    }
++
++    bool isActive() const {
++        return mMixer != nullptr && mSetupComplete && !mOwnershipLost;
+     }
+ 
+     bool verifyOwnership() {
+@@ -398,6 +406,15 @@
+         return true;
+     }
+ 
++    bool setFinalRouteValue(const std::string& name, int value) {
++        mixer_ctl* ctl = control(name, 1);
++        if (ctl == nullptr || mixer_ctl_set_value(ctl, 0, value) != 0) {
++            LOG(ERROR) << "failed to activate capture mixer control " << name << '=' << value;
++            return false;
++        }
++        return true;
++    }
++
+     bool setEnum(const std::string& name, const char* value) {
+         mixer_ctl* ctl = control(name, 1);
+         if (ctl == nullptr || mixer_ctl_set_enum_by_string(ctl, value) != 0 ||
+@@ -546,11 +563,11 @@
+         }
+ 
+         // From this point onward an error path must force the route and both
+-        // amplifiers off. Enable the amplifier(s) only after every bus/codec
+-        // setting and the proven PCM0,D0 EP1/source-0 route have succeeded.
++        // amplifiers off. Prepare every codec and power control before binding
++        // EP1 so that route activation is the final mixer operation before PCM
++        // open, matching the live-qualified tinyplay sequence.
+         mPowerControlsTouched = true;
+-        if (!setEnum("Ultrasonic Mode", "In Band") || !setEnum("R Ultrasonic Mode", "In Band") ||
+-            !setValue("TDM_0_RX Mixer EP1", 1)) {
++        if (!setEnum("Ultrasonic Mode", "In Band") || !setEnum("R Ultrasonic Mode", "In Band")) {
+             cleanup();
+             return false;
+         }
+@@ -561,8 +578,16 @@
+             cleanup();
+             return false;
+         }
++        if (!setFinalRouteValue("TDM_0_RX Mixer EP1", 1)) {
++            cleanup();
++            return false;
++        }
+         mSetupComplete = true;
+-        return verifyOwnership();
++        return true;
++    }
++
++    bool isActive() const {
++        return mMixer != nullptr && mSetupComplete && !mOwnershipLost;
+     }
+ 
+     bool verifyOwnership() {
+@@ -819,6 +844,18 @@
+         return true;
+     }
+ 
++    bool setFinalRouteValue(const std::string& name, int value) {
++        mixer_ctl* ctl = control(name);
++        if (ctl == nullptr || mixer_ctl_set_value(ctl, 0, value) != 0) {
++            LOG(ERROR) << "failed to activate mixer control " << name << " to " << value;
++            return false;
++        }
++        // Deliberately do not read the control back here. EP1 binding starts
++        // the AoC timing window, and any subsequent mixer ioctl can starve D0.
++        rememberExpected(name, value);
++        return true;
++    }
++
+     bool setEnum(const std::string& name, const char* value) {
+         mixer_ctl* ctl = control(name);
+         if (ctl == nullptr || mixer_ctl_set_enum_by_string(ctl, value) != 0) {
+@@ -1025,7 +1062,7 @@
+             if (mCaptureRoute != nullptr) {
+                 resumedRoute = true;
+                 resumedReady = ::android::base::GetBoolProperty(kCaptureReadyProperty, false);
+-                resumedOwnership = mCaptureRoute->verifyOwnership();
++                resumedOwnership = mCaptureRoute->isActive();
+             } else if (!mCaptureEndpoint.has_value() || mDeviceProfiles.size() != 1) {
+                 LOG(ERROR) << __func__ << ": no unique PowerPhone input is connected";
+                 return ::android::NO_INIT;
+@@ -1057,6 +1094,9 @@
+         const ::android::status_t status = StreamAlsa::start();
+         const bool exactGeometry =
+                 mAlsaDeviceProxies.size() == 1 && mAlsaDeviceProxies.front().get() != nullptr &&
++                proxy_get_sample_rate(mAlsaDeviceProxies.front().get()) == kRate &&
++                proxy_get_format(mAlsaDeviceProxies.front().get()) == PCM_FORMAT_S16_LE &&
++                proxy_get_channel_count(mAlsaDeviceProxies.front().get()) == 1 &&
+                 proxy_get_period_size(mAlsaDeviceProxies.front().get()) == 1920 &&
+                 mAlsaDeviceProxies.front().get()->alsa_config.period_count == 4;
+         if (status != ::android::OK || !exactGeometry) {
+@@ -1072,7 +1112,7 @@
+         bool ownsRoute = false;
+         {
+             std::lock_guard lock(mLock);
+-            ownsRoute = mCaptureRoute != nullptr && mCaptureRoute->verifyOwnership();
++            ownsRoute = mCaptureRoute != nullptr && mCaptureRoute->isActive();
+         }
+         if (!ready || !ownsRoute) {
+             LOG(ERROR) << __func__ << ": capture state changed while opening PCM: "
+@@ -1088,13 +1128,14 @@
+     bool resumedRoute = false;
+     bool resumedReady = false;
+     bool resumedOwnership = false;
++    std::vector<alsa::DeviceProfile> profiles;
+     {
+         std::lock_guard lock(mLock);
+         if (mPlaybackRoute != nullptr) {
+             // Resume after pause; the PCM proxy and owned route remain active.
+             resumedRoute = true;
+             resumedReady = ::android::base::GetBoolProperty(kSpeakerReadyProperty, false);
+-            resumedOwnership = mPlaybackRoute->verifyOwnership();
++            resumedOwnership = mPlaybackRoute->isActive();
+         } else if (!mPlaybackEndpoint.has_value() || mDeviceProfiles.size() != 1) {
+             LOG(ERROR) << __func__ << ": no unique PowerPhone output is connected";
+             return ::android::NO_INIT;
+@@ -1105,8 +1146,13 @@
+         } else if (!acquirePlaybackLease(this)) {
+             LOG(ERROR) << __func__ << ": PCM 0,0 is already owned by another sidecar stream";
+             return ::android::WOULD_BLOCK;
++        } else if (!mConfig.has_value() || !mAlsaDeviceProxies.empty()) {
++            releasePlaybackLease(this);
++            LOG(ERROR) << __func__ << ": playback PCM state is not ready for a fresh open";
++            return ::android::NO_INIT;
+         } else {
+             mOwnsPlaybackLease = true;
++            profiles = mDeviceProfiles;
+             mPlaybackRoute = std::make_unique<PlaybackRoute>();
+             if (!mPlaybackRoute->configure(*mPlaybackEndpoint)) {
+                 cleanupPlaybackRouteLocked();
+@@ -1129,18 +1175,18 @@
+     // frontend ring. Open PCM0,D0 with the independently qualified 480x4 ALSA
+     // geometry, then feed it complete rings from transfer().
+     ::android::status_t status = ::android::NO_INIT;
+-    const std::vector<alsa::DeviceProfile> profiles = getDeviceProfiles();
+-    if (mAlsaDeviceProxies.empty() && profiles.size() == 1 && mConfig.has_value()) {
+-        alsa::DeviceProxy proxy = alsa::openProxyForAttachedDevice(
+-                profiles.front(), const_cast<struct pcm_config*>(&mConfig.value()),
+-                kPlaybackAlsaBufferFrames);
+-        if (proxy.get() != nullptr) {
+-            mAlsaDeviceProxies.push_back(std::move(proxy));
+-            status = ::android::OK;
+-        }
++    alsa::DeviceProxy proxy = alsa::openProxyForAttachedDevice(
++            profiles.front(), const_cast<struct pcm_config*>(&mConfig.value()),
++            kPlaybackAlsaBufferFrames);
++    if (proxy.get() != nullptr) {
++        mAlsaDeviceProxies.push_back(std::move(proxy));
++        status = ::android::OK;
+     }
+     const bool exactGeometry =
+             mAlsaDeviceProxies.size() == 1 && mAlsaDeviceProxies.front().get() != nullptr &&
++            proxy_get_sample_rate(mAlsaDeviceProxies.front().get()) == kRate &&
++            proxy_get_format(mAlsaDeviceProxies.front().get()) == PCM_FORMAT_S32_LE &&
++            proxy_get_channel_count(mAlsaDeviceProxies.front().get()) == 2 &&
+             proxy_get_period_size(mAlsaDeviceProxies.front().get()) == 480 &&
+             mAlsaDeviceProxies.front().get()->alsa_config.period_count == 4;
+     if (status != ::android::OK || !exactGeometry) {
+@@ -1156,7 +1202,7 @@
+     bool ownsRoute = false;
+     {
+         std::lock_guard lock(mLock);
+-        ownsRoute = mPlaybackRoute != nullptr && mPlaybackRoute->verifyOwnership();
++        ownsRoute = mPlaybackRoute != nullptr && mPlaybackRoute->isActive();
+     }
+     if (!ready || !ownsRoute) {
+         LOG(ERROR) << __func__ << ": speaker state changed while opening PCM: "
+@@ -1201,18 +1247,66 @@
+             *actualFrameCount = 0;
+             return ready ? ::android::INVALID_OPERATION : ::android::PERMISSION_DENIED;
+         }
+-        return StreamAlsa::transfer(buffer, frameCount, actualFrameCount, latencyMs);
++        if (mAlsaDeviceProxies.size() != 1 || mAlsaDeviceProxies.front().get() == nullptr ||
++            mAlsaDeviceProxies.front().get()->pcm == nullptr) {
++            LOG(ERROR) << __func__ << ": no unique opened capture device";
++            StreamAlsa::standby();
++            {
++                std::lock_guard lock(mLock);
++                cleanupCaptureRouteLocked();
++            }
++            *actualFrameCount = 0;
++            return ::android::NO_INIT;
++        }
++        alsa_device_proxy* captureProxy = mAlsaDeviceProxies.front().get();
++        const int xrunsBefore = pcm_get_xruns(captureProxy->pcm);
++        if (xrunsBefore != 0) {
++            const char* error = pcm_get_error(captureProxy->pcm);
++            LOG(ERROR) << __func__ << ": refusing capture after " << xrunsBefore
++                       << " xrun(s): pcm_error=" << (error == nullptr ? "<none>" : error);
++            StreamAlsa::standby();
++            {
++                std::lock_guard lock(mLock);
++                cleanupCaptureRouteLocked();
++            }
++            *actualFrameCount = 0;
++            return ::android::INVALID_OPERATION;
++        }
++        const ::android::status_t status =
++                StreamAlsa::transfer(buffer, frameCount, actualFrameCount, latencyMs);
++        const int xrunsAfter = pcm_get_xruns(captureProxy->pcm);
++        if (status != ::android::OK || xrunsAfter != xrunsBefore) {
++            const char* error = pcm_get_error(captureProxy->pcm);
++            LOG(ERROR) << __func__ << ": capture integrity failure: status=" << status
++                       << ", xruns=" << xrunsBefore << "->" << xrunsAfter
++                       << ", pcm_error=" << (error == nullptr ? "<none>" : error);
++            StreamAlsa::standby();
++            {
++                std::lock_guard lock(mLock);
++                cleanupCaptureRouteLocked();
++            }
++            *actualFrameCount = 0;
++            return status == ::android::OK ? ::android::INVALID_OPERATION : status;
++        }
++        return ::android::OK;
+     }
+-    if (mAlsaDeviceProxies.size() != 1 || mAlsaDeviceProxies.front().get() == nullptr) {
++    if (mAlsaDeviceProxies.size() != 1 || mAlsaDeviceProxies.front().get() == nullptr ||
++        mAlsaDeviceProxies.front().get()->pcm == nullptr) {
+         LOG(ERROR) << __func__ << ": no unique opened playback device";
++        StreamAlsa::standby();
++        {
++            std::lock_guard lock(mLock);
++            cleanupPlaybackRouteLocked();
++        }
++        *actualFrameCount = 0;
+         return ::android::NO_INIT;
+     }
+ 
+     // Mixer reads cross the ALSA control path and are not real-time safe on
+-    // Frankel. Full ownership is proved when the route starts and again before
+-    // cleanup mutates it; the transfer path only checks the in-process lease
+-    // and boot-local certificate. This mirrors the qualified tinyplay path,
+-    // which performs no mixer I/O while PCM0,D0 is running.
++    // Frankel. All passive ownership is proved before EP1 is bound and the
++    // complete state is audited after PCM close; the transfer path checks only
++    // the in-process lease and boot-local certificate. This mirrors the
++    // qualified tinyplay path, which performs no mixer I/O while PCM0,D0 runs.
+     const bool ready = ::android::base::GetBoolProperty(kSpeakerReadyProperty, false);
+     bool routeExists = false;
+     {
+@@ -1230,22 +1324,45 @@
+         *actualFrameCount = 0;
+         return ready ? ::android::INVALID_OPERATION : ::android::PERMISSION_DENIED;
+     }
++    alsa_device_proxy* playbackProxy = mAlsaDeviceProxies.front().get();
++    const int initialXruns = pcm_get_xruns(playbackProxy->pcm);
++    if (initialXruns != 0 || mFrameSizeBytes == 0 ||
++        frameCount > std::numeric_limits<size_t>::max() / mFrameSizeBytes) {
++        const char* error = pcm_get_error(playbackProxy->pcm);
++        LOG(ERROR) << __func__ << ": refusing invalid playback transfer: frames=" << frameCount
++                   << ", frame_size=" << mFrameSizeBytes << ", xruns=" << initialXruns
++                   << ", pcm_error=" << (error == nullptr ? "<none>" : error);
++        StreamAlsa::standby();
++        {
++            std::lock_guard lock(mLock);
++            cleanupPlaybackRouteLocked();
++        }
++        *actualFrameCount = 0;
++        return ::android::INVALID_OPERATION;
++    }
+     const size_t bytesToTransfer = frameCount * mFrameSizeBytes;
+     alsa::applyGain(buffer, mGain, bytesToTransfer, mConfig.value().format, mConfig->channels);
+-    // Feed one complete 480x4 AoC ring per blocking write. The 40 ms FMQ may
+-    // hand us several rings at once, but no mixer I/O occurs between chunks.
++    // Feed one 480-frame hardware period per blocking write. The 40 ms FMQ may
++    // hand us several periods at once, but no mixer I/O occurs between chunks.
+     size_t transferredFrames = 0;
+     while (transferredFrames < frameCount) {
+         const size_t chunkFrames =
+-                std::min(kPlaybackAlsaBufferFrames, frameCount - transferredFrames);
++                std::min(kPlaybackAlsaPeriodFrames, frameCount - transferredFrames);
+         const size_t chunkBytes = chunkFrames * mFrameSizeBytes;
+         auto* chunk = static_cast<uint8_t*>(buffer) + transferredFrames * mFrameSizeBytes;
+-        if (chunkBytes > std::numeric_limits<unsigned int>::max() ||
+-            proxy_write_with_retries(mAlsaDeviceProxies.front().get(), chunk,
+-                                     static_cast<unsigned int>(chunkBytes),
+-                                     mReadWriteRetries) != 0) {
+-            LOG(ERROR) << __func__ << ": PCM ring write failed after " << transferredFrames
+-                       << " frames";
++        const bool oversized = chunkBytes > std::numeric_limits<unsigned int>::max();
++        const int writeStatus =
++                oversized ? -1
++                          : proxy_write_with_retries(playbackProxy, chunk,
++                                                     static_cast<unsigned int>(chunkBytes),
++                                                     mReadWriteRetries);
++        const int xrunsAfter = pcm_get_xruns(playbackProxy->pcm);
++        if (writeStatus != 0 || xrunsAfter != initialXruns) {
++            const char* error = pcm_get_error(playbackProxy->pcm);
++            LOG(ERROR) << __func__ << ": PCM period write failed after " << transferredFrames
++                       << " frames: status=" << writeStatus << ", oversized=" << oversized
++                       << ", xruns=" << initialXruns << "->" << xrunsAfter
++                       << ", pcm_error=" << (error == nullptr ? "<none>" : error);
+             StreamAlsa::standby();
+             {
+                 std::lock_guard lock(mLock);
+-- 
+2.51.0
