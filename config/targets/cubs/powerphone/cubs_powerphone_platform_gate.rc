@@ -1,0 +1,58 @@
+# Platform context, because vendor-init cannot own audioserver lifecycle.
+on early-init
+    stop audioserver
+    # Mirrored from bluetooth-research.prop. Product donor properties load
+    # after vendor/build.prop; platform early-init deliberately overrides them
+    # before the Bluetooth process constructs Config.PROFILE_SERVICES_AND_FLAGS.
+    # GATT/BLE, HID, battery, networking and non-audio profiles stay untouched.
+    setprop bluetooth.profile.a2dp.source.enabled false
+    setprop bluetooth.profile.a2dp.sink.enabled false
+    setprop bluetooth.profile.avrcp.target.enabled false
+    setprop bluetooth.profile.avrcp.controller.enabled false
+    setprop bluetooth.profile.hfp.ag.enabled false
+    setprop bluetooth.profile.hfp.hf.enabled false
+    setprop bluetooth.profile.asha.central.enabled false
+    setprop bluetooth.profile.bap.broadcast.assist.enabled false
+    setprop bluetooth.profile.bap.broadcast.source.enabled false
+    setprop bluetooth.profile.bap.unicast.client.enabled false
+    setprop bluetooth.profile.ccp.server.enabled false
+    setprop bluetooth.profile.csip.set_coordinator.enabled false
+    setprop bluetooth.profile.gmap.enabled false
+    setprop bluetooth.profile.hap.client.enabled false
+    setprop bluetooth.profile.mcp.server.enabled false
+    setprop bluetooth.profile.vcp.controller.enabled false
+    setprop bluetooth.profile.vap.server.enabled false
+    setprop bluetooth.profile.tmap.call_terminal.enabled false
+    setprop bluetooth.profile.tmap.unicast_media_receiver.enabled false
+
+# Vendor helpers cannot read init's private audioserver status property.
+# Platform init owns this typed, boot-local mirror; the helper also checks
+# real PCM owners immediately before mutation.
+on property:init.svc.audioserver=stopped
+    setprop vendor.powerphone.cubs.audioserver_stopped 1
+
+on property:init.svc.audioserver=running
+    setprop vendor.powerphone.cubs.audioserver_stopped 0
+
+# The native boot helper publishes ready only after firmware readbacks and a
+# same-boot generation check. A registered research HAL is inert until then.
+on property:vendor.powerphone.cubs.boot.phase=ready
+    start vendor.audio-hal-powerphone-cubs
+    start audioserver
+
+# Failure must retain recovery access, not expose half-patched hardware.
+# The research HAL still registers its ports but refuses PCM opens.
+on property:vendor.powerphone.cubs.boot.phase=failed
+    setprop vendor.powerphone.cubs.capture.ready 0
+    setprop vendor.powerphone.cubs.playback.ready 0
+    start vendor.audio-hal-powerphone-cubs
+    start audioserver
+
+# The native helper enters applying only after its process starts. This edge
+# handles signal/timeout death without mistaking its initial stopped state for
+# a completed attempt. No firmware mutation is automatically retried.
+on property:init.svc.vendor.powerphone-cubs-boot=stopped && property:vendor.powerphone.cubs.boot.phase=applying
+    setprop vendor.powerphone.cubs.boot.phase failed
+
+on property:sys.audio.restart.hal=1
+    restart vendor.audio-hal-powerphone-cubs

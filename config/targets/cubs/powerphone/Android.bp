@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: Apache-2.0
+package { default_applicable_licenses: ["Android-Apache-2.0"], }
+
+prebuilt_etc {
+    name: "cubs_powerphone_services_rc",
+    src: "cubs_powerphone_services.rc",
+    filename_from_src: true,
+    sub_dir: "init",
+    vendor: true,
+}
+prebuilt_etc {
+    name: "cubs_powerphone_platform_gate_rc",
+    src: "cubs_powerphone_platform_gate.rc",
+    filename_from_src: true,
+    sub_dir: "init",
+    system_ext_specific: true,
+}
+prebuilt_etc {
+    name: "cubs_powerphone_manifest",
+    src: "cubs_powerphone.xml",
+    filename_from_src: true,
+    sub_dir: "vintf/manifest",
+    vendor: true,
+}

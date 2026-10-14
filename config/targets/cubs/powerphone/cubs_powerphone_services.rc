@@ -1,0 +1,32 @@
+# Cubs research primary. The proprietary primary RC is not installed.
+service vendor.audio-hal-powerphone-cubs /vendor/bin/hw/android.hardware.audio.service-aidl.powerphone-cubs
+    class hal
+    user audioserver
+    group audio camera drmrpc inet media mediadrm net_bt net_bt_admin net_bw_acct wakelock context_hub system
+    capabilities BLOCK_SUSPEND SYS_NICE WAKE_ALARM
+    rlimit rtprio 99 99
+    ioprio rt 4
+    task_profiles ProcessCapacityHigh HighPerformance
+    onrestart restart audioserver
+
+service vendor.powerphone-cubs-boot /vendor/bin/cubs_powerphone_boot --apply
+    class core
+    disabled
+    oneshot
+    user root
+    group root system audio readproc
+    stdio_to_kmsg
+    timeout_period 150
+
+on post-fs-data
+    mkdir /data/vendor/powerphone 0700 root root
+    restorecon_recursive /data/vendor/powerphone
+    setprop vendor.powerphone.cubs.capture.ready 0
+    setprop vendor.powerphone.cubs.playback.ready 0
+    setprop vendor.powerphone.cubs.profile ""
+    setprop vendor.powerphone.cubs.boot_id ""
+    setprop vendor.powerphone.cubs.boot.phase waiting
+    # AoC firmware is loaded by this daemon. Do not wait synchronously here:
+    # late module-loading actions must continue on init's event queue.
+    start aocd
+    start vendor.powerphone-cubs-boot

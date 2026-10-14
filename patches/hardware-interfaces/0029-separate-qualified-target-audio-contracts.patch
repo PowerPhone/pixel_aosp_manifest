@@ -1,0 +1,416 @@
+From: PowerPhone research platform <powerphone@csr460.com>
+Subject: [PATCH] Separate qualified per-target capture and playback contracts
+
+Preserve the existing Frankel PCM rates, geometry, queues, endpoint identities,
+readiness and mixer behavior behind its exact vendor-device identity. Separate
+capture from playback rate/geometry so a future target need not share one rate.
+Reserve Cubs-specific addresses but leave its backend unimplemented and rates
+zero: it must not advertise ports, touch Frankel mixer controls or register an
+unqualified module. No Cubs product, RC, VINTF or stock-HAL change is included.
+
+This delta was extracted against a separate reconstruction of patches0001-0028,
+not a broad diff of the populated AOSP worktree.
+
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+index 4d445f1..ccb5a14 100644
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -17,6 +17,7 @@
+ #define LOG_TAG "AHAL_Powerphone"
+ 
+ #include "Powerphone.h"
++#include "TargetConfiguration.h"
+ 
+ #include <powerphone/PlaybackRouteVolume.h>
+ 
+@@ -65,31 +66,38 @@ using aidl::android::media::audio::common::PcmType;
+ namespace aidl::android::hardware::audio::core::powerphone {
+ namespace {
+ 
+-constexpr int32_t kCaptureCard = 0;
+-constexpr int32_t kCaptureDevice = 10;
+-constexpr int32_t kPlaybackCard = 0;
+-constexpr int32_t kPlaybackDevice = 5;
+-constexpr int32_t kRate = 192000;
+-constexpr size_t kCaptureAlsaPeriodFrames = 1920;
+-constexpr size_t kCaptureAlsaBufferFrames = 7680;
++// Use the vendor device identity, not the generic GSI system product name.
++// Unknown devices and the unqualified Cubs descriptor remain fail-closed.
++const TargetConfiguration& kTarget = targetConfigurationFor(
++        ::android::base::GetProperty("ro.product.vendor.device", ""));
++const int32_t kCaptureCard = kTarget.capture.card;
++const int32_t kCaptureDevice = kTarget.capture.device;
++const int32_t kPlaybackCard = kTarget.playback.card;
++const int32_t kPlaybackDevice = kTarget.playback.device;
++const int32_t kCaptureRate = kTarget.capture.rate;
++const int32_t kPlaybackRate = kTarget.playback.rate;
++const size_t kCaptureAlsaPeriodFrames = kTarget.capture.periodFrames;
++const size_t kCaptureAlsaBufferFrames =
++        kCaptureAlsaPeriodFrames * kTarget.capture.periodCount;
+ // One native AoC quantum per mailbox notification; retain the full 20 ms ring.
+-constexpr size_t kPlaybackAlsaPeriodFrames = 192;
+-constexpr size_t kPlaybackAlsaBufferFrames = 3840;
+-constexpr size_t kPlaybackAlsaStartThresholdFrames = kPlaybackAlsaBufferFrames;
+-constexpr size_t kCaptureFrameworkBufferFrames = 1920;
++const size_t kPlaybackAlsaPeriodFrames = kTarget.playback.periodFrames;
++const size_t kPlaybackAlsaBufferFrames =
++        kPlaybackAlsaPeriodFrames * kTarget.playback.periodCount;
++const size_t kPlaybackAlsaStartThresholdFrames = kPlaybackAlsaBufferFrames;
++const size_t kCaptureFrameworkBufferFrames = kTarget.capture.frameworkBufferFrames;
+ // A 5 ms HAL burst still selects the existing static FastMixer beneath the
+ // 20 ms normal mixer, with fivefold fewer command/reply round trips than 1 ms.
+ // The independent physical ring remains 20 ms with native 1 ms PCM writes.
+-constexpr size_t kPlaybackFrameworkBufferFrames = 5 * kPlaybackAlsaPeriodFrames;
++const size_t kPlaybackFrameworkBufferFrames = kTarget.playback.frameworkBufferFrames;
+ constexpr uint32_t kPlaybackSecondWriteEfaultRetries = 32;
+ constexpr uint32_t kPlaybackSecondWriteEfaultRetrySleepUs = 1000;
+ constexpr int kPlaybackRtPriority = 90;
+ constexpr int kPlaybackPcmOpenWaitMs = 200;
+ constexpr char kPcmStreamWaitControl[] = "PCM Stream Wait Time in MSec";
+-constexpr int32_t kPlaybackLatencyMs =
+-        (kPlaybackAlsaBufferFrames * 1000 + kRate - 1) / kRate;
+-constexpr char kCaptureReadyProperty[] = "vendor.powerphone.pdm.ready";
+-constexpr char kSpeakerReadyProperty[] = "vendor.powerphone.aoc_speaker_192k.ready";
++const int32_t kPlaybackLatencyMs = kPlaybackRate > 0
++        ? (kPlaybackAlsaBufferFrames * 1000 + kPlaybackRate - 1) / kPlaybackRate : 0;
++const char* const kCaptureReadyProperty = kTarget.capture.readyProperty;
++const char* const kSpeakerReadyProperty = kTarget.playback.readyProperty;
+ 
+ int64_t playbackMonotonicNs() {
+     return std::chrono::duration_cast<std::chrono::nanoseconds>(
+@@ -113,22 +121,22 @@ struct Endpoint {
+ // internal physical endpoints, while remaining invisible to the default
+ // media, ring, call, and record strategies. Only an app that selects the exact
+ // PowerPhone address may activate one.
+-constexpr std::array<Endpoint, 5> kEndpoints{{
+-        {"PowerPhone AoC logical mic 0", "POWERPHONE_C0_D10_MIC0",
++const std::array<Endpoint, 5> kEndpoints{{
++        {kTarget.microphones[0].name, kTarget.microphones[0].address,
+          AudioDeviceType::IN_BUS, kCaptureCard, kCaptureDevice, PCM_IN,
+          CaptureEndpoint::LOGICAL_MIC_0, std::nullopt},
+-        {"PowerPhone AoC logical mic 1", "POWERPHONE_C0_D10_MIC1",
++        {kTarget.microphones[1].name, kTarget.microphones[1].address,
+          AudioDeviceType::IN_BUS, kCaptureCard, kCaptureDevice, PCM_IN,
+          CaptureEndpoint::LOGICAL_MIC_1, std::nullopt},
+-        {"PowerPhone AoC logical mic 2", "POWERPHONE_C0_D10_MIC2",
++        {kTarget.microphones[2].name, kTarget.microphones[2].address,
+          AudioDeviceType::IN_BUS, kCaptureCard, kCaptureDevice, PCM_IN,
+          CaptureEndpoint::LOGICAL_MIC_2, std::nullopt},
+-        {"PowerPhone earpiece 192k", "POWERPHONE_C0_D0_EARPIECE", AudioDeviceType::OUT_BUS,
++        {kTarget.speakers[0].name, kTarget.speakers[0].address, AudioDeviceType::OUT_BUS,
+          kPlaybackCard, kPlaybackDevice, PCM_OUT, std::nullopt, PlaybackEndpoint::EARPIECE},
+         // Frankel's mixer paths identify this as the R amplifier. Enclosure-hole
+         // mapping still requires an acoustic check, so keep that uncertainty in
+         // the port name.
+-        {"PowerPhone R amp (bottom candidate) 192k", "POWERPHONE_C0_D0_BOTTOM",
++        {kTarget.speakers[1].name, kTarget.speakers[1].address,
+          AudioDeviceType::OUT_BUS, kPlaybackCard, kPlaybackDevice, PCM_OUT, std::nullopt,
+          PlaybackEndpoint::BOTTOM_CANDIDATE},
+ }};
+@@ -160,7 +168,7 @@ AudioProfile makeInputProfile() {
+                                              .pcm = PcmType::INT_16_BIT},
+             .channelMasks = {AudioChannelLayout::make<AudioChannelLayout::Tag::layoutMask>(
+                     AudioChannelLayout::LAYOUT_MONO)},
+-            .sampleRates = {kRate},
++            .sampleRates = {kCaptureRate},
+     };
+ }
+ 
+@@ -172,7 +180,7 @@ AudioProfile makeOutputProfile() {
+             // unnecessarily invoked a downmixer that rejects indexed output.
+             .channelMasks = {AudioChannelLayout::make<AudioChannelLayout::Tag::layoutMask>(
+                     AudioChannelLayout::LAYOUT_STEREO)},
+-            .sampleRates = {kRate},
++            .sampleRates = {kPlaybackRate},
+     };
+ }
+ 
+@@ -277,6 +285,7 @@ class CaptureRoute {
+     ~CaptureRoute() { cleanup(); }
+ 
+     bool configure(CaptureEndpoint endpoint) {
++        if (!kTarget.canAdvertiseDirection(true)) return false;
+         cleanup();
+         mEndpoint = endpoint;
+         mMixer = mixer_open(kCaptureCard);
+@@ -308,7 +317,7 @@ class CaptureRoute {
+             !setEnum("Audio Capture Mic Source", "Builtin_MIC") ||
+             !setValue("Mic Spatial Module Enable", 0) || !setValue("MIC DC Blocker", 0) ||
+             !setValue("MIC Record Soft Gain (dB)", 0) || !setValue("HD Mic gain (cB)", 0) ||
+-            !setEnum("INTERNAL_MIC_TX Sample Rate", "SR_192K") ||
++            !setEnum("INTERNAL_MIC_TX Sample Rate", kTarget.capture.mixerRateEnum) ||
+             !setEnum("INTERNAL_MIC_TX Format", "S16_LE") ||
+             !setEnum("INTERNAL_MIC_TX Chan", "One") || !setCaptureList(logicalMic(endpoint))) {
+             cleanup();
+@@ -507,7 +516,7 @@ class CaptureRoute {
+                valueMatches("Mic Spatial Module Enable", 0) && valueMatches("MIC DC Blocker", 0) &&
+                valueMatches("MIC Record Soft Gain (dB)", 0) &&
+                valueMatches("HD Mic gain (cB)", 0) &&
+-               enumMatches("INTERNAL_MIC_TX Sample Rate", "SR_192K") &&
++               enumMatches("INTERNAL_MIC_TX Sample Rate", kTarget.capture.mixerRateEnum) &&
+                enumMatches("INTERNAL_MIC_TX Format", "S16_LE") &&
+                enumMatches("INTERNAL_MIC_TX Chan", "One") && captureListMatches();
+     }
+@@ -543,6 +552,7 @@ class PlaybackRoute {
+     ~PlaybackRoute() { cleanup(); }
+ 
+     bool configure(PlaybackEndpoint endpoint) {
++        if (!kTarget.canAdvertiseDirection(false)) return false;
+         cleanup();
+         if (mSavedPcmOpenWait.has_value()) {
+             LOG(ERROR) << __func__ << ": refusing reuse after card-wide PCM wait restore failure";
+@@ -577,7 +587,7 @@ class PlaybackRoute {
+         // the bypass with the speaker route, before Configure/EP6 activation,
+         // and restore its prior value only after the amplifiers are off.
+         if (!snapshotAndSetEnum("AoC Speaker Mixer ASP Mode", "ASP_BYPASS") ||
+-            !snapshotAndSetEnum("TDM_0_RX Sample Rate", "SR_192K") ||
++            !snapshotAndSetEnum("TDM_0_RX Sample Rate", kTarget.playback.mixerRateEnum) ||
+             !snapshotAndSetEnum("TDM_0_RX Format", "S32_LE") ||
+             !snapshotAndSetEnum("TDM_0_RX Chan", "Two") ||
+             !snapshotAndSetEnum("TDM_0_RX nSlot", "Two") ||
+@@ -849,7 +859,7 @@ class PlaybackRoute {
+             !enumMatches("Ultrasonic Mode", "Disabled") ||
+             !enumMatches("R Ultrasonic Mode", "Disabled") ||
+             !enumMatches("AoC Speaker Mixer ASP Mode", "ASP_BYPASS") ||
+-            !enumMatches("TDM_0_RX Sample Rate", "SR_192K") ||
++            !enumMatches("TDM_0_RX Sample Rate", kTarget.playback.mixerRateEnum) ||
+             !enumMatches("TDM_0_RX Format", "S32_LE") || !enumMatches("TDM_0_RX Chan", "Two") ||
+             !enumMatches("TDM_0_RX nSlot", "Two") || !enumMatches("TDM_0_RX SlotFmt", "S32_LE")) {
+             return false;
+@@ -1081,6 +1091,11 @@ class PlaybackRoute {
+ };
+ 
+ std::unique_ptr<Module::Configuration> makeConfiguration() {
++    if (!kTarget.canAdvertise()) {
++        LOG(ERROR) << "PowerPhone target " << kTarget.codename
++                   << " has no qualified HAL route backend; refusing to advertise any ports";
++        return nullptr;
++    }
+     auto config = std::make_unique<Module::Configuration>();
+     const AudioProfile inputProfile = makeInputProfile();
+     const AudioProfile outputProfile = makeOutputProfile();
+@@ -1088,6 +1103,7 @@ std::unique_ptr<Module::Configuration> makeConfiguration() {
+ 
+     for (const auto& endpoint : kEndpoints) {
+         const bool input = endpoint.direction == PCM_IN;
++        if (!kTarget.canAdvertiseDirection(input)) continue;
+         AudioPort devicePort;
+         devicePort.id = config->nextPortId++;
+         devicePort.name = endpoint.name;
+@@ -1114,7 +1130,8 @@ std::unique_ptr<Module::Configuration> makeConfiguration() {
+ 
+         AudioPort mixPort;
+         mixPort.id = config->nextPortId++;
+-        mixPort.name = std::string(endpoint.name) + " 192k input";
++        mixPort.name = std::string(endpoint.name) + " " +
++                std::to_string(kCaptureRate / 1000) + "k input";
+         // UNPROCESSED is carried as source metadata. Keep the mix flags at
+         // NONE so blocking Java AudioRecord and non-low-latency AAudio can use
+         // the same exact-rate route; FAST/RAW requests are retried without
+@@ -1219,6 +1236,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+ }
+ 
+ ::android::status_t StreamPowerphone::start() {
++    if (!kTarget.canAdvertiseDirection(mIsInput)) return ::android::PERMISSION_DENIED;
+     // The direct PCM0,D0 hardware trial completed 60 seconds without an xrun
+     // only when its producer ran at FIFO/90; the otherwise identical
+     // SCHED_OTHER run recovered one EPIPE. Require that proven scheduling
+@@ -1301,12 +1319,14 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         }
+         const bool exactGeometry =
+                 mAlsaDeviceProxies.size() == 1 && mAlsaDeviceProxies.front().get() != nullptr &&
+-                proxy_get_sample_rate(mAlsaDeviceProxies.front().get()) == kRate &&
++                proxy_get_sample_rate(mAlsaDeviceProxies.front().get()) ==
++                        static_cast<uint32_t>(kCaptureRate) &&
+                 proxy_get_format(mAlsaDeviceProxies.front().get()) == PCM_FORMAT_S16_LE &&
+                 proxy_get_channel_count(mAlsaDeviceProxies.front().get()) == 1 &&
+                 proxy_get_period_size(mAlsaDeviceProxies.front().get()) ==
+                         kCaptureAlsaPeriodFrames &&
+-                mAlsaDeviceProxies.front().get()->alsa_config.period_count == 4;
++                mAlsaDeviceProxies.front().get()->alsa_config.period_count ==
++                        kTarget.capture.periodCount;
+         if (status != ::android::OK || !exactGeometry) {
+             if (status == ::android::OK) {
+                 LOG(ERROR) << __func__ << ": PCM 0,10 did not retain exact 1920x4 geometry";
+@@ -1361,7 +1381,8 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         } else if (!acquirePlaybackLease(this)) {
+             LOG(ERROR) << __func__ << ": PCM 0,0 is already owned by another sidecar stream";
+             return ::android::WOULD_BLOCK;
+-        } else if (!mConfig.has_value() || mConfig->rate != kRate || mConfig->channels != 2 ||
++        } else if (!mConfig.has_value() ||
++                   mConfig->rate != static_cast<uint32_t>(kPlaybackRate) || mConfig->channels != 2 ||
+                    mConfig->format != PCM_FORMAT_S32_LE ||
+                    mFrameSizeBytes != 2 * sizeof(int32_t) || !mAlsaDeviceProxies.empty() ||
+                    mLegacyPlaybackPcm != nullptr) {
+@@ -1419,7 +1440,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+     // and mixer control deliberately remain on libtinyalsav2 in this process.
+     powerphone_legacy_pcm_open_result openResult{};
+     powerphone_legacy_pcm* playbackPcm = powerphone_legacy_pcm_open_playback(
+-            kPlaybackCard, kPlaybackDevice, 2, kRate, kPlaybackAlsaPeriodFrames,
++            kPlaybackCard, kPlaybackDevice, 2, kPlaybackRate, kPlaybackAlsaPeriodFrames,
+             kPlaybackAlsaBufferFrames / kPlaybackAlsaPeriodFrames,
+             kPlaybackAlsaStartThresholdFrames,
+             POWERPHONE_LEGACY_PCM_FORMAT_S32_LE, &openResult);
+@@ -1971,13 +1992,13 @@ ndk::ScopedAStatus ModulePowerphone::calculateBufferSizeFrames(const AudioFormat
+     const bool exactOutput = flags.getTag() == AudioIoFlags::Tag::output &&
+                              format.type == AudioFormatType::PCM &&
+                              format.pcm == PcmType::INT_32_BIT;
+-    if (sampleRateHz == kRate && exactInput) {
++    if (kTarget.canAdvertiseDirection(true) && sampleRateHz == kCaptureRate && exactInput) {
+         // One 10 ms framework burst avoids aggregating four client reads.
+         // start() independently retains PCM0,D10's qualified 1920x4 ring.
+         *bufferSizeFrames = kCaptureFrameworkBufferFrames;
+         return ndk::ScopedAStatus::ok();
+     }
+-    if (sampleRateHz == kRate && exactOutput) {
++    if (kTarget.canAdvertiseDirection(false) && sampleRateHz == kPlaybackRate && exactOutput) {
+         // HAL 5 ms < normal mixer 20 ms selects the existing static FastMixer
+         // without a FAST output flag. It paces active audio and idle silence
+         // through five blocking 192-frame writes per FMQ, independently of the
+diff --git a/audio/aidl/default/powerphone/Powerphone.h b/audio/aidl/default/powerphone/Powerphone.h
+index 03aecae..ab816a3 100644
+--- a/audio/aidl/default/powerphone/Powerphone.h
++++ b/audio/aidl/default/powerphone/Powerphone.h
+@@ -29,6 +29,8 @@
+ 
+ namespace aidl::android::hardware::audio::core::powerphone {
+ 
++// Null means this vendor target has no qualified backend; main must not publish
++// an IModule (or advertise a rate) for that target.
+ std::unique_ptr<Module::Configuration> makeConfiguration();
+ 
+ enum class PlaybackEndpoint {
+diff --git a/audio/aidl/default/powerphone/TargetConfiguration.h b/audio/aidl/default/powerphone/TargetConfiguration.h
+new file mode 100644
+index 0000000..635f9f0
+--- /dev/null
++++ b/audio/aidl/default/powerphone/TargetConfiguration.h
+@@ -0,0 +1,98 @@
++/* Copyright (C) 2026 The Android Open Source Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <string_view>
++
++namespace aidl::android::hardware::audio::core::powerphone {
++
++// A rate belongs to a complete independently qualified direction, not a phone.
++// These immutable build-time contracts are deliberately not tunable properties.
++// Changing a WAV/API header or setting a readiness property cannot enable Cubs.
++struct StreamTargetConfiguration {
++    int32_t card;
++    int32_t device;
++    int32_t rate;
++    size_t periodFrames;
++    size_t periodCount;
++    size_t frameworkBufferFrames;
++    const char* readyProperty;
++    const char* mixerRateEnum;
++
++    constexpr bool hasTransportContract() const {
++        return rate > 0 && periodFrames > 0 && periodCount > 0 &&
++               frameworkBufferFrames > 0 && frameworkBufferFrames % periodFrames == 0;
++    }
++};
++
++struct EndpointIdentity {
++    const char* name;
++    const char* address;
++};
++
++enum class RouteBackend { FRANKEL, UNIMPLEMENTED };
++
++struct TargetConfiguration {
++    const char* codename;
++    RouteBackend routeBackend;
++    StreamTargetConfiguration capture;
++    StreamTargetConfiguration playback;
++    std::array<EndpointIdentity, 3> microphones;
++    // Earpiece/top first, bottom second; identities do not imply enclosure mic mapping.
++    std::array<EndpointIdentity, 2> speakers;
++
++    constexpr bool canAdvertiseDirection(bool input) const {
++        return routeBackend == RouteBackend::FRANKEL &&
++               (input ? capture : playback).hasTransportContract();
++    }
++    constexpr bool canAdvertise() const {
++        return canAdvertiseDirection(true) || canAdvertiseDirection(false);
++    }
++};
++
++inline constexpr TargetConfiguration kFrankelTargetConfiguration{
++        "frankel", RouteBackend::FRANKEL,
++        {0, 10, 192000, 1920, 4, 1920, "vendor.powerphone.pdm.ready", "SR_192K"},
++        {0, 5, 192000, 192, 20, 960,
++         "vendor.powerphone.aoc_speaker_192k.ready", "SR_192K"},
++        {{{"PowerPhone AoC logical mic 0", "POWERPHONE_C0_D10_MIC0"},
++          {"PowerPhone AoC logical mic 1", "POWERPHONE_C0_D10_MIC1"},
++          {"PowerPhone AoC logical mic 2", "POWERPHONE_C0_D10_MIC2"}}},
++        {{{"PowerPhone earpiece 192k", "POWERPHONE_C0_D0_EARPIECE"},
++          {"PowerPhone R amp (bottom candidate) 192k", "POWERPHONE_C0_D0_BOTTOM"}}},
++};
++
++// Known PCM identities and proposed unique addresses ONLY. No capture or
++// playback rate is qualified for Android yet, and no Cubs route backend exists.
++// In particular, the experimental D10 firmware touches shared capture code;
++// a sidecar mutex cannot exclude the proprietary primary/soundtrigger HALs.
++// Do not fill rates or enable this descriptor until target-specific routing,
++// shared-owner exclusion, cache-coherent boot activation and restart revocation
++// are implemented and the exact PCM/API paths have real-hardware evidence.
++inline constexpr TargetConfiguration kCubsUnqualifiedTargetConfiguration{
++        "cubs", RouteBackend::UNIMPLEMENTED,
++        {0, 10, 0, 0, 0, 0, "vendor.powerphone.cubs.capture.ready", ""},
++        {0, 5, 0, 0, 0, 0, "vendor.powerphone.cubs.playback.ready", ""},
++        {{{"PowerPhone Cubs logical mic 0", "POWERPHONE_CUBS_C0_D10_MIC0"},
++          {"PowerPhone Cubs logical mic 1", "POWERPHONE_CUBS_C0_D10_MIC1"},
++          {"PowerPhone Cubs logical mic 2", "POWERPHONE_CUBS_C0_D10_MIC2"}}},
++        {{{"PowerPhone Cubs top speaker", "POWERPHONE_CUBS_C0_D5_TOP"},
++          {"PowerPhone Cubs bottom speaker", "POWERPHONE_CUBS_C0_D5_BOTTOM"}}},
++};
++
++inline constexpr TargetConfiguration kUnsupportedTargetConfiguration{
++        "unsupported", RouteBackend::UNIMPLEMENTED,
++        {0, 0, 0, 0, 0, 0, "", ""}, {0, 0, 0, 0, 0, 0, "", ""}, {}, {},
++};
++
++constexpr const TargetConfiguration& targetConfigurationFor(std::string_view device) {
++    if (device == "frankel") return kFrankelTargetConfiguration;
++    if (device == "cubs") return kCubsUnqualifiedTargetConfiguration;
++    return kUnsupportedTargetConfiguration;
++}
++
++}  // namespace aidl::android::hardware::audio::core::powerphone
+diff --git a/audio/aidl/default/powerphone/main.cpp b/audio/aidl/default/powerphone/main.cpp
+index fbfa2c9..bdeaf1e 100644
+--- a/audio/aidl/default/powerphone/main.cpp
++++ b/audio/aidl/default/powerphone/main.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include <cstdlib>
++#include <utility>
+ 
+ #define LOG_TAG "AHAL_PowerphoneMain"
+ #include <Log.h>
+@@ -29,10 +30,15 @@ using aidl::android::hardware::audio::core::powerphone::ModulePowerphone;
+ using aidl::android::hardware::audio::core::powerphone::makeConfiguration;
+ 
+ int main() {
++    auto config = makeConfiguration();
++    if (config == nullptr) {
++        LOG(ERROR) << "PowerPhone remains disabled for this vendor target";
++        return EXIT_FAILURE;
++    }
+     ABinderProcess_setThreadPoolMaxThreadCount(8);
+     ABinderProcess_startThreadPool();
+ 
+-    auto module = ndk::SharedRefBase::make<ModulePowerphone>(makeConfiguration());
++    auto module = ndk::SharedRefBase::make<ModulePowerphone>(std::move(config));
+     const std::string instance = std::string(Module::descriptor) + "/powerphone";
+     const binder_status_t status = AServiceManager_addService(module->asBinder().get(),
+                                                               instance.c_str());
+

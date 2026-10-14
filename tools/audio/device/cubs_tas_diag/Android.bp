@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+cc_binary {
+    name: "cubs_tas_diag",
+    vendor: true,
+    srcs: ["cubs_tas_diag.c"],
+    cflags: ["-Wall", "-Wextra", "-Werror"],
+}

@@ -1,0 +1,5 @@
+/vendor/bin/cubs_powerphone_boot u:object_r:cubs_powerphone_boot_exec:s0
+/vendor/bin/hw/android\.hardware\.audio\.service-aidl\.powerphone-cubs u:object_r:hal_audio_default_exec:s0
+/data/vendor/powerphone(/.*)? u:object_r:powerphone_cubs_data_file:s0
+/dev/acd-factory_diag u:object_r:aoc_device:s0
+/dev/powerphone-cubs-(mono192|direct192|tdm-slots) u:object_r:powerphone_cubs_marker_file:s0

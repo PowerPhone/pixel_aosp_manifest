@@ -1,0 +1,252 @@
+{
+  "profile": "cubs-15876290-polygon-exclusive-d10-raw3-packed192-candidate",
+  "qualification": "UNTESTED exclusive volatile RAW3 prototype; NOT FLASHABLE",
+  "restrictions": [
+    "Cold boot; all framework/hotword/other capture clients stopped",
+    "D10 S16_LE exactlythree channels, mic list0,1,2,-1 and channel selectorThree",
+    "Separate kernel raw-channel admission is required; do not merely request-c3 on the old module",
+    "Normal destination2 is skipped for native7/three-channel producer; no concurrent processed AP capture",
+    "RAW destination3 is packed S16 and bypasses S32 microphone compensation; all other producer destinations retain stock loops",
+    "The AP staging/publisher replacements are RAW3-only; mono/stereo use requires reboot into the original mono profile",
+    "Runtime RAW ring must retain its0x600 capacity and0x300 half-bank, with physicalmics0/2/3 mapped fromlogical0/1/2",
+    "Use the unchanged coherent-cache wrapper; all pointer values stay logical40..., factory wire accesses use verified NC aliases",
+    "Restore exact stock regions or cold reboot before ordinary services resume"
+  ],
+  "geometry": {
+    "pdm_clock_requested_hz": 6400000,
+    "native_rate_enum": 7,
+    "native_receiver_control_bit1": 0,
+    "dma_frames": 96,
+    "expected_block_seconds": 0.0005,
+    "channels": 3,
+    "producer_raw_destination": 3,
+    "skipped_normal_destination": 2,
+    "source_ring_capacity_bytes": 1536,
+    "source_padded_bank_bytes": 768,
+    "packed_block_bytes": 576,
+    "stage_offset": "0x524",
+    "stage_end_exclusive": "0x764",
+    "stage_plane_end": "0x824",
+    "s32_intermediate_staging": false,
+    "new_allocations": false
+  },
+  "cache_flush": {
+    "dispatch_address": "0x402392b4",
+    "stock_dispatch_hex": "8cbf2740",
+    "wrapper_entry": "0x4027b24c",
+    "wrapper_dispatch_hex": "4cb22740",
+    "command": "HD Mic gain (cB)=0",
+    "expected_status": 64,
+    "requirement": "First apply from cold boot before any RAW capture; all ordinary HD senders stopped; NC host restores original dispatch immediately after status64; unexpected status means stop and cold reboot, not retry"
+  },
+  "patches": [
+    {
+      "name": "stream_rate",
+      "address": "0x40238845",
+      "before_hex": "0c56",
+      "after_hex": "0c76"
+    },
+    {
+      "name": "restart_native_rate",
+      "address": "0x4025bf4a",
+      "before_hex": "0c6b",
+      "after_hex": "0c7b"
+    },
+    {
+      "name": "classify_native",
+      "address": "0x4025c335",
+      "before_hex": "266d33",
+      "after_hex": "f66d33"
+    },
+    {
+      "name": "configure_native_rate",
+      "address": "0x4025c3bb",
+      "before_hex": "0c6a",
+      "after_hex": "0c7a"
+    },
+    {
+      "name": "native_timebase",
+      "address": "0x4025cda3",
+      "before_hex": "8e9325ee9d93",
+      "after_hex": "7e9325ee9d93"
+    },
+    {
+      "name": "native_clock",
+      "address": "0x4025d054",
+      "before_hex": "00d43000",
+      "after_hex": "00a86100"
+    },
+    {
+      "name": "native_receiver_edge_zero",
+      "address": "0x4025d1fc",
+      "before_hex": "c20f21",
+      "after_hex": "c2a000"
+    },
+    {
+      "name": "timestamp_expected_half_ms",
+      "address": "0x4025d7a4",
+      "before_hex": "8ee7bc590b93",
+      "after_hex": "8ee7b05a0b93"
+    },
+    {
+      "name": "notify_native",
+      "address": "0x4025e49f",
+      "before_hex": "266613",
+      "after_hex": "f66613"
+    },
+    {
+      "name": "producer_destination_hook",
+      "address": "0x4025ee4b",
+      "before_hex": "a20800",
+      "after_hex": "462471"
+    },
+    {
+      "name": "fanout_native",
+      "address": "0x4025ee8b",
+      "before_hex": "26683d",
+      "after_hex": "f6683d"
+    },
+    {
+      "name": "producer_missing_hook",
+      "address": "0x4025eee0",
+      "before_hex": "cd0b768703",
+      "after_hex": "06f3703df0"
+    },
+    {
+      "name": "producer_sample_hook",
+      "address": "0x4025ef13",
+      "before_hex": "0e57d43206c1",
+      "after_hex": "46d770f02000"
+    },
+    {
+      "name": "producer_post_hook",
+      "address": "0x4025ef24",
+      "before_hex": "9851a851",
+      "after_hex": "06f47000"
+    },
+    {
+      "name": "ap_rate_admission_hook",
+      "address": "0x4027a09c",
+      "before_hex": "064c00",
+      "after_hex": "06ba02"
+    },
+    {
+      "name": "raw_three_admission",
+      "address": "0x4027a618",
+      "before_hex": "4e062ee24287",
+      "after_hex": "4e062fe24287"
+    },
+    {
+      "name": "normal_stage_skip",
+      "address": "0x4027aaa7",
+      "before_hex": "16740b",
+      "after_hex": "c62d00"
+    },
+    {
+      "name": "raw_direct_return",
+      "address": "0x4027ab76",
+      "before_hex": "3e0648d9d9b68e44208fec921e8444c592d1",
+      "after_hex": "32d2083203588c53ad02bd06e5b100064a00"
+    },
+    {
+      "name": "ap_rate_admission_cave",
+      "address": "0x4027ab88",
+      "before_hex": "8a8272afff76892c9808fd059e9b",
+      "after_hex": "2674024690fddd07c2a5dc068ffd"
+    },
+    {
+      "name": "packed_stage",
+      "address": "0x4027b1c8",
+      "before_hex": "366100592152a11d8e0386d7da9252a239e05511f2a00462a008306f835072806a52391162255038078806ad06922814e009008806a0c141ad06bd0398b8e00900a22550b8077931407490680a32a224622615e0060062d208d8216206",
+      "after_hex": "36610016430566345132225242d20842243aad038803822814e00800a0c141ad03bd04880382280be00800ad03bd048803822815e0080052a5245a5262a120768609721a002baa7255002b55ad03bd04c2a300880382280fe008001df0"
+    },
+    {
+      "name": "stage_gate",
+      "address": "0x4027b22f",
+      "before_hex": "1e0640dfdd92",
+      "after_hex": "b0b711860f00"
+    },
+    {
+      "name": "cache_wrapper",
+      "address": "0x4027b240",
+      "before_hex": "289eec92f2a3008aa2f0c963bd06818f71e00800322101a61440c0871176880e880692c81f8098b390852189064b",
+      "after_hex": "b492234054d02540d085304036410041fcff82740262740041fbff827402627400c0200081f9ffe008002d0a1df0"
+    },
+    {
+      "name": "producer_sample_cave",
+      "address": "0x4027b274",
+      "before_hex": "3d08a614216ee01012e1828a82768b16b80a60bb10b0b521b9084b88b80a4baa60bb10b9094b992033a0bd04a22377815e84e00800ae",
+      "after_hex": "e22117663e1e66331b66781890cca0f0ea11e0dbc0768709e21c015acce25d006bddc6138f90cca0768707e80c5acce90d6add861d8f"
+    },
+    {
+      "name": "producer_missing_cave",
+      "address": "0x4027b2b0",
+      "before_hex": "b2a0c7110c1e0c0f81fd8ae00800a22550f831c2a300380ab80f38f3e0030032d2080c1ba22310580a",
+      "after_hex": "c22117663c16663313667810f0ca11c0cbc0768704225c006bccc6068fcd0b768703290c6accc6038f"
+    },
+    {
+      "name": "producer_destination_cave",
+      "address": "0x4027b2e0",
+      "before_hex": "e3f2a22452d20868f3fa223c0e0c0bcd024dda4dd6e25a",
+      "after_hex": "a20800662a0d66330ac851c20c94667c0246d38e86d58e"
+    },
+    {
+      "name": "producer_post_cave",
+      "address": "0x4027b2f8",
+      "before_hex": "812f9be00800a8f50c0bcd02812c9be00800a22310b8",
+      "after_hex": "922117663908663305667802862d8f9851a85146068f"
+    },
+    {
+      "name": "packed_publish_entry",
+      "address": "0x4027b6a0",
+      "before_hex": "3641004e12341109854e34ba1111835a526a623c",
+      "after_hex": "36410066330b42d2084204596634028618001df0"
+    },
+    {
+      "name": "raw_output_bytes",
+      "address": "0x4027b721",
+      "before_hex": "b03411",
+      "after_hex": "a03411"
+    },
+    {
+      "name": "allowed_rate_mask",
+      "address": "0x4028c55a",
+      "before_hex": "5e026008e9ce",
+      "after_hex": "5e126008e9ce"
+    },
+    {
+      "name": "allowed_rate_bound",
+      "address": "0x4028c568",
+      "before_hex": "f674d5",
+      "after_hex": "f684d5"
+    }
+  ],
+  "guards": [
+    {
+      "address": "0x4025d1e0",
+      "expected_hex": "30c662"
+    },
+    {
+      "address": "0x402392b4",
+      "expected_hex": "8cbf2740"
+    },
+    {
+      "address": "0x403085d0",
+      "expected_hex": "36210022a04032a00076820ef27300f27310f27320f2733032d3010020001df0"
+    },
+    {
+      "address": "0x4027a61e",
+      "expected_hex": "2c86a154fc6e156e8e02"
+    }
+  ],
+  "kernel_admission": {
+    "module": "aoc_alsa_dev_util.ko",
+    "function": "aoc_raw_capture_trigger",
+    "text_address": "0x1035c",
+    "file_offset": "0x35d90",
+    "before_hex": "3f0c0071",
+    "after_hex": "3f100071",
+    "meaning": "cmp w1,#3 -> cmp w1,#4; retain b.ge and reject>=4",
+    "raw_enable_command": "0x1272"
+  }
+}

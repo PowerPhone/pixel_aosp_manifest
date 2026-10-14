@@ -1,0 +1,29 @@
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -1635,6 +1635,16 @@
+     return ::android::OK;
+ }
+ 
++::android::status_t StreamPowerphone::flush() {
++    // The input FMQ worker transitions PAUSED -> STANDBY after FLUSH without
++    // calling DriverInterface::standby(). Cubs must release the paused D10 FD
++    // and route here, on that serialized worker, before releaseAudioPatch's
++    // subsequent empty-device disconnect. Keep close-before-route-off order
++    // and retain Frankel's existing lifecycle and active-route-change guard.
++    if (kCubsPrimary && mIsInput) return standby();
++    return StreamAlsaBase::flush();
++}
++
+ ::android::status_t StreamPowerphone::pause() {
+     if (mIsInput) {
+         if (mAlsaDeviceProxies.size() != 1 || mAlsaDeviceProxies.front().get() == nullptr ||
+--- a/audio/aidl/default/powerphone/Powerphone.h
++++ b/audio/aidl/default/powerphone/Powerphone.h
+@@ -55,6 +55,7 @@
+     ndk::ScopedAStatus setConnectedDevices(const ConnectedDevices& devices) override;
+ 
+     ::android::status_t drain(StreamDescriptor::DrainMode mode) override;
++    ::android::status_t flush() override;
+     ::android::status_t pause() override;
+     ::android::status_t standby() override;
+     ::android::status_t start() override;

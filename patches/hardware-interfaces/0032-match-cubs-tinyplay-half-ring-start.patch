@@ -1,0 +1,17 @@
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -85,7 +85,12 @@
+ const size_t kPlaybackAlsaPeriodFrames = kTarget.playback.periodFrames;
+ const size_t kPlaybackAlsaBufferFrames =
+         kPlaybackAlsaPeriodFrames * kTarget.playback.periodCount;
+-const size_t kPlaybackAlsaStartThresholdFrames = kPlaybackAlsaBufferFrames;
++// Cubs tinyplay uses tinyalsa-v1's default half-ring start threshold. Its
++// first HAL trial with full-ring start failed inside WRITEI despite sub-ms
++// producer gaps. Preserve Frankel's separately qualified full-ring prefill.
++const size_t kPlaybackAlsaStartThresholdFrames =
++        kTarget.routeBackend == RouteBackend::CUBS_RESEARCH_PRIMARY
++        ? kPlaybackAlsaBufferFrames / 2 : kPlaybackAlsaBufferFrames;
+ const size_t kCaptureFrameworkBufferFrames = kTarget.capture.frameworkBufferFrames;
+ // A 5 ms HAL burst still selects the existing static FastMixer beneath the
+ // 20 ms normal mixer, with fivefold fewer command/reply round trips than 1 ms.

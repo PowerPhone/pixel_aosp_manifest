@@ -1,0 +1,461 @@
+diff --git a/audio/aidl/default/powerphone/CubsRoute.h b/audio/aidl/default/powerphone/CubsRoute.h
+new file mode 100644
+index 0000000..7ccae5f
+--- /dev/null
++++ b/audio/aidl/default/powerphone/CubsRoute.h
+@@ -0,0 +1,306 @@
++/* Copyright (C) 2026 The Android Open Source Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include "Powerphone.h"
++#include "TargetConfiguration.h"
++
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <mutex>
++#include <string>
++#include <vector>
++#include <unistd.h>
++
++#include <Log.h>
++#include <android-base/file.h>
++#include <android-base/properties.h>
++#include <android-base/strings.h>
++
++extern "C" {
++#include <tinyalsa/asoundlib.h>
++}
++
++namespace aidl::android::hardware::audio::core::powerphone {
++
++// These only serialize our own mixer transactions. They do not arbitrate
++// with the proprietary HAL or another process; the external-owner exclusion
++// and generation/readiness integration must be qualified before activation.
++inline std::mutex gCubsMixerTransactionLock;
++inline std::atomic<bool> gCubsRouteFault{false};
++
++// No ports/rates are enabled by this class. TargetConfiguration rejects the
++// CUBS_PREPARATORY backend even if a property is set. RAW3 is unsupported.
++// The shared stream owner must close PCM before calling cleanup().
++class CubsRoute final {
++  public:
++    explicit CubsRoute(bool input) : mInput(input) {}
++    ~CubsRoute() { cleanup(); }
++
++    bool configureCapture(CaptureEndpoint endpoint, const TargetConfiguration& target) {
++        std::lock_guard transaction(gCubsMixerTransactionLock);
++        if (!prepare(target)) return false;
++        int mic = -1;
++        switch (endpoint) {
++            case CaptureEndpoint::LOGICAL_MIC_0: mic = 0; break;
++            case CaptureEndpoint::LOGICAL_MIC_1: mic = 1; break;
++            case CaptureEndpoint::LOGICAL_MIC_2: mic = 2; break;
++        }
++        if (!mInput || mic < 0 || !requireIdleRoutes(true) ||
++            !requireValue("MIC0", 0) || !requireValue("MIC1", 0) ||
++            !requireValue("MIC2", 0) || !requireValue("US Record Enable", 0) ||
++            !setEnum("BUILTIN MIC Process Mode", "Raw") ||
++            !setEnum("Audio Capture Mic Source", "Builtin_MIC") ||
++            !setValue("Mic Spatial Module Enable", 0) ||
++            !setValue("MIC DC Blocker", 0) || !setValue("MIC Record Soft Gain (dB)", 0)) {
++            return failSetup();
++        }
++        // Never write HD Mic gain: the volatile activation mechanism owns
++        // that command handler. Never query the dangerous MIC Clock getter.
++        constexpr std::array<unsigned int, 4> order{1, 2, 3, 0};
++        for (unsigned int index : order) {
++            if (!setValue("BUILDIN MIC ID CAPTURE LIST", index == 0 ? mic : -1, index, 4)) {
++                return failSetup();
++            }
++        }
++        if (!setEnum("INTERNAL_MIC_TX Sample Rate", target.capture.mixerRateEnum) ||
++            !setEnum("INTERNAL_MIC_TX Format", "S16_LE") ||
++            !setEnum("INTERNAL_MIC_TX Chan", "One") ||
++            !setValue(kCaptureRoute, 1)) return failSetup();
++        mConfigured = true;
++        return true;
++    }
++
++    bool configurePlayback(PlaybackEndpoint endpoint, const TargetConfiguration& target) {
++        std::lock_guard transaction(gCubsMixerTransactionLock);
++        if (!prepare(target)) return false;
++        const char* profile = nullptr;
++        switch (endpoint) {
++            case PlaybackEndpoint::EARPIECE: profile = "music_17dB_top"; break;
++            case PlaybackEndpoint::BOTTOM_CANDIDATE: profile = "music_17dB_bottom"; break;
++        }
++        if (mInput || profile == nullptr || !requireIdleRoutes(false) ||
++            !requireValue(kAsiSwitch, 0) ||
++            !setEnum("TAS25XX CODEC PROFILE", profile) ||
++            !setEnum("AoC Speaker Mixer ASP Mode", "ASP_BYPASS") ||
++            !setEnum("TDM_0_RX Sample Rate", target.playback.mixerRateEnum) ||
++            !setEnum("TDM_0_RX Format", "S32_LE") ||
++            !setEnum("TDM_0_RX Chan", "Two") ||
++            !setEnum("TDM_0_RX nSlot", "Two") ||
++            !setEnum("TDM_0_RX SlotFmt", "S32_LE") ||
++            !setValue(kPlaybackRoute, 1) || !setValue(kAsiSwitch, 1)) return failSetup();
++        mConfigured = true;
++        return true;
++    }
++
++    bool isActive() const { return mConfigured && !mFault && !gCubsRouteFault.load(); }
++
++    bool verifyOwnership() {
++        std::lock_guard transaction(gCubsMixerTransactionLock);
++        if (!isActive() || !sameGeneration() || !externalOwnerStopped() || !matchesOwned()) {
++            latchFault("route ownership/generation changed");
++            return false;
++        }
++        return true;
++    }
++
++    void cleanup() {
++        std::lock_guard transaction(gCubsMixerTransactionLock);
++        cleanupLocked();
++    }
++
++  private:
++    static constexpr const char* kCaptureRoute = "EP3 TX Mixer INTERNAL_MIC_TX";
++    static constexpr const char* kPlaybackRoute = "TDM_0_RX Mixer EP6";
++    static constexpr const char* kAsiSwitch = "TAS25XX ASI Switch";
++    struct Value {
++        std::string name;
++        unsigned int index;
++        unsigned int width;
++        int original;
++        int owned;
++    };
++
++    static bool generation(std::string* result) {
++        std::string boot, restart, crash;
++        if (!::android::base::ReadFileToString("/proc/sys/kernel/random/boot_id", &boot) ||
++            !::android::base::ReadFileToString(
++                    "/sys/devices/platform/a800000.aoc/restart_count", &restart) ||
++            !::android::base::ReadFileToString(
++                    "/sys/devices/platform/a800000.aoc/coredump_count", &crash)) return false;
++        boot = ::android::base::Trim(boot);
++        if (boot.empty() || ::android::base::Trim(restart) != "0" ||
++            ::android::base::Trim(crash) != "0") return false;
++        *result = boot;
++        return true;
++    }
++
++    bool sameGeneration() const {
++        std::string current;
++        return generation(&current) && current == mGeneration;
++    }
++
++    static bool externalOwnerStopped() {
++        return ::android::base::GetProperty("init.svc.vendor.audio-hal-aidl", "") == "stopped";
++    }
++
++    bool prepare(const TargetConfiguration& target) {
++        if (mMixer != nullptr || gCubsRouteFault.load() || mFault ||
++            target.routeBackend != RouteBackend::CUBS_PREPARATORY ||
++            !target.canAdvertiseDirection(mInput)) return false;
++        // Explicitly mono/direct-two-slot only, independent of advertised
++        // rate placeholders. Future activation requires a separate review.
++        const auto& direction = mInput ? target.capture : target.playback;
++        if (direction.card != 0 || direction.device != (mInput ? 10 : 5) ||
++            direction.rate != 192000 ||
++            std::string(direction.mixerRateEnum) != "SR_192K" ||
++            !externalOwnerStopped() || !generation(&mGeneration)) return false;
++        // RAW3 changes representation in shared producer rings; mono must
++        // never open over that profile. A marker does not certify readiness.
++        if (access("/dev/powerphone-cubs-raw3-192", F_OK) == 0) return false;
++        mMixer = mixer_open(direction.card);
++        return mMixer != nullptr;
++    }
++
++    mixer_ctl* control(const std::string& name, unsigned int width = 1) const {
++        mixer_ctl* ctl = mixer_get_ctl_by_name(mMixer, name.c_str());
++        if (ctl == nullptr || mixer_ctl_get_num_values(ctl) != width) {
++            LOG(ERROR) << "Cubs missing/wrong-width mixer control " << name;
++            return nullptr;
++        }
++        return ctl;
++    }
++
++    Value* remember(const std::string& name, unsigned int index, unsigned int width) {
++        auto found = std::find_if(mValues.begin(), mValues.end(), [&](const Value& value) {
++            return value.name == name && value.index == index;
++        });
++        if (found != mValues.end()) return &*found;
++        mixer_ctl* ctl = control(name, width);
++        if (ctl == nullptr) return nullptr;
++        const int value = mixer_ctl_get_value(ctl, index);
++        // Capture selectors deliberately use -1; scalar read errors are not
++        // admitted as snapshots. Only that exact selector array admits -1.
++        if (value < 0 && !(name == "BUILDIN MIC ID CAPTURE LIST" && value == -1)) return nullptr;
++        mValues.push_back({name, index, width, value, value});
++        return &mValues.back();
++    }
++
++    bool requireValue(const std::string& name, int expected) {
++        Value* value = remember(name, 0, 1);
++        return value != nullptr && value->owned == expected;
++    }
++
++    bool requireIdleRoutes(bool input) {
++        bool sawRoute = false;
++        for (unsigned int i = 0; i < mixer_get_num_ctls(mMixer); ++i) {
++            mixer_ctl* ctl = mixer_get_ctl(mMixer, i);
++            const char* rawName = ctl == nullptr ? nullptr : mixer_ctl_get_name(ctl);
++            if (rawName == nullptr) return false;
++            const std::string name(rawName);
++            const bool relevant = input ? name.find(" TX Mixer ") != std::string::npos
++                                        : name.rfind("TDM_0_RX Mixer ", 0) == 0;
++            if (!relevant) continue;
++            sawRoute = true;
++            if (!requireValue(name, 0)) return false;
++        }
++        return sawRoute && requireValue(input ? kCaptureRoute : kPlaybackRoute, 0);
++    }
++
++    bool writeValue(const Value& value, int wanted) {
++        mixer_ctl* ctl = control(value.name, value.width);
++        if (ctl == nullptr) return false;
++        const int current = mixer_ctl_get_value(ctl, value.index);
++        if (current == wanted) return true;  // Avoid duplicate route off/HD commands.
++        const bool ok = mixer_ctl_get_type(ctl) == MIXER_CTL_TYPE_ENUM
++                ? (wanted >= 0 && static_cast<unsigned int>(wanted) < mixer_ctl_get_num_enums(ctl) &&
++                   mixer_ctl_set_enum_by_string(ctl, mixer_ctl_get_enum_string(ctl, wanted)) == 0)
++                : mixer_ctl_set_value(ctl, value.index, wanted) == 0;
++        return ok && mixer_ctl_get_value(ctl, value.index) == wanted;
++    }
++
++    bool setValue(const std::string& name, int wanted, unsigned int index = 0,
++                  unsigned int width = 1) {
++        Value* value = remember(name, index, width);
++        if (value == nullptr) return false;
++        if (!writeValue(*value, wanted)) {
++            latchFault("mixer write/readback failed");
++            return false;
++        }
++        value->owned = wanted;
++        mTouched = mTouched || value->original != wanted;
++        return true;
++    }
++
++    bool setEnum(const std::string& name, const char* wanted) {
++        mixer_ctl* ctl = control(name);
++        if (ctl == nullptr || mixer_ctl_get_type(ctl) != MIXER_CTL_TYPE_ENUM) return false;
++        for (unsigned int i = 0; i < mixer_ctl_get_num_enums(ctl); ++i) {
++            const char* value = mixer_ctl_get_enum_string(ctl, i);
++            if (value != nullptr && std::string(value) == wanted) return setValue(name, i);
++        }
++        LOG(ERROR) << "Cubs missing mixer enum " << name << '=' << wanted;
++        return false;
++    }
++
++    bool matchesOwned() const {
++        for (const auto& value : mValues) {
++            mixer_ctl* ctl = control(value.name, value.width);
++            if (ctl == nullptr || mixer_ctl_get_value(ctl, value.index) != value.owned) return false;
++        }
++        return true;
++    }
++
++    void latchFault(const char* reason) {
++        mFault = true;
++        gCubsRouteFault.store(true);
++        LOG(ERROR) << "Cubs route fault: " << reason << "; refusing further streams; reboot required";
++    }
++
++    bool failSetup() {
++        cleanupLocked();
++        return false;
++    }
++
++    void cleanupLocked() {
++        if (mMixer == nullptr) return;
++        if (mTouched) {
++            if (mFault || !sameGeneration() || !externalOwnerStopped() || !matchesOwned()) {
++                latchFault("cleanup ownership/generation uncertain; no stale mixer replay");
++            } else {
++                // StreamPowerphone closes PCM first. Match the real wrapper:
++                // amplifier ASI off, then EP6 off; capture only unbinds EP3.
++                bool off = true;
++                if (!mInput && !setValue(kAsiSwitch, 0)) off = false;
++                if (!setValue(mInput ? kCaptureRoute : kPlaybackRoute, 0)) off = false;
++                if (off) {
++                    for (auto it = mValues.rbegin(); it != mValues.rend(); ++it) {
++                        if (!writeValue(*it, it->original)) {
++                            latchFault("mixer restoration failed");
++                            break;
++                        }
++                    }
++                } else {
++                    latchFault("route shutdown failed");
++                }
++            }
++        }
++        mixer_close(mMixer);
++        mMixer = nullptr;
++        mValues.clear();
++        mConfigured = false;
++        mTouched = false;
++    }
++
++    const bool mInput;
++    mixer* mMixer = nullptr;
++    std::vector<Value> mValues;
++    std::string mGeneration;
++    bool mConfigured = false;
++    bool mTouched = false;
++    bool mFault = false;
++};
++
++}  // namespace aidl::android::hardware::audio::core::powerphone
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+index ccb5a14..422d658 100644
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -18,6 +18,7 @@
+ 
+ #include "Powerphone.h"
+ #include "TargetConfiguration.h"
++#include "CubsRoute.h"
+ 
+ #include <powerphone/PlaybackRouteVolume.h>
+ 
+@@ -287,6 +288,10 @@ class CaptureRoute {
+     bool configure(CaptureEndpoint endpoint) {
+         if (!kTarget.canAdvertiseDirection(true)) return false;
+         cleanup();
++        if (kTarget.routeBackend == RouteBackend::CUBS_PREPARATORY) {
++            mCubsRoute = std::make_unique<CubsRoute>(true);
++            return mCubsRoute->configureCapture(endpoint, kTarget);
++        }
+         mEndpoint = endpoint;
+         mMixer = mixer_open(kCaptureCard);
+         if (mMixer == nullptr) {
+@@ -337,10 +342,12 @@ class CaptureRoute {
+     }
+ 
+     bool isActive() const {
++        if (mCubsRoute != nullptr) return mCubsRoute->isActive();
+         return mMixer != nullptr && mSetupComplete && !mOwnershipLost;
+     }
+ 
+     bool verifyOwnership() {
++        if (mCubsRoute != nullptr) return mCubsRoute->verifyOwnership();
+         if (mMixer == nullptr || !mSetupComplete || mOwnershipLost) return false;
+         if (!matchesOwnedState()) {
+             mOwnershipLost = true;
+@@ -352,6 +359,11 @@ class CaptureRoute {
+     }
+ 
+     void cleanup() {
++        if (mCubsRoute != nullptr) {
++            mCubsRoute->cleanup();
++            mCubsRoute.reset();
++            return;
++        }
+         if (mMixer == nullptr) return;
+ 
+         // PCM closure precedes this method in every StreamPowerphone path. The
+@@ -540,6 +552,7 @@ class CaptureRoute {
+         mMixer = nullptr;
+     }
+ 
++    std::unique_ptr<CubsRoute> mCubsRoute;
+     mixer* mMixer = nullptr;
+     std::optional<CaptureEndpoint> mEndpoint;
+     bool mRouteTouched = false;
+@@ -554,6 +567,10 @@ class PlaybackRoute {
+     bool configure(PlaybackEndpoint endpoint) {
+         if (!kTarget.canAdvertiseDirection(false)) return false;
+         cleanup();
++        if (kTarget.routeBackend == RouteBackend::CUBS_PREPARATORY) {
++            mCubsRoute = std::make_unique<CubsRoute>(false);
++            return mCubsRoute->configurePlayback(endpoint, kTarget);
++        }
+         if (mSavedPcmOpenWait.has_value()) {
+             LOG(ERROR) << __func__ << ": refusing reuse after card-wide PCM wait restore failure";
+             return false;
+@@ -655,10 +672,12 @@ class PlaybackRoute {
+     }
+ 
+     bool isActive() const {
++        if (mCubsRoute != nullptr) return mCubsRoute->isActive();
+         return mMixer != nullptr && mSetupComplete && !mOwnershipLost;
+     }
+ 
+     bool verifyOwnership() {
++        if (mCubsRoute != nullptr) return mCubsRoute->verifyOwnership();
+         if (mMixer == nullptr || !mSetupComplete || mOwnershipLost) return false;
+         if (!matchesOwnedState()) {
+             mOwnershipLost = true;
+@@ -670,6 +689,7 @@ class PlaybackRoute {
+     }
+ 
+     bool restorePcmOpenWait() {
++        if (mCubsRoute != nullptr) return true;  // Cubs does not change this card-wide control.
+         if (!mSavedPcmOpenWait.has_value()) return true;
+         mixer_ctl* ctl = control(kPcmStreamWaitControl);
+         const int saved = *mSavedPcmOpenWait;
+@@ -684,6 +704,11 @@ class PlaybackRoute {
+     }
+ 
+     void cleanup() {
++        if (mCubsRoute != nullptr) {
++            mCubsRoute->cleanup();
++            mCubsRoute.reset();
++            return;
++        }
+         if (mMixer == nullptr) return;
+         // The PCM-open override is independent of route ownership. Always
+         // attempt to restore it before any route cleanup decision, including
+@@ -1079,6 +1104,7 @@ class PlaybackRoute {
+         mMixer = nullptr;
+     }
+ 
++    std::unique_ptr<CubsRoute> mCubsRoute;
+     mixer* mMixer = nullptr;
+     std::vector<SavedMixerValue> mSavedValues;
+     std::vector<OwnedMixerValue> mOwnedValues;
+diff --git a/audio/aidl/default/powerphone/TargetConfiguration.h b/audio/aidl/default/powerphone/TargetConfiguration.h
+index 635f9f0..da15919 100644
+--- a/audio/aidl/default/powerphone/TargetConfiguration.h
++++ b/audio/aidl/default/powerphone/TargetConfiguration.h
+@@ -34,7 +34,7 @@ struct EndpointIdentity {
+     const char* address;
+ };
+ 
+-enum class RouteBackend { FRANKEL, UNIMPLEMENTED };
++enum class RouteBackend { FRANKEL, CUBS_PREPARATORY, UNIMPLEMENTED };
+ 
+ struct TargetConfiguration {
+     const char* codename;
+@@ -46,6 +46,8 @@ struct TargetConfiguration {
+     std::array<EndpointIdentity, 2> speakers;
+ 
+     constexpr bool canAdvertiseDirection(bool input) const {
++        // The Cubs mixer implementation is buildable preparation, not an
++        // enabled HAL contract. Rates/properties alone must not enable it.
+         return routeBackend == RouteBackend::FRANKEL &&
+                (input ? capture : playback).hasTransportContract();
+     }
+@@ -66,15 +68,15 @@ inline constexpr TargetConfiguration kFrankelTargetConfiguration{
+           {"PowerPhone R amp (bottom candidate) 192k", "POWERPHONE_C0_D0_BOTTOM"}}},
+ };
+ 
+-// Known PCM identities and proposed unique addresses ONLY. No capture or
+-// playback rate is qualified for Android yet, and no Cubs route backend exists.
++// Known PCM identities and proposed unique addresses ONLY. The preparatory
++// Cubs route implementation is excluded by canAdvertiseDirection above.
+ // In particular, the experimental D10 firmware touches shared capture code;
+ // a sidecar mutex cannot exclude the proprietary primary/soundtrigger HALs.
+ // Do not fill rates or enable this descriptor until target-specific routing,
+ // shared-owner exclusion, cache-coherent boot activation and restart revocation
+ // are implemented and the exact PCM/API paths have real-hardware evidence.
+ inline constexpr TargetConfiguration kCubsUnqualifiedTargetConfiguration{
+-        "cubs", RouteBackend::UNIMPLEMENTED,
++        "cubs", RouteBackend::CUBS_PREPARATORY,
+         {0, 10, 0, 0, 0, 0, "vendor.powerphone.cubs.capture.ready", ""},
+         {0, 5, 0, 0, 0, 0, "vendor.powerphone.cubs.playback.ready", ""},
+         {{{"PowerPhone Cubs logical mic 0", "POWERPHONE_CUBS_C0_D10_MIC0"},

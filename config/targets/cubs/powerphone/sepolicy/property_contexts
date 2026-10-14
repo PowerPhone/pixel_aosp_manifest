@@ -1,0 +1,6 @@
+vendor.powerphone.cubs.capture.ready u:object_r:vendor_powerphone_cubs_prop:s0 exact bool
+vendor.powerphone.cubs.playback.ready u:object_r:vendor_powerphone_cubs_prop:s0 exact bool
+vendor.powerphone.cubs.profile u:object_r:vendor_powerphone_cubs_prop:s0 exact string
+vendor.powerphone.cubs.boot_id u:object_r:vendor_powerphone_cubs_prop:s0 exact string
+vendor.powerphone.cubs.boot.phase u:object_r:vendor_powerphone_cubs_prop:s0 exact enum waiting applying ready failed
+vendor.powerphone.cubs.audioserver_stopped u:object_r:vendor_powerphone_cubs_prop:s0 exact bool

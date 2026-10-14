@@ -1,0 +1,609 @@
+diff --git a/audio/aidl/default/Android.bp b/audio/aidl/default/Android.bp
+index c506809..ae69770 100644
+--- a/audio/aidl/default/Android.bp
++++ b/audio/aidl/default/Android.bp
+@@ -295,6 +295,40 @@ cc_binary {
+     ],
+ }
+ 
++// No RC or VINTF fragments here: Cubs target integration must explicitly
++// replace the proprietary defaults and gate activation on the boot profile.
++cc_binary {
++    name: "android.hardware.audio.service-aidl.powerphone-cubs",
++    relative_install_path: "hw",
++    defaults: [
++        "aidlaudioservice_defaults",
++        "latest_android_hardware_audio_core_sounddose_ndk_shared",
++        "latest_android_hardware_audio_core_ndk_shared",
++        "latest_android_hardware_audio_effect_ndk_shared",
++        "latest_android_hardware_bluetooth_audio_ndk_shared",
++        "latest_android_media_audio_common_types_ndk_shared",
++    ],
++    static_libs: ["libaudioserviceexampleimpl"],
++    shared_libs: [
++        "android.hardware.bluetooth.audio-impl",
++        "libaudio_aidl_conversion_common_ndk",
++        "libbluetooth_audio_session_aidl",
++        "liblog",
++        "libmedia_helper",
++        "libpowerphone_tinyalsa_v1",
++        "libstagefright_foundation",
++    ],
++    srcs: [
++        "powerphone/PlaybackRouteVolume.c",
++        "powerphone/Powerphone.cpp",
++        "powerphone/main.cpp",
++    ],
++    cflags: [
++        "-Wall", "-Wextra", "-Werror", "-Wthread-safety", "-DBACKEND_NDK",
++        "-DPOWERPHONE_CUBS_PRIMARY",
++    ],
++}
++
+ cc_test {
+     name: "audio_policy_config_xml_converter_tests",
+     vendor_available: true,
+diff --git a/audio/aidl/default/powerphone/CubsRoute.h b/audio/aidl/default/powerphone/CubsRoute.h
+index 7ccae5f..9e73e5f 100644
+--- a/audio/aidl/default/powerphone/CubsRoute.h
++++ b/audio/aidl/default/powerphone/CubsRoute.h
+@@ -9,10 +9,12 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <cerrno>
+ #include <mutex>
+ #include <string>
+ #include <vector>
+ #include <unistd.h>
++#include <sys/stat.h>
+ 
+ #include <Log.h>
+ #include <android-base/file.h>
+@@ -31,14 +33,24 @@ namespace aidl::android::hardware::audio::core::powerphone {
+ inline std::mutex gCubsMixerTransactionLock;
+ inline std::atomic<bool> gCubsRouteFault{false};
+ 
+-// No ports/rates are enabled by this class. TargetConfiguration rejects the
+-// CUBS_PREPARATORY backend even if a property is set. RAW3 is unsupported.
++// Only the separately built Cubs research-primary service enables this class.
++// The existing service still rejects CUBS_PREPARATORY. RAW3 is unsupported.
+ // The shared stream owner must close PCM before calling cleanup().
+ class CubsRoute final {
+   public:
+     explicit CubsRoute(bool input) : mInput(input) {}
+     ~CubsRoute() { cleanup(); }
+ 
++    static bool runtimeReady() {
++        std::string boot;
++        return !gCubsRouteFault.load() && generation(&boot) && externalOwnerStopped() &&
++                ::android::base::GetBoolProperty("vendor.powerphone.cubs.capture.ready", false) &&
++                ::android::base::GetBoolProperty("vendor.powerphone.cubs.playback.ready", false) &&
++                ::android::base::GetProperty("vendor.powerphone.cubs.profile", "") ==
++                        "mono192-edge0-mcps112-d5-two-slot-v5" &&
++                ::android::base::GetProperty("vendor.powerphone.cubs.boot_id", "") == boot;
++    }
++
+     bool configureCapture(CaptureEndpoint endpoint, const TargetConfiguration& target) {
+         std::lock_guard transaction(gCubsMixerTransactionLock);
+         if (!prepare(target)) return false;
+@@ -69,6 +81,7 @@ class CubsRoute final {
+             !setEnum("INTERNAL_MIC_TX Format", "S16_LE") ||
+             !setEnum("INTERNAL_MIC_TX Chan", "One") ||
+             !setValue(kCaptureRoute, 1)) return failSetup();
++        if (!runtimeReady() || !sameGeneration()) return failSetup();
+         mConfigured = true;
+         return true;
+     }
+@@ -91,6 +104,7 @@ class CubsRoute final {
+             !setEnum("TDM_0_RX nSlot", "Two") ||
+             !setEnum("TDM_0_RX SlotFmt", "S32_LE") ||
+             !setValue(kPlaybackRoute, 1) || !setValue(kAsiSwitch, 1)) return failSetup();
++        if (!runtimeReady() || !sameGeneration()) return failSetup();
+         mConfigured = true;
+         return true;
+     }
+@@ -143,12 +157,16 @@ class CubsRoute final {
+     }
+ 
+     static bool externalOwnerStopped() {
+-        return ::android::base::GetProperty("init.svc.vendor.audio-hal-aidl", "") == "stopped";
++        // Integrated Cubs images remove that service definition completely;
++        // live bring-up may instead retain an explicitly stopped definition.
++        const std::string state =
++                ::android::base::GetProperty("init.svc.vendor.audio-hal-aidl", "");
++        return state.empty() || state == "stopped";
+     }
+ 
+     bool prepare(const TargetConfiguration& target) {
+         if (mMixer != nullptr || gCubsRouteFault.load() || mFault ||
+-            target.routeBackend != RouteBackend::CUBS_PREPARATORY ||
++            target.routeBackend != RouteBackend::CUBS_RESEARCH_PRIMARY ||
+             !target.canAdvertiseDirection(mInput)) return false;
+         // Explicitly mono/direct-two-slot only, independent of advertised
+         // rate placeholders. Future activation requires a separate review.
+@@ -156,10 +174,11 @@ class CubsRoute final {
+         if (direction.card != 0 || direction.device != (mInput ? 10 : 5) ||
+             direction.rate != 192000 ||
+             std::string(direction.mixerRateEnum) != "SR_192K" ||
+-            !externalOwnerStopped() || !generation(&mGeneration)) return false;
++            !runtimeReady() || !generation(&mGeneration)) return false;
+         // RAW3 changes representation in shared producer rings; mono must
+         // never open over that profile. A marker does not certify readiness.
+-        if (access("/dev/powerphone-cubs-raw3-192", F_OK) == 0) return false;
++        struct stat marker{};
++        if (lstat("/dev/powerphone-cubs-raw3-192", &marker) == 0 || errno != ENOENT) return false;
+         mMixer = mixer_open(direction.card);
+         return mMixer != nullptr;
+     }
+@@ -210,6 +229,9 @@ class CubsRoute final {
+     }
+ 
+     bool writeValue(const Value& value, int wanted) {
++        // A generation change during setup or restoration must never issue
++        // commands into a different, unpatched DSP instance.
++        if (!sameGeneration() || !externalOwnerStopped()) return false;
+         mixer_ctl* ctl = control(value.name, value.width);
+         if (ctl == nullptr) return false;
+         const int current = mixer_ctl_get_value(ctl, value.index);
+diff --git a/audio/aidl/default/powerphone/CubsServices.h b/audio/aidl/default/powerphone/CubsServices.h
+new file mode 100644
+index 0000000..54bb204
+--- /dev/null
++++ b/audio/aidl/default/powerphone/CubsServices.h
+@@ -0,0 +1,85 @@
++/* Copyright (C) 2026 The Android Open Source Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <array>
++#include <optional>
++#include <aidl/android/hardware/audio/core/BnConfig.h>
++#include <aidl/android/hardware/audio/effect/BnFactory.h>
++
++namespace aidl::android::hardware::audio::core::powerphone {
++
++// An owned, deliberately unprocessed research image. This is a complete empty
++// effects factory, not a missing service which would strand framework lookup.
++class CubsEmptyEffects final : public ::aidl::android::hardware::audio::effect::BnFactory {
++    using Uuid = ::aidl::android::media::audio::common::AudioUuid;
++    using Descriptor = ::aidl::android::hardware::audio::effect::Descriptor;
++    using Processing = ::aidl::android::hardware::audio::effect::Processing;
++    using IEffect = ::aidl::android::hardware::audio::effect::IEffect;
++  public:
++    ndk::ScopedAStatus queryEffects(const std::optional<Uuid>&, const std::optional<Uuid>&,
++                                   const std::optional<Uuid>&,
++                                   std::vector<Descriptor>* result) override {
++        result->clear();
++        return ndk::ScopedAStatus::ok();
++    }
++    ndk::ScopedAStatus queryProcessing(const std::optional<Processing::Type>&,
++                                      std::vector<Processing>* result) override {
++        result->clear();
++        return ndk::ScopedAStatus::ok();
++    }
++    ndk::ScopedAStatus createEffect(const Uuid&, std::shared_ptr<IEffect>* result) override {
++        result->reset();
++        return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
++    }
++    ndk::ScopedAStatus destroyEffect(const std::shared_ptr<IEffect>&) override {
++        return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
++    }
++};
++
++class CubsConfig final : public BnConfig {
++  public:
++    ndk::ScopedAStatus getSurroundSoundConfig(SurroundSoundConfig* result) override {
++        *result = {};
++        return ndk::ScopedAStatus::ok();
++    }
++    ndk::ScopedAStatus getEngineConfig(
++            ::aidl::android::media::audio::common::AudioHalEngineConfig* result) override {
++        using Group = ::aidl::android::media::audio::common::AudioHalVolumeGroup;
++        using Curve = ::aidl::android::media::audio::common::AudioHalVolumeCurve;
++        *result = {};
++        // Empty strategies intentionally select AOSP's standard policy engine.
++        // Nonempty volume groups are mandatory. These conservative research
++        // curves are owned here, not imported from a proprietary CAP config.
++        const std::array<std::pair<const char*, int>, 14> streams{{
++                {"VOICE_CALL", 5}, {"SYSTEM", 7}, {"RING", 7}, {"MUSIC", 25},
++                {"ALARM", 7}, {"NOTIFICATION", 7}, {"BLUETOOTH_SCO", 15},
++                {"ENFORCED_AUDIBLE", 7}, {"DTMF", 15}, {"TTS", 15},
++                {"ACCESSIBILITY", 15}, {"ASSISTANT", 15},
++                {"REROUTING", 100}, {"PATCH", 100}}};
++        for (const auto& [name, maximum] : streams) {
++            Group group;
++            group.name = std::string("AUDIO_STREAM_") + name;
++            group.minIndex = 0;
++            group.maxIndex = maximum;
++            for (int category = 0; category <= 4; ++category) {
++                Curve curve;
++                curve.deviceCategory = static_cast<Curve::DeviceCategory>(category);
++                for (const auto [index, gain] :
++                     std::array<std::pair<int8_t, int>, 5>{{
++                             {0, -9600}, {1, -6000}, {33, -4000}, {66, -2000}, {100, 0}}}) {
++                    Curve::CurvePoint point;
++                    point.index = index;
++                    point.attenuationMb = gain;
++                    curve.curvePoints.push_back(point);
++                }
++                group.volumeCurves.push_back(std::move(curve));
++            }
++            result->volumeGroups.push_back(std::move(group));
++        }
++        return ndk::ScopedAStatus::ok();
++    }
++};
++
++}  // namespace aidl::android::hardware::audio::core::powerphone
+diff --git a/audio/aidl/default/powerphone/Powerphone.cpp b/audio/aidl/default/powerphone/Powerphone.cpp
+index 422d658..63e4067 100644
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -54,6 +54,7 @@ using aidl::android::media::audio::common::AudioFormatType;
+ using aidl::android::media::audio::common::AudioGainConfig;
+ using aidl::android::media::audio::common::AudioIoFlags;
+ using aidl::android::media::audio::common::AudioOffloadInfo;
++using aidl::android::media::audio::common::AudioOutputFlags;
+ using aidl::android::media::audio::common::AudioPort;
+ using aidl::android::media::audio::common::AudioPortConfig;
+ using aidl::android::media::audio::common::AudioPortDeviceExt;
+@@ -99,6 +100,14 @@ const int32_t kPlaybackLatencyMs = kPlaybackRate > 0
+         ? (kPlaybackAlsaBufferFrames * 1000 + kPlaybackRate - 1) / kPlaybackRate : 0;
+ const char* const kCaptureReadyProperty = kTarget.capture.readyProperty;
+ const char* const kSpeakerReadyProperty = kTarget.playback.readyProperty;
++const bool kCubsPrimary = kTarget.routeBackend == RouteBackend::CUBS_RESEARCH_PRIMARY;
++std::atomic<bool> gCubsMicMute{false};
++
++bool directionReady(bool input) {
++    if (kCubsPrimary) return CubsRoute::runtimeReady();
++    return ::android::base::GetBoolProperty(input ? kCaptureReadyProperty : kSpeakerReadyProperty,
++                                          false);
++}
+ 
+ int64_t playbackMonotonicNs() {
+     return std::chrono::duration_cast<std::chrono::nanoseconds>(
+@@ -122,7 +131,8 @@ struct Endpoint {
+ // internal physical endpoints, while remaining invisible to the default
+ // media, ring, call, and record strategies. Only an app that selects the exact
+ // PowerPhone address may activate one.
+-const std::array<Endpoint, 5> kEndpoints{{
++const std::vector<Endpoint> kEndpoints = [] {
++    std::vector<Endpoint> endpoints{
+         {kTarget.microphones[0].name, kTarget.microphones[0].address,
+          AudioDeviceType::IN_BUS, kCaptureCard, kCaptureDevice, PCM_IN,
+          CaptureEndpoint::LOGICAL_MIC_0, std::nullopt},
+@@ -140,7 +150,21 @@ const std::array<Endpoint, 5> kEndpoints{{
+         {kTarget.speakers[1].name, kTarget.speakers[1].address,
+          AudioDeviceType::OUT_BUS, kPlaybackCard, kPlaybackDevice, PCM_OUT, std::nullopt,
+          PlaybackEndpoint::BOTTOM_CANDIDATE},
+-}};
++    };
++    if (kCubsPrimary) {
++        // Only these built-ins are defaults. Research BUS ports require an
++        // explicit address and share the same per-direction hardware lease.
++        endpoints.insert(endpoints.begin(),
++                {"Built-in microphone (Cubs logical 0)", "", AudioDeviceType::IN_MICROPHONE,
++                 kCaptureCard, kCaptureDevice, PCM_IN,
++                 CaptureEndpoint::LOGICAL_MIC_0, std::nullopt});
++        endpoints.insert(endpoints.begin(),
++                {"Speaker (Cubs bottom)", "", AudioDeviceType::OUT_SPEAKER,
++                 kPlaybackCard, kPlaybackDevice, PCM_OUT,
++                 std::nullopt, PlaybackEndpoint::BOTTOM_CANDIDATE});
++    }
++    return endpoints;
++}();
+ 
+ AudioDevice makeAudioDevice(const Endpoint& endpoint) {
+     AudioDevice device;
+@@ -153,6 +177,10 @@ AudioDevice makeAudioDevice(const Endpoint& endpoint) {
+ AudioPortExt makeDeviceExt(const Endpoint& endpoint) {
+     AudioPortDeviceExt deviceExt;
+     deviceExt.device = makeAudioDevice(endpoint);
++    if (kCubsPrimary && (endpoint.type == AudioDeviceType::OUT_SPEAKER ||
++                         endpoint.type == AudioDeviceType::IN_MICROPHONE)) {
++        deviceExt.flags = 1 << AudioPortDeviceExt::FLAG_INDEX_DEFAULT_DEVICE;
++    }
+     return AudioPortExt::make<AudioPortExt::Tag::device>(std::move(deviceExt));
+ }
+ 
+@@ -288,7 +316,7 @@ class CaptureRoute {
+     bool configure(CaptureEndpoint endpoint) {
+         if (!kTarget.canAdvertiseDirection(true)) return false;
+         cleanup();
+-        if (kTarget.routeBackend == RouteBackend::CUBS_PREPARATORY) {
++        if (kCubsPrimary) {
+             mCubsRoute = std::make_unique<CubsRoute>(true);
+             return mCubsRoute->configureCapture(endpoint, kTarget);
+         }
+@@ -567,7 +595,7 @@ class PlaybackRoute {
+     bool configure(PlaybackEndpoint endpoint) {
+         if (!kTarget.canAdvertiseDirection(false)) return false;
+         cleanup();
+-        if (kTarget.routeBackend == RouteBackend::CUBS_PREPARATORY) {
++        if (kCubsPrimary) {
+             mCubsRoute = std::make_unique<CubsRoute>(false);
+             return mCubsRoute->configurePlayback(endpoint, kTarget);
+         }
+@@ -1187,7 +1215,14 @@ std::unique_ptr<Module::Configuration> makeConfiguration() {
+         // A normal mixer port lets AudioTrack/AAudio use PCM_FLOAT clients while
+         // AudioFlinger converts to the exact S32 backend. DIRECT/FAST/RAW would
+         // either require exact client format or select an unrelated vendor path.
+-        outputMixPort.flags = AudioIoFlags::make<AudioIoFlags::Tag::output>(0);
++        const auto devicePort = std::find_if(config->ports.begin(), config->ports.end(),
++                [devicePortId](const AudioPort& p) { return p.id == devicePortId; });
++        const bool primary = kCubsPrimary && devicePort != config->ports.end() &&
++                devicePort->ext.get<AudioPortExt::Tag::device>().device.type.type ==
++                        AudioDeviceType::OUT_SPEAKER;
++        outputMixPort.flags = AudioIoFlags::make<AudioIoFlags::Tag::output>(
++                primary ? 1 << static_cast<int>(AudioOutputFlags::PRIMARY) : 0);
++        if (primary) outputMixPort.name = "Cubs primary fixed192 output";
+         outputMixPort.profiles = {outputProfile};
+         outputMixPort.ext = makeMixExt();
+         config->ports.push_back(outputMixPort);
+@@ -1301,13 +1336,13 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+             std::lock_guard lock(mLock);
+             if (mCaptureRoute != nullptr) {
+                 resumedRoute = true;
+-                resumedReady = ::android::base::GetBoolProperty(kCaptureReadyProperty, false);
++                resumedReady = directionReady(true);
+                 resumedOwnership = mCaptureRoute->isActive();
+             } else if (!mCaptureEndpoint.has_value() || mDeviceProfiles.size() != 1 ||
+                        !mConfig.has_value() || !mAlsaDeviceProxies.empty()) {
+                 LOG(ERROR) << __func__ << ": no unique PowerPhone input is connected";
+                 return ::android::NO_INIT;
+-            } else if (!::android::base::GetBoolProperty(kCaptureReadyProperty, false)) {
++            } else if (!directionReady(true)) {
+                 LOG(ERROR) << __func__ << ": " << kCaptureReadyProperty
+                            << " is absent or false; resident D10 profile is not certified";
+                 return ::android::PERMISSION_DENIED;
+@@ -1362,7 +1397,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+             cleanupCaptureRouteLocked();
+             return status == ::android::OK ? ::android::NO_INIT : status;
+         }
+-        const bool ready = ::android::base::GetBoolProperty(kCaptureReadyProperty, false);
++        const bool ready = directionReady(true);
+         bool ownsRoute = false;
+         {
+             std::lock_guard lock(mLock);
+@@ -1387,20 +1422,20 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         if (mPlaybackRoute != nullptr) {
+             // Resume after pause; the legacy PCM and owned route remain active.
+             resumedRoute = true;
+-            resumedReady = ::android::base::GetBoolProperty(kSpeakerReadyProperty, false);
++            resumedReady = directionReady(false);
+             resumedOwnership = mPlaybackRoute->isActive() &&
+                     mLegacyPlaybackPcm != nullptr &&
+                     powerphone_legacy_pcm_is_ready(mLegacyPlaybackPcm);
+         } else if (mPlaybackOpenPending && mOwnsPlaybackLease) {
+             // START can be repeated before the first nonzero burst. The route
+             // remains deliberately unbound until that burst is in hand.
+-            return ::android::base::GetBoolProperty(kSpeakerReadyProperty, false)
++            return directionReady(false)
+                     ? ::android::OK
+                     : ::android::PERMISSION_DENIED;
+         } else if (!mPlaybackEndpoint.has_value() || mDeviceProfiles.size() != 1) {
+             LOG(ERROR) << __func__ << ": no unique PowerPhone output is connected";
+             return ::android::NO_INIT;
+-        } else if (!::android::base::GetBoolProperty(kSpeakerReadyProperty, false)) {
++        } else if (!directionReady(false)) {
+             LOG(ERROR) << __func__ << ": " << kSpeakerReadyProperty
+                        << " is absent or false; volatile AoC patch is not certified";
+             return ::android::PERMISSION_DENIED;
+@@ -1448,7 +1483,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+             cleanupPlaybackRouteLocked();
+             return ::android::NO_INIT;
+         }
+-        if (!::android::base::GetBoolProperty(kSpeakerReadyProperty, false)) {
++        if (!directionReady(false)) {
+             cleanupPlaybackRouteLocked();
+             return ::android::PERMISSION_DENIED;
+         }
+@@ -1529,7 +1564,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         return ::android::NO_INIT;
+     }
+ 
+-    const bool ready = ::android::base::GetBoolProperty(kSpeakerReadyProperty, false);
++    const bool ready = directionReady(false);
+     bool ownsRoute = false;
+     {
+         std::lock_guard lock(mLock);
+@@ -1648,7 +1683,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+ ::android::status_t StreamPowerphone::transfer(void* buffer, size_t frameCount,
+                                                size_t* actualFrameCount, int32_t* latencyMs) {
+     if (mIsInput) {
+-        const bool ready = ::android::base::GetBoolProperty(kCaptureReadyProperty, false);
++        const bool ready = directionReady(true);
+         bool routeExists = false;
+         {
+             std::lock_guard lock(mLock);
+@@ -1707,6 +1742,10 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+             *actualFrameCount = 0;
+             return status == ::android::OK ? ::android::INVALID_OPERATION : status;
+         }
++        if (kCubsPrimary && gCubsMicMute.load(std::memory_order_acquire)) {
++            // Honor system microphone privacy even on addressed raw routes.
++            std::fill_n(static_cast<uint8_t*>(buffer), *actualFrameCount * mFrameSizeBytes, 0);
++        }
+         return ::android::OK;
+     }
+     const int64_t transferEntryNs = playbackMonotonicNs();
+@@ -1776,7 +1815,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+     // complete state is audited after PCM close; the transfer path checks only
+     // the in-process lease and boot-local certificate. This mirrors the
+     // qualified tinyplay path, which performs no mixer I/O while PCM0,D5 runs.
+-    const bool ready = ::android::base::GetBoolProperty(kSpeakerReadyProperty, false);
++    const bool ready = directionReady(false);
+     const int64_t propertyNs = playbackMonotonicNs();
+     bool routeExists = false;
+     {
+@@ -1833,7 +1872,7 @@ std::vector<alsa::DeviceProfile> StreamPowerphone::getDeviceProfiles() {
+         const size_t startupAcceptedFrames =
+                 mPlaybackStartupAcceptedFrames.load(std::memory_order_acquire);
+         const bool retryStartupSecondWrite =
+-                startupAcceptedFrames == kPlaybackAlsaPeriodFrames;
++                !kCubsPrimary && startupAcceptedFrames == kPlaybackAlsaPeriodFrames;
+         uint32_t efaultRetries = 0;
+         const int64_t writeBeginNs = playbackMonotonicNs();
+         if (firstWriteNs == 0) firstWriteNs = writeBeginNs;
+@@ -1989,6 +2028,23 @@ ndk::ScopedAStatus ModulePowerphone::createInputStream(
+                                                     microphones);
+ }
+ 
++ndk::ScopedAStatus ModulePowerphone::setMicMute(bool mute) {
++    if (kCubsPrimary) gCubsMicMute.store(mute, std::memory_order_release);
++    return Module::setMicMute(mute);
++}
++
++ndk::ScopedAStatus ModulePowerphone::onMasterMuteChanged(bool mute) {
++    // AudioFlinger must apply ordinary master mute/volume in software. Do not
++    // inherit the example module's success-with-no-hardware-change behavior.
++    if (kCubsPrimary) return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++    return Module::onMasterMuteChanged(mute);
++}
++
++ndk::ScopedAStatus ModulePowerphone::onMasterVolumeChanged(float volume) {
++    if (kCubsPrimary) return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++    return Module::onMasterVolumeChanged(volume);
++}
++
+ ndk::ScopedAStatus ModulePowerphone::createOutputStream(
+         StreamContext&& context, const SourceMetadata& sourceMetadata,
+         const std::optional<AudioOffloadInfo>& offloadInfo, std::shared_ptr<StreamOut>* result) {
+diff --git a/audio/aidl/default/powerphone/Powerphone.h b/audio/aidl/default/powerphone/Powerphone.h
+index ab816a3..897730d 100644
+--- a/audio/aidl/default/powerphone/Powerphone.h
++++ b/audio/aidl/default/powerphone/Powerphone.h
+@@ -118,8 +118,11 @@ class ModulePowerphone final : public Module {
+   public:
+     explicit ModulePowerphone(std::unique_ptr<Configuration>&& config)
+         : Module(Type::DEFAULT, std::move(config)) {}
++    ndk::ScopedAStatus setMicMute(bool mute) override;
+ 
+   protected:
++    ndk::ScopedAStatus onMasterMuteChanged(bool mute) override;
++    ndk::ScopedAStatus onMasterVolumeChanged(float volume) override;
+     ndk::ScopedAStatus createInputStream(
+             StreamContext&& context,
+             const ::aidl::android::hardware::audio::common::SinkMetadata& sinkMetadata,
+diff --git a/audio/aidl/default/powerphone/TargetConfiguration.h b/audio/aidl/default/powerphone/TargetConfiguration.h
+index da15919..0628791 100644
+--- a/audio/aidl/default/powerphone/TargetConfiguration.h
++++ b/audio/aidl/default/powerphone/TargetConfiguration.h
+@@ -12,7 +12,8 @@ namespace aidl::android::hardware::audio::core::powerphone {
+ 
+ // A rate belongs to a complete independently qualified direction, not a phone.
+ // These immutable build-time contracts are deliberately not tunable properties.
+-// Changing a WAV/API header or setting a readiness property cannot enable Cubs.
++// Cubs activation additionally requires its separate primary executable and
++// the complete boot-generation/profile contract, not a rate property.
+ struct StreamTargetConfiguration {
+     int32_t card;
+     int32_t device;
+@@ -34,7 +35,7 @@ struct EndpointIdentity {
+     const char* address;
+ };
+ 
+-enum class RouteBackend { FRANKEL, CUBS_PREPARATORY, UNIMPLEMENTED };
++enum class RouteBackend { FRANKEL, CUBS_PREPARATORY, CUBS_RESEARCH_PRIMARY, UNIMPLEMENTED };
+ 
+ struct TargetConfiguration {
+     const char* codename;
+@@ -46,9 +47,9 @@ struct TargetConfiguration {
+     std::array<EndpointIdentity, 2> speakers;
+ 
+     constexpr bool canAdvertiseDirection(bool input) const {
+-        // The Cubs mixer implementation is buildable preparation, not an
+-        // enabled HAL contract. Rates/properties alone must not enable it.
+-        return routeBackend == RouteBackend::FRANKEL &&
++        // CUBS_PREPARATORY remains disabled in the existing service binary.
++        return (routeBackend == RouteBackend::FRANKEL ||
++                routeBackend == RouteBackend::CUBS_RESEARCH_PRIMARY) &&
+                (input ? capture : playback).hasTransportContract();
+     }
+     constexpr bool canAdvertise() const {
+@@ -68,17 +69,20 @@ inline constexpr TargetConfiguration kFrankelTargetConfiguration{
+           {"PowerPhone R amp (bottom candidate) 192k", "POWERPHONE_C0_D0_BOTTOM"}}},
+ };
+ 
+-// Known PCM identities and proposed unique addresses ONLY. The preparatory
+-// Cubs route implementation is excluded by canAdvertiseDirection above.
+-// In particular, the experimental D10 firmware touches shared capture code;
+-// a sidecar mutex cannot exclude the proprietary primary/soundtrigger HALs.
+-// Do not fill rates or enable this descriptor until target-specific routing,
+-// shared-owner exclusion, cache-coherent boot activation and restart revocation
+-// are implemented and the exact PCM/API paths have real-hardware evidence.
++// Only the opt-in Cubs primary executable publishes these fixed profiles.
++// Target integration must remove all proprietary audio/soundtrigger owners.
++// CubsRoute independently requires the exact mono edge0/MCPS112 plus two-slot
++// speaker certificate for this boot before touching a mixer or PCM.
+ inline constexpr TargetConfiguration kCubsUnqualifiedTargetConfiguration{
++#ifdef POWERPHONE_CUBS_PRIMARY
++        "cubs", RouteBackend::CUBS_RESEARCH_PRIMARY,
++        {0, 10, 192000, 1920, 4, 1920, "vendor.powerphone.cubs.capture.ready", "SR_192K"},
++        {0, 5, 192000, 1920, 4, 1920, "vendor.powerphone.cubs.playback.ready", "SR_192K"},
++#else
+         "cubs", RouteBackend::CUBS_PREPARATORY,
+         {0, 10, 0, 0, 0, 0, "vendor.powerphone.cubs.capture.ready", ""},
+         {0, 5, 0, 0, 0, 0, "vendor.powerphone.cubs.playback.ready", ""},
++#endif
+         {{{"PowerPhone Cubs logical mic 0", "POWERPHONE_CUBS_C0_D10_MIC0"},
+           {"PowerPhone Cubs logical mic 1", "POWERPHONE_CUBS_C0_D10_MIC1"},
+           {"PowerPhone Cubs logical mic 2", "POWERPHONE_CUBS_C0_D10_MIC2"}}},
+diff --git a/audio/aidl/default/powerphone/main.cpp b/audio/aidl/default/powerphone/main.cpp
+index bdeaf1e..27cbc9b 100644
+--- a/audio/aidl/default/powerphone/main.cpp
++++ b/audio/aidl/default/powerphone/main.cpp
+@@ -24,12 +24,22 @@
+ #include <android/binder_process.h>
+ 
+ #include "Powerphone.h"
++#ifdef POWERPHONE_CUBS_PRIMARY
++#include <android-base/properties.h>
++#include "CubsServices.h"
++#endif
+ 
+ using aidl::android::hardware::audio::core::Module;
+ using aidl::android::hardware::audio::core::powerphone::ModulePowerphone;
+ using aidl::android::hardware::audio::core::powerphone::makeConfiguration;
+ 
+ int main() {
++#ifdef POWERPHONE_CUBS_PRIMARY
++    if (::android::base::GetProperty("ro.product.vendor.device", "") != "cubs") {
++        LOG(ERROR) << "Cubs primary executable refuses another vendor target";
++        return EXIT_FAILURE;
++    }
++#endif
+     auto config = makeConfiguration();
+     if (config == nullptr) {
+         LOG(ERROR) << "PowerPhone remains disabled for this vendor target";
+@@ -38,8 +48,27 @@ int main() {
+     ABinderProcess_setThreadPoolMaxThreadCount(8);
+     ABinderProcess_startThreadPool();
+ 
++#ifdef POWERPHONE_CUBS_PRIMARY
++    using namespace aidl::android::hardware::audio::core::powerphone;
++    auto systemConfig = ndk::SharedRefBase::make<CubsConfig>();
++    auto effects = ndk::SharedRefBase::make<CubsEmptyEffects>();
++    const std::string configInstance = std::string(CubsConfig::descriptor) + "/default";
++    const std::string effectsInstance = std::string(CubsEmptyEffects::descriptor) + "/default";
++    if (AServiceManager_addService(systemConfig->asBinder().get(), configInstance.c_str()) !=
++                STATUS_OK ||
++        AServiceManager_addService(effects->asBinder().get(), effectsInstance.c_str()) != STATUS_OK) {
++        LOG(ERROR) << "failed to register owned Cubs default configuration/effects services";
++        return EXIT_FAILURE;
++    }
++#endif
++
+     auto module = ndk::SharedRefBase::make<ModulePowerphone>(std::move(config));
+-    const std::string instance = std::string(Module::descriptor) + "/powerphone";
++    const std::string instance = std::string(Module::descriptor) +
++#ifdef POWERPHONE_CUBS_PRIMARY
++            "/default";
++#else
++            "/powerphone";
++#endif
+     const binder_status_t status = AServiceManager_addService(module->asBinder().get(),
+                                                               instance.c_str());
+     if (status != STATUS_OK) {

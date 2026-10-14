@@ -1,0 +1,123 @@
+--- a/audio/aidl/default/Stream.cpp
++++ b/audio/aidl/default/Stream.cpp
+@@ -615,6 +615,15 @@
+                     } else {
+                         switchToTransientState(*nextState);
+                     }
++                } else if (mDriver->isRetryableStartError(status)) {
++                    // START precedes the adapter's data-MQ write. Report that
++                    // this attempt was not admitted, preserving the previous
++                    // state so a later write can retry after the owner exits.
++                    // Do not turn contention into fake successful consumption
++                    // or let it strand a persistent primary mixer in ERROR.
++                    LOG(WARNING) << __func__ << ": temporarily refused output start: " << status;
++                    populateReply(&reply, mIsConnected);
++                    reply.status = STATUS_INVALID_OPERATION;
+                 } else {
+                     LOG(ERROR) << __func__ << ": start failed: " << status;
+                     mState = StreamDescriptor::State::ERROR;
+--- a/audio/aidl/default/include/core-impl/Stream.h
++++ b/audio/aidl/default/include/core-impl/Stream.h
+@@ -218,6 +218,11 @@
+     virtual ::android::status_t pause() = 0;
+     virtual ::android::status_t standby() = 0;
+     virtual ::android::status_t start() = 0;
++    // An opt-in driver can reject START due to temporary resource contention
++    // without poisoning the persistent output stream. It must leave its prior
++    // state intact and consume no client data on that failure. Other drivers
++    // retain the existing terminal-error behavior.
++    virtual bool isRetryableStartError(::android::status_t /*status*/) const { return false; }
+     virtual ::android::status_t transfer(void* buffer, size_t frameCount, size_t* actualFrameCount,
+                                          int32_t* latencyMs) = 0;
+     // No need to implement 'refinePosition' unless the driver can provide more precise
+--- a/audio/aidl/default/powerphone/Powerphone.cpp
++++ b/audio/aidl/default/powerphone/Powerphone.cpp
+@@ -26,6 +26,7 @@
+ #include <array>
+ #include <cerrno>
+ #include <chrono>
++#include <condition_variable>
+ #include <cstdint>
+ #include <limits>
+ #include <memory>
+@@ -247,18 +248,40 @@
+ }
+ 
+ std::mutex gPlaybackLeaseLock;
++std::condition_variable gPlaybackLeaseChanged;
+ const StreamPowerphone* gPlaybackLeaseOwner GUARDED_BY(gPlaybackLeaseLock) = nullptr;
+ 
+-bool acquirePlaybackLease(const StreamPowerphone* owner) {
+-    std::lock_guard lock(gPlaybackLeaseLock);
+-    if (gPlaybackLeaseOwner != nullptr && gPlaybackLeaseOwner != owner) return false;
++// Clang's capability analysis does not model std::unique_lock's release and
++// reacquire inside condition_variable::wait_until. Every owner access below
++// is nevertheless under that RAII lock; retain annotations on the shared data
++// and the independently checked release function.
++bool acquirePlaybackLease(const StreamPowerphone* owner) NO_THREAD_SAFETY_ANALYSIS {
++    std::unique_lock lock(gPlaybackLeaseLock);
++    if (kCubsPrimary) {
++        // Unlock/UI sounds can still be closing when a research BUS starts.
++        // Wait only for close-before-route-off lease release; never preempt
++        // an active PCM or hold the shared lock while waiting. Longer overlap
++        // remains unsupported and is returned as retryable START contention.
++        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
++        while (gPlaybackLeaseOwner != nullptr && gPlaybackLeaseOwner != owner) {
++            if (gPlaybackLeaseChanged.wait_until(lock, deadline) == std::cv_status::timeout &&
++                gPlaybackLeaseOwner != nullptr && gPlaybackLeaseOwner != owner) {
++                return false;
++            }
++        }
++    } else if (gPlaybackLeaseOwner != nullptr && gPlaybackLeaseOwner != owner) {
++        return false;
++    }
+     gPlaybackLeaseOwner = owner;
+     return true;
+ }
+ 
+ void releasePlaybackLease(const StreamPowerphone* owner) {
+     std::lock_guard lock(gPlaybackLeaseLock);
+-    if (gPlaybackLeaseOwner == owner) gPlaybackLeaseOwner = nullptr;
++    if (gPlaybackLeaseOwner == owner) {
++        gPlaybackLeaseOwner = nullptr;
++        if (kCubsPrimary) gPlaybackLeaseChanged.notify_all();
++    }
+ }
+ 
+ constexpr std::array<const char*, 11> kConflictingTdmRoutes{{
+@@ -1301,6 +1324,10 @@
+     return mDeviceProfiles;
+ }
+ 
++bool StreamPowerphone::isRetryableStartError(::android::status_t status) const {
++    return kCubsPrimary && !mIsInput && status == ::android::WOULD_BLOCK;
++}
++
+ ::android::status_t StreamPowerphone::start() {
+     if (!kTarget.canAdvertiseDirection(mIsInput)) return ::android::PERMISSION_DENIED;
+     // The direct PCM0,D0 hardware trial completed 60 seconds without an xrun
+@@ -1445,7 +1472,13 @@
+                        << " is absent or false; volatile AoC patch is not certified";
+             return ::android::PERMISSION_DENIED;
+         } else if (!acquirePlaybackLease(this)) {
+-            LOG(ERROR) << __func__ << ": PCM 0,0 is already owned by another sidecar stream";
++            if (kCubsPrimary) {
++                LOG(WARNING) << __func__ << ": PCM " << kPlaybackCard << ',' << kPlaybackDevice
++                             << " remains owned after bounded500-ms handoff wait; retryable START";
++            } else {
++                LOG(ERROR) << __func__ << ": PCM " << kPlaybackCard << ',' << kPlaybackDevice
++                           << " is already owned by another sidecar stream";
++            }
+             return ::android::WOULD_BLOCK;
+         } else if (!mConfig.has_value() ||
+                    mConfig->rate != static_cast<uint32_t>(kPlaybackRate) || mConfig->channels != 2 ||
+--- a/audio/aidl/default/powerphone/Powerphone.h
++++ b/audio/aidl/default/powerphone/Powerphone.h
+@@ -59,6 +59,7 @@
+     ::android::status_t pause() override;
+     ::android::status_t standby() override;
+     ::android::status_t start() override;
++    bool isRetryableStartError(::android::status_t status) const override;
+     ::android::status_t transfer(void* buffer, size_t frameCount, size_t* actualFrameCount,
+                                  int32_t* latencyMs) override;
+     ::android::status_t refinePosition(StreamDescriptor::Position* position) override;

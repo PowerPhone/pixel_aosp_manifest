@@ -1,0 +1,232 @@
+{
+  "profile": "cubs-15876290-polygon-exclusive-d10-native192-rfactor6-control",
+  "qualification": "UNTESTED experimentalRFactor-registerencoding;192k cadence and bandwidth NOT established",
+  "restrictions": [
+    "All framework/hotword/other capture clients stopped",
+    "D10 only, one selected physical microphone, S16_LE mono",
+    "Do not use stereo, Three, raw multi-mic, or concurrent AP capture",
+    "Requires independently established Cubs cache coherence and explicit I-cache flush",
+    "Restore all original bytes before restarting ordinary services; cold reboot if restoration is uncertain",
+    "Enum5 producer branch is repurposed as an exclusive-native7 code cave; no ordinary capture consumers"
+  ],
+  "geometry": {
+    "pdm_clock_requested_hz": 3200000,
+    "native_rate_enum": 7,
+    "dma_frames": 96,
+    "expected_block_seconds": 0.0005,
+    "mono_stage_s32_bytes": 384,
+    "mono_output_s16_bytes": 192,
+    "fixed_stage_plane_capacity_bytes": 768,
+    "native_rfactor_argument": 4,
+    "native_rfactor_register_offset": "0x28",
+    "native_rfactor_register_value": 6,
+    "register_encoding_experimental": true
+  },
+  "cache_flush": {
+    "dispatch_address": "0x402392b4",
+    "stock_dispatch_hex": "8cbf2740",
+    "wrapper_entry": "0x4027b24c",
+    "wrapper_dispatch_hex": "4cb22740",
+    "command": "HD Mic gain (cB)=0",
+    "expected_status": 64,
+    "requirement": "First apply from cold boot before any RAW capture; all ordinary HD senders stopped; NC host restores original dispatch immediately after status64; unexpected status means stop and cold reboot, not retry"
+  },
+  "patches": [
+    {
+      "name": "stream_rate",
+      "address": "0x40238845",
+      "before_hex": "0c56",
+      "after_hex": "0c76"
+    },
+    {
+      "name": "rfactor6_native_hook",
+      "address": "0x4024e31b",
+      "before_hex": "0c4526440e",
+      "after_hex": "c6de423df0"
+    },
+    {
+      "name": "restart_native_rate",
+      "address": "0x4025bf4a",
+      "before_hex": "0c6b",
+      "after_hex": "0c7b"
+    },
+    {
+      "name": "classify_native",
+      "address": "0x4025c335",
+      "before_hex": "266d33",
+      "after_hex": "f66d33"
+    },
+    {
+      "name": "configure_native_rate",
+      "address": "0x4025c3bb",
+      "before_hex": "0c6a",
+      "after_hex": "0c7a"
+    },
+    {
+      "name": "native_timebase",
+      "address": "0x4025cda3",
+      "before_hex": "8e9325ee9d93",
+      "after_hex": "7e9325ee9d93"
+    },
+    {
+      "name": "timestamp_expected_half_ms",
+      "address": "0x4025d7a4",
+      "before_hex": "8ee7bc590b93",
+      "after_hex": "8ee7b05a0b93"
+    },
+    {
+      "name": "notify_native",
+      "address": "0x4025e49f",
+      "before_hex": "266613",
+      "after_hex": "f66613"
+    },
+    {
+      "name": "fanout_native",
+      "address": "0x4025ee8b",
+      "before_hex": "26683d",
+      "after_hex": "f6683d"
+    },
+    {
+      "name": "rfactor6_native_cave",
+      "address": "0x4025ee9a",
+      "before_hex": "a22a1e3c079d0bfd0cbe21a2070a61",
+      "after_hex": "0c456644060c652c848622bd861dbd"
+    },
+    {
+      "name": "ap_rate_admission_hook",
+      "address": "0x4027a09c",
+      "before_hex": "064c00",
+      "after_hex": "06ba02"
+    },
+    {
+      "name": "normal_bytes",
+      "address": "0x4027aac1",
+      "before_hex": "aee2a89e2a93",
+      "after_hex": "aee2a49e2a93"
+    },
+    {
+      "name": "normal_samples",
+      "address": "0x4027ab01",
+      "before_hex": "3e3ab09f0d93",
+      "after_hex": "3e3abc9e0d93"
+    },
+    {
+      "name": "raw_direct_return",
+      "address": "0x4027ab76",
+      "before_hex": "3e0648d9d9b68e44208fec921e8444c592d1",
+      "after_hex": "32d2083203588c53ad02bd06e5b100064a00"
+    },
+    {
+      "name": "ap_rate_admission_cave",
+      "address": "0x4027ab88",
+      "before_hex": "8a8272afff76892c9808fd059e9b",
+      "after_hex": "2674024690fddd07c2a5dc068ffd"
+    },
+    {
+      "name": "raw_stage_finish_cave",
+      "address": "0x4027ab98",
+      "before_hex": "dd94be998d6a9d93baaa40e9",
+      "after_hex": "8811cc4832d208c6cb011df0"
+    },
+    {
+      "name": "raw_bytes",
+      "address": "0x4027abbd",
+      "before_hex": "5e44280eea92",
+      "after_hex": "5e44240eea92"
+    },
+    {
+      "name": "stage_gate",
+      "address": "0x4027b22f",
+      "before_hex": "1e0640dfdd92",
+      "after_hex": "b0b711860f00"
+    },
+    {
+      "name": "stage_count_cave",
+      "address": "0x4027b235",
+      "before_hex": "3a62ad02bd062581008e",
+      "after_hex": "fa22e2a0600c0bc62b00"
+    },
+    {
+      "name": "cache_wrapper",
+      "address": "0x4027b240",
+      "before_hex": "289eec92f2a3008aa2f0c963bd06818f71e00800322101a61440c0871176880e880692c81f8098b390852189064b",
+      "after_hex": "b492234054d02540d085304036410041fcff82740262740041fbff827402627400c0200081f9ffe008002d0a1df0"
+    },
+    {
+      "name": "stage_publish",
+      "address": "0x4027b2b1",
+      "before_hex": "a0c711",
+      "after_hex": "90c711"
+    },
+    {
+      "name": "raw_stage_finish_hook",
+      "address": "0x4027b2cf",
+      "before_hex": "32d208",
+      "after_hex": "4631fe"
+    },
+    {
+      "name": "stage_count_hook",
+      "address": "0x4027b2e9",
+      "before_hex": "fa223c0e0c0b",
+      "after_hex": "06d2fff02000"
+    },
+    {
+      "name": "mono_unshifted_source",
+      "address": "0x4027b6a9",
+      "before_hex": "4e34ba111183",
+      "after_hex": "4e34ba111985"
+    },
+    {
+      "name": "mono_count_hook",
+      "address": "0x4027b6b8",
+      "before_hex": "0ea4098f4993",
+      "after_hex": "0ec40bcf4993"
+    },
+    {
+      "name": "mono_count_cave",
+      "address": "0x4027b6f2",
+      "before_hex": "000000000000",
+      "after_hex": "72a06006f2ff"
+    },
+    {
+      "name": "raw_output_bytes",
+      "address": "0x4027b721",
+      "before_hex": "b03411",
+      "after_hex": "a03411"
+    },
+    {
+      "name": "allowed_rate_mask",
+      "address": "0x4028c55a",
+      "before_hex": "5e026008e9ce",
+      "after_hex": "5e126008e9ce"
+    },
+    {
+      "name": "allowed_rate_bound",
+      "address": "0x4028c568",
+      "before_hex": "f674d5",
+      "after_hex": "f684d5"
+    }
+  ],
+  "guards": [
+    {
+      "address": "0x4027a618",
+      "expected_hex": "4e062ee242872c86a154fc6e156e8e02"
+    },
+    {
+      "address": "0x4025d1e0",
+      "expected_hex": "30c662"
+    },
+    {
+      "address": "0x402392b4",
+      "expected_hex": "8cbf2740"
+    },
+    {
+      "address": "0x403085d0",
+      "expected_hex": "36210022a04032a00076820ef27300f27310f27320f2733032d3010020001df0"
+    },
+    {
+      "address": "0x4025d054",
+      "expected_hex": "00d43000"
+    }
+  ]
+}
