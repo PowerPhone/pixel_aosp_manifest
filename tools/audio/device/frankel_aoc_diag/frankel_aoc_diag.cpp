@@ -15,6 +15,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -29,7 +30,12 @@
 namespace frankel_aoc_diag {
 namespace {
 
-constexpr std::string_view kExpectedDevice = "frankel";
+// Transport is shared; each target binary retains a fixed product guard.
+// This does not make memory maps or firmware patch manifests portable.
+#ifndef POWERPHONE_AOC_TARGET
+#define POWERPHONE_AOC_TARGET "frankel"
+#endif
+constexpr std::string_view kExpectedDevice = POWERPHONE_AOC_TARGET;
 constexpr char kFactoryDiag[] = "/dev/acd-factory_diag";
 constexpr char kDebugDevice[] = "/dev/acd-debug";
 // Share the existing speaker patcher's lock so the two native transports
@@ -142,7 +148,7 @@ bool CheckTarget(std::string* error) {
   const std::string_view actual(device.data(), static_cast<std::size_t>(length));
   if (actual != kExpectedDevice) {
     *error = "refusing ro.product.device=" + std::string(actual) +
-             "; expected frankel";
+             "; expected " + std::string(kExpectedDevice);
     return false;
   }
   for (const char* path : {kFactoryDiag, kDebugDevice}) {
@@ -379,6 +385,38 @@ bool ParseMemoryDump(std::string_view debug_output, uint32_t address,
                      std::size_t size, std::vector<uint8_t>* result,
                      std::string* error) {
   result->assign(size, 0);
+  // Cubs uses a word-oriented diagnostic line for an aligned 4-byte request.
+  // Its value is a numeric little-endian word, not four textual byte tokens.
+  if (size == 4 && (address & 3) == 0) {
+    std::ostringstream label;
+    label << "Register 0x" << std::hex << std::setfill('0') << std::setw(8)
+          << address << ": 0x";
+    const std::string prefix = label.str();
+    const auto at = debug_output.find(prefix);
+    if (at != std::string_view::npos) {
+      const auto begin = at + prefix.size();
+      auto end = begin;
+      while (end < debug_output.size() && end - begin < 8 &&
+             HexDigit(debug_output[end]) >= 0) {
+        ++end;
+      }
+      if (end > begin && end < debug_output.size() &&
+          (debug_output[end] == '\n' || IsHorizontalSpace(debug_output[end]))) {
+        uint32_t word = 0;
+        const auto parsed = std::from_chars(debug_output.data() + begin,
+                                            debug_output.data() + end,
+                                            word, 16);
+        if (parsed.ec == std::errc{} &&
+            parsed.ptr == debug_output.data() + end) {
+          for (unsigned int i = 0; i < 4; ++i) {
+            (*result)[i] = static_cast<uint8_t>(word >> (8 * i));
+          }
+          error->clear();
+          return true;
+        }
+      }
+    }
+  }
   std::vector<bool> covered(size, false);
   std::size_t covered_count = 0;
   std::size_t cursor = 0;
@@ -451,6 +489,7 @@ bool ParseMemoryDump(std::string_view debug_output, uint32_t address,
       }
     }
     if (covered_count == size) {
+      error->clear();  // An earlier partial debug read is not a final failure.
       return true;
     }
     cursor = std::max(position, prefix + 2);
@@ -551,6 +590,9 @@ class FactoryDiag {
       const ssize_t count = read(debug_fd.get(), buffer.data(), buffer.size());
       if (count > 0) {
         debug.append(buffer.data(), static_cast<std::size_t>(count));
+        if (std::getenv("POWERPHONE_AOC_DIAG_DEBUG")) {
+          std::cerr.write(buffer.data(), count);
+        }
         if (ParseMemoryDump(debug, address, size, bytes, error)) {
           return true;
         }

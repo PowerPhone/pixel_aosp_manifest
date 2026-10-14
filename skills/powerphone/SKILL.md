@@ -30,6 +30,9 @@ use the authorization and recovery boundary of the current task.
   never be copied to another phone.
 - For wrong pitch, repeated fragments, or a DSP path widened from a lower
   rate, read [references/playback-frame-accounting.md](references/playback-frame-accounting.md).
+- For a research primary replacement or Cubs-specific bring-up, read
+  [references/cubs-lessons.md](references/cubs-lessons.md). Do not transplant
+  its amplifier assumptions, firmware sites or ALSA startup thresholds.
 
 ## Work in evidence gates
 

@@ -96,6 +96,42 @@ and do not advertise three-channel Android API capture.
 The reusable [PowerPhone skill](skills/powerphone/SKILL.md) records the general
 hardware-to-API workflow and the measured failure modes.
 
+### Pixel 11 PowerPhone research release
+
+The separately packaged [Cubs PowerPhone image](artifacts/cubs-powerphone-192k-20260923/)
+passed a real 14-image flash, repeat boot, all ten isolated endpoint/API tests,
+and direct/API acoustic-continuity trials. Both speakers have 192-kHz serial
+transport; all three microphones have selectable native 192-kHz capture.
+The [qualification report](docs/cubs-powerphone-qualification-20260923.md)
+indexes the original WAVs, near-Nyquist microphone noise ramps and limitations.
+**TAS2572 internally downsamples playback to 96 kHz: this is not a 96-kHz
+speaker acoustic passband.** The original Cubs OS and Frankel bundles are unchanged.
+
+The replacement primary initializes automatically before launcher; there is no
+host warm-up. See the [Java/AAudio and boot guide](docs/cubs-audio-api.md).
+One input and output can operate together, but research and UI playback cannot
+mix concurrently on the single hardware output. Calls, Bluetooth audio,
+headsets and hotword are not implemented by this research primary. Simultaneous
+RAW3 remains a separate direct experiment, not the boot/API profile.
+
+Direct hardware scripts live in [`scripts/audio/cubs/`](scripts/audio/cubs/);
+target-specific firmware/kernel tools and experiment history are in
+[`tools/audio/cubs/`](tools/audio/cubs/). The direct wrappers stop ordinary
+Android audio until reboot; API tests use the running research primary.
+Do not apply Frankel firmware addresses or amplifier routing to Cubs.
+
+Additional research dependencies are Python 3, GNU coreutils, `sudo`, `cpio`,
+`lz4`, host `binutils` (including `readelf`), `binutils-aarch64-linux-gnu`,
+and NumPy/SciPy/Matplotlib for measured-WAV
+analysis. Builds reuse the AOSP Clang/sysroot, boot-image host tools and
+recovered Sky1 Xtensa assembler/linker; ordinary GNU ARM binutils cannot
+assemble the DSP payloads. Use the workspace's Platform-Tools 37.0.1 with
+`ADB_LIBUSB=1` and ADB server port 5038 on the tested WSL USB setup.
+Image/policy assembly also uses the matching AOSP host `mkfs.erofs`,
+`sefcontext_compile`, `secilc` and `sepolicy-analyze` outputs; preserving captured
+UID/GID ownership requires noninteractive `sudo` for the image builder. Cubs
+direct WAV transfers use ADB `-Z` after a real compressed-upload timeout.
+
 ### Pixel 10 stock-compatible baseline qualification (historical)
 
 > **The hardened complete `frankel` bundle boots on real hardware.** Its
@@ -116,7 +152,7 @@ hardware-to-API workflow and the measured failure modes.
 > [`docs/frankel-validation.md`](docs/frankel-validation.md) for hashes and the
 > exact qualification boundary.
 
-### Pixel 11 qualification status (Cubs-only)
+### Pixel 11 original OS-bundle qualification (historical)
 
 > **The corrected complete `cubs` bundle boots on real hardware, but broader
 > qualification remains incomplete.** It was flashed with its packaged

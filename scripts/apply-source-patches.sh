@@ -190,7 +190,13 @@ apply_stack \
   "$project_root/patches/hardware-interfaces/0025-retain-d5-idle-silence-refill-headroom.patch" \
   "$project_root/patches/hardware-interfaces/0026-pace-d5-through-one-millisecond-fastmixer.patch" \
   "$project_root/patches/hardware-interfaces/0027-amortize-d5-fastmixer-fmq-round-trips.patch" \
-  "$project_root/patches/hardware-interfaces/0028-diagnose-d5-playback-transfer-timing.patch"
+  "$project_root/patches/hardware-interfaces/0028-diagnose-d5-playback-transfer-timing.patch" \
+  "$project_root/patches/hardware-interfaces/0029-separate-qualified-target-audio-contracts.patch" \
+  "$project_root/patches/hardware-interfaces/0030-add-disabled-cubs-tinyalsa-route-backend.patch" \
+  "$project_root/patches/hardware-interfaces/0031-add-opt-in-cubs-research-primary-hal.patch" \
+  "$project_root/patches/hardware-interfaces/0032-match-cubs-tinyplay-half-ring-start.patch" \
+  "$project_root/patches/hardware-interfaces/0033-release-cubs-capture-route-on-input-flush.patch" \
+  "$project_root/patches/hardware-interfaces/0034-retry-cubs-playback-start-contention.patch"
 
 apply_stack \
   "$source_dir/system/core" \
